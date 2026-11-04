@@ -170,10 +170,12 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
       const bound = bindContextFile(path, text);
       const value = { text, bound }; files.set(path, value);
       if (bound.hasErrors) addDiagnostic("typescript_syntax_errors", path);
-      for (const edge of relationships.filter(e => e.source.file === path)) {
-        add({ kind: "relationship", reason: "target_file_import", relationship: edge });
-        if (edge.freshness !== "current" || (edge.resolution.status !== "resolved" && edge.resolution.status !== "external") || edge.resolution.coverage === "conditional")
-          addDiagnostic("import_not_fully_resolved", path, `${edge.resolution.source.target}: ${edge.resolution.reason}`);
+      if (path === target.file_path) {
+        for (const edge of relationships.filter(e => e.source.file === path)) {
+          add({ kind: "relationship", reason: "target_file_import", relationship: edge });
+          if (edge.freshness !== "current" || (edge.resolution.status !== "resolved" && edge.resolution.status !== "external") || edge.resolution.coverage === "conditional")
+            addDiagnostic("import_not_fully_resolved", path, `${edge.resolution.source.target}: ${edge.resolution.reason}`);
+        }
       }
       // Initializers and decorators can execute independently of references.
       // Retain relationships and explicitly decline module-execution closure.
@@ -189,8 +191,18 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
         addDiagnostic("module_execution_or_reexport_not_expanded", path);
       return value;
     };
-    const walk = async (path: string, node: ts.Node, depth: number, reason: SourceItem["reason"]) => {
-      signal?.throwIfAborted();
+    const isTypeOnlyImportBinding = (declaration: ts.ImportDeclaration, exportedName: string): boolean => {
+      if (declaration.importClause?.isTypeOnly) return true;
+      const bindings = declaration.importClause?.namedBindings;
+      if (bindings && ts.isNamedImports(bindings)) {
+        const matching = bindings.elements.filter(el => (el.propertyName ?? el.name).text === exportedName);
+        if (matching.length > 0 && matching.every(el => el.isTypeOnly)) return true;
+      }
+      return false;
+    };
+    type QueuedNode = { path: string; node: ts.Node; depth: number; reason: SourceItem["reason"]; typeOnlyClass: boolean };
+    const expansionQueue: QueuedNode[] = [];
+    const enqueueNode = (path: string, node: ts.Node, depth: number, reason: SourceItem["reason"], typeOnlyClass = false) => {
       const key = `${path}:${node.pos}:${node.end}`;
       if (visited.has(key)) return;
       visited.add(key);
@@ -204,27 +216,72 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
         const name = indexed?.name ?? ("name" in node ? (node as ts.NamedDeclaration).name?.getText(file.bound.source) : undefined) ?? "local_declaration";
         addSource(path, file.text, { name, line_start: start, line_end: end }, reason);
       }
-      const refs = file.bound.references(node);
-      for (const local of refs.locals) await walk(path, local, depth, "local_dependency");
+      expansionQueue.push({ path, node, depth, reason, typeOnlyClass });
+    };
+    const expandReferences = async (entry: QueuedNode) => {
+      signal?.throwIfAborted();
+      const file = load(entry.path);
+      if (!file) return;
+      const refs = file.bound.references(entry.node);
+      for (const local of refs.locals) {
+        if (entry.depth === 0) {
+          // For the target file (depth 0), emit and expand local helpers immediately before cross-file imports
+          const prevLen = expansionQueue.length;
+          enqueueNode(entry.path, local, 0, "local_dependency", entry.typeOnlyClass);
+          while (expansionQueue.length > prevLen) {
+            const localEntry = expansionQueue.pop()!;
+            await expandReferences(localEntry);
+          }
+        } else {
+          enqueueNode(entry.path, local, entry.depth, "local_dependency", entry.typeOnlyClass);
+        }
+      }
+      const deferredTypeOnlyClassImports: Array<{ dependencyPath: string; effectiveNames: string[]; depth: number }> = [];
       for (const [declaration, names] of refs.imports) {
+        const sortedNames = [...names].sort();
+        const typeOnlyByName = new Map<string, boolean>();
+        for (const n of sortedNames) typeOnlyByName.set(n, isTypeOnlyImportBinding(declaration, n));
+        if (entry.typeOnlyClass && sortedNames.every(n => !typeOnlyByName.get(n))) {
+          unexpandedFiles++; addDiagnostic("type_only_class_runtime_import_not_expanded", entry.path, declaration.getText()); continue;
+        }
+        const effectiveNames = entry.typeOnlyClass ? sortedNames.filter(n => typeOnlyByName.get(n)) : sortedNames;
         const line = file.bound.source.getLineAndCharacterOfPosition(declaration.getStart()).line + 1;
         const moduleName = ts.isStringLiteral(declaration.moduleSpecifier) ? declaration.moduleSpecifier.text : undefined;
-        const edge = relationships.find(e => e.source.file === path && e.source.line === line &&
+        const edge = relationships.find(e => e.source.file === entry.path && e.source.line === line &&
           e.resolution.source.target === moduleName);
         if (!edge || edge.freshness !== "current" || edge.resolution.status !== "resolved" || edge.resolution.coverage === "conditional") {
-          addDiagnostic("referenced_import_not_expanded", path, declaration.getText()); continue;
+          addDiagnostic("referenced_import_not_expanded", entry.path, declaration.getText()); continue;
         }
         const paths = [...new Set(edge.resolution.targets.flatMap(t => t.files))];
-        if (depth >= 3 || paths.length !== 1 || names.has("*")) {
-          unexpandedFiles++; addDiagnostic("dependency_depth_or_binding_limit", path, declaration.getText()); continue;
+        if (entry.depth >= 3 || paths.length !== 1 || names.has("*")) {
+          unexpandedFiles++; addDiagnostic("dependency_depth_or_binding_limit", entry.path, declaration.getText()); continue;
         }
         const dependencyPath = paths[0]!;
+        const depFileRecord = repo.getFileByPath(dependencyPath);
+        const depSymbols = depFileRecord ? repo.getSymbolsByFileId(depFileRecord.id) : [];
+        const isAllTypeOnlyClass = effectiveNames.length > 0 && effectiveNames.every(
+          n => Boolean(typeOnlyByName.get(n)) && depSymbols.some(s => s.name === n && s.kind === "class")
+        );
+        if (isAllTypeOnlyClass) {
+          deferredTypeOnlyClassImports.push({ dependencyPath, effectiveNames, depth: entry.depth + 1 });
+          continue;
+        }
         const dependency = load(dependencyPath);
         if (!dependency) continue;
-        for (const name of [...names].sort()) {
+        for (const name of effectiveNames) {
           const selected = dependency.bound.exported(name);
           if (!selected) { addDiagnostic("export_binding_not_resolved", dependencyPath, name); continue; }
-          await walk(dependencyPath, selected, depth + 1, "direct_import_declaration");
+          const nextTypeOnlyClass = Boolean(typeOnlyByName.get(name)) && ts.isClassDeclaration(selected);
+          enqueueNode(dependencyPath, selected, entry.depth + 1, "direct_import_declaration", nextTypeOnlyClass);
+        }
+      }
+      for (const deferred of deferredTypeOnlyClassImports) {
+        const dependency = load(deferred.dependencyPath);
+        if (!dependency) continue;
+        for (const name of deferred.effectiveNames) {
+          const selected = dependency.bound.exported(name);
+          if (!selected) { addDiagnostic("export_binding_not_resolved", deferred.dependencyPath, name); continue; }
+          enqueueNode(deferred.dependencyPath, selected, deferred.depth, "direct_import_declaration", ts.isClassDeclaration(selected));
         }
       }
       if (visited.size % 8 === 0) await new Promise<void>(done => setTimeout(done, 0));
@@ -235,7 +292,10 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
       if (targetFile!.bound.source.getLineAndCharacterOfPosition(declaration.getStart()).line + 1 !== target.line_start ||
           targetFile!.bound.source.getLineAndCharacterOfPosition(declaration.end).line + 1 !== target.line_end)
         addDiagnostic("enclosing_declaration_reference_scope", target.file_path);
-      await walk(target.file_path, declaration, 0, "target_implementation");
+      enqueueNode(target.file_path, declaration, 0, "target_implementation");
+      while (expansionQueue.length > 0) {
+        await expandReferences(expansionQueue.shift()!);
+      }
     }
     else addDiagnostic("target_ast_declaration_not_found", target.file_path);
     return items;

@@ -901,7 +901,9 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
   }
 
   if (!obj.action) {
-    if (obj.include_dependencies !== undefined || obj.include_source !== undefined || obj.budget_bytes !== undefined) {
+    if (obj.budget_bytes !== undefined || obj.continuation !== undefined) {
+      obj.action = "context";
+    } else if (obj.include_dependencies !== undefined || obj.include_source !== undefined) {
       obj.action = "inspect";
     } else {
       obj.action = "locate";

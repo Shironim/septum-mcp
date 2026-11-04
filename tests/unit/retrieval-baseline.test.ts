@@ -408,4 +408,37 @@ describe("TypeScript selective retrieval manual oracle", () => {
       expect(repo.getMeta("sync_state")).toBe("complete"); // A read must not mutate session/index state.
     } finally { intercepted.mockRestore(); }
   });
+
+  it("prioritizes direct value imports over type-only class imports and prunes runtime collaborators of type-only classes", async () => {
+    put("src/collab.ts", 'export class HeavyCollaborator {\n  compute() { return "' + "c".repeat(500) + '"; }\n}\n');
+    put("src/repo-facade.ts", [
+      'import { HeavyCollaborator } from "./collab";',
+      "export class RepoFacade {",
+      "  private collab = new HeavyCollaborator();",
+      "  run() { return this.collab.compute(); }",
+      "}",
+    ].join("\n"));
+    put("src/step-a.ts", "export function stepA(x: number) { return x + 1; }\n");
+    put("src/step-b.ts", "export function stepB(x: number) { return x * 2; }\n");
+    put("src/orchestrator.ts", [
+      'import type { RepoFacade } from "./repo-facade";',
+      'import { stepA } from "./step-a";',
+      'import { stepB } from "./step-b";',
+      "export function orchestrate(repo: RepoFacade, val: number) {",
+      "  return stepB(stepA(val)) + (repo ? 0 : 1);",
+      "}",
+    ].join("\n"));
+    await pipeline.run(config);
+
+    // Also verify budget_bytes infers action="context" when action is omitted
+    const inferred = SymbolToolSchema.parse({ query: "orchestrate", file_path: "src/orchestrator.ts", budget_bytes: 65536 });
+    expect(inferred.action).toBe("context");
+
+    const ctx = await tool(inferred);
+    const sourceNames = ctx.items.filter((i: any) => i.kind === "source").map((i: any) => i.name);
+    expect(sourceNames).toEqual(["orchestrate", "stepB", "stepA", "RepoFacade"]);
+    expect(sourceNames).not.toContain("HeavyCollaborator");
+    expect(ctx.items.some((i: any) => i.kind === "diagnostic" && i.reason === "type_only_class_runtime_import_not_expanded")).toBe(true);
+    expect(ctx.completeness).toBe("partial");
+  });
 });
