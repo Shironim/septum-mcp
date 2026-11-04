@@ -408,7 +408,13 @@ export class CallGraphTracer {
 
         const stage = this.detectStage(resolvedFile.path, resolvedFile.archetype);
         const fileSymbols = this.symbolsByFileId.get(resolvedFile.id) || [];
+        const importedNames = this.extractImportedSymbolNames(dep.statement);
+        const matchedImportedSymbol =
+          importedNames.length > 0
+            ? fileSymbols.find((s) => importedNames.includes(s.name))
+            : undefined;
         const mainSymbol =
+          matchedImportedSymbol ||
           fileSymbols.find((s) => s.kind === "class" || s.kind === "interface") ||
           fileSymbols.find((s) => s.kind === "function") ||
           fileSymbols[0];
@@ -461,6 +467,35 @@ export class CallGraphTracer {
     if (chain.length > CallGraphTracer.MAX_CHAIN_NODES) {
       chain.length = CallGraphTracer.MAX_CHAIN_NODES;
     }
+  }
+
+  private extractImportedSymbolNames(statement: string): string[] {
+    if (!statement) return [];
+    const names = new Set<string>();
+    const braceMatch = statement.match(/\{([^}]+)\}/);
+    if (braceMatch) {
+      for (const spec of braceMatch[1].split(",")) {
+        const cleaned = spec.trim().replace(/^type\s+/, "");
+        const parts = cleaned.split(/\s+as\s+/);
+        for (const p of parts) {
+          const id = p.trim();
+          if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(id)) names.add(id);
+        }
+      }
+    }
+    const defaultMatch = statement.match(/^\s*import\s+(?:type\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s+from\b/);
+    if (defaultMatch) names.add(defaultMatch[1]);
+    const pyMatch = statement.match(/\bfrom\s+[^\s]+\s+import\s+([^;(\n]+)/);
+    if (pyMatch) {
+      for (const spec of pyMatch[1].split(",")) {
+        const parts = spec.trim().split(/\s+as\s+/);
+        const id = (parts[0] || "").trim();
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(id)) names.add(id);
+      }
+    }
+    const phpMatch = statement.match(/^\s*use\s+(?:function\s+|const\s+)?[A-Za-z0-9_\\]+\\([A-Za-z0-9_]+)/);
+    if (phpMatch) names.add(phpMatch[1]);
+    return Array.from(names);
   }
 
   /**

@@ -157,8 +157,8 @@ export class SymbolRepository {
       SELECT s.*, f.path AS file_path
       FROM symbols s
       JOIN files f ON s.file_id = f.id
-      WHERE s.kind IN ('class', 'method', 'function')
-      ORDER BY s.name ASC
+      WHERE s.kind IN ('class', 'interface', 'trait', 'struct', 'enum', 'type', 'method', 'function', 'constant')
+      ORDER BY s.line_start ASC, s.name ASC
     `;
     return this.db.query<SymbolRecord & { file_path: string }, []>(query).all();
   }
@@ -295,20 +295,130 @@ export class SymbolRepository {
     const shouldIncludeDeps = options.includeDependencies !== false;
 
     if (shouldIncludeDeps) {
+      const varTypes = new Map<string, string>();
+      const primitiveTypes = new Set([
+        "int", "string", "str", "bool", "boolean", "float", "double", "decimal",
+        "number", "bigint", "symbol", "array", "list", "dict", "tuple", "set",
+        "iterable", "callable", "function", "void", "mixed", "object", "null",
+        "undefined", "never", "any", "unknown", "true", "false", "record",
+        "partial", "omit", "pick", "readonly", "required", "promise", "map",
+        "weakmap", "weakset", "date", "error", "regexp", "buffer", "abortsignal",
+        "uint8array", "self", "cls",
+      ]);
+      const modifierWords = new Set([
+        "public", "private", "protected", "readonly", "final", "var", "val",
+        "mut", "ref", "in", "out", "params", "async",
+      ]);
+
+      const splitTopLevel = (input: string, delimiter: string): string[] => {
+        const result: string[] = [];
+        let current = "";
+        let depth = 0;
+        for (let i = 0; i < input.length; i++) {
+          const ch = input[i];
+          if (ch === "(" || ch === "<" || ch === "[" || ch === "{") depth++;
+          else if (ch === ")" || ch === ">" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+          if (depth === 0 && input.startsWith(delimiter, i)) {
+            result.push(current);
+            current = "";
+            i += delimiter.length - 1;
+          } else {
+            current += ch;
+          }
+        }
+        if (current.trim()) result.push(current);
+        return result;
+      };
+
+      const registerTypeToken = (rawToken: string, paramName?: string) => {
+        let token = rawToken.trim()
+          .replace(/^\?+/, "")
+          .replace(/^&+/, "")
+          .replace(/^\*+/, "")
+          .replace(/\[\]$/, "")
+          .replace(/<.*>$/s, "")
+          .replace(/^[\\$]/, "")
+          .trim();
+        if (token.includes("\\")) token = token.split("\\").pop() || token;
+        if (token.includes(".")) token = token.split(".").pop() || token;
+        if (!token || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(token)) return;
+        if (primitiveTypes.has(token.toLowerCase()) || modifierWords.has(token.toLowerCase())) return;
+        dependenciesInjected.add(token);
+        if (paramName && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(paramName) && !varTypes.has(paramName)) {
+          varTypes.set(paramName, token);
+        }
+      };
+
       const extractTypeHints = (sig: string) => {
-        const paramMatch = sig.match(/\(([^)]*)\)/);
-        if (paramMatch && paramMatch[1]) {
-          const params = paramMatch[1].split(",");
-          const primitiveTypes = new Set([
-            "int", "string", "bool", "boolean", "float", "array", "iterable",
-            "callable", "void", "mixed", "object", "null", "never", "any", "number", "unknown"
-          ]);
-          for (const p of params) {
-            const parts = p.trim().replace(/^\?/, "").split(/\s+/);
+        const openIdx = sig.indexOf("(");
+        if (openIdx === -1) return;
+        let closeIdx = -1;
+        let depth = 0;
+        for (let i = openIdx; i < sig.length; i++) {
+          if (sig[i] === "(") depth++;
+          else if (sig[i] === ")") {
+            depth--;
+            if (depth === 0) {
+              closeIdx = i;
+              break;
+            }
+          }
+        }
+        if (closeIdx <= openIdx + 1) return;
+        const paramBlock = sig.slice(openIdx + 1, closeIdx);
+        const params = splitTopLevel(paramBlock, ",");
+        const isGo = /\.go$/i.test(row.file_path);
+
+        for (const rawParam of params) {
+          let p = rawParam.trim();
+          if (!p) continue;
+          // Strip top-level default value `= ...` (ignoring `=>` in arrow types)
+          let eqDepth = 0;
+          for (let i = 0; i < p.length; i++) {
+            const ch = p[i];
+            if (ch === "(" || ch === "<" || ch === "[" || ch === "{") eqDepth++;
+            else if (ch === ")" || ch === ">" || ch === "]" || ch === "}") eqDepth = Math.max(0, eqDepth - 1);
+            else if (eqDepth === 0 && ch === "=" && p[i + 1] !== ">" && p[i - 1] !== "!" && p[i - 1] !== "=" && p[i - 1] !== "<" && p[i - 1] !== ">") {
+              p = p.slice(0, i).trim();
+              break;
+            }
+          }
+          // Check for top-level colon `param: Type` (TypeScript, Python, etc.)
+          let colonIdx = -1;
+          let colDepth = 0;
+          for (let i = 0; i < p.length; i++) {
+            const ch = p[i];
+            if (ch === "(" || ch === "<" || ch === "[" || ch === "{") colDepth++;
+            else if (ch === ")" || ch === ">" || ch === "]" || ch === "}") colDepth = Math.max(0, colDepth - 1);
+            else if (colDepth === 0 && ch === ":" && p[i + 1] !== ":" && p[i - 1] !== ":") {
+              colonIdx = i;
+              break;
+            }
+          }
+
+          if (colonIdx !== -1) {
+            const leftTokens = p.slice(0, colonIdx).trim().replace(/^\.{3}/, "").split(/\s+/)
+              .filter(t => !modifierWords.has(t.toLowerCase()));
+            const rawParamName = (leftTokens.pop() || "").replace(/\?$/, "").replace(/^\$/, "");
+            const typeExpr = p.slice(colonIdx + 1).trim();
+            if (typeExpr.startsWith("{") || typeExpr.startsWith("(") || typeExpr.startsWith("[")) continue;
+            // Support generic wrappers like Promise<Type> or Array<Type> or union TypeA | TypeB
+            for (const branch of splitTopLevel(typeExpr, "|")) {
+              const trimmedBranch = branch.trim();
+              const wrapperMatch = /^(?:Promise|Array|ReadonlyArray|Partial|Required|Readonly)\s*<(.+)>$/s.exec(trimmedBranch);
+              registerTypeToken(wrapperMatch ? wrapperMatch[1] : trimmedBranch, rawParamName);
+            }
+          } else {
+            const parts = p.replace(/^\.{3}/, "").split(/\s+/).filter(t => !modifierWords.has(t.toLowerCase()));
             if (parts.length >= 2) {
-              const rawType = parts[0].replace(/\[\]$/, "").replace(/^[\\$]/, "");
-              if (rawType && !primitiveTypes.has(rawType.toLowerCase()) && !rawType.startsWith("$")) {
-                dependenciesInjected.add(rawType);
+              if (isGo) {
+                const rawParamName = parts[0];
+                const rawType = parts[parts.length - 1];
+                registerTypeToken(rawType, rawParamName);
+              } else {
+                const rawType = parts[0];
+                const rawParamName = parts[1].replace(/^[$&]+/, "");
+                registerTypeToken(rawType, rawParamName);
               }
             }
           }
@@ -318,13 +428,20 @@ export class SymbolRepository {
       // Rust parameter types do not establish a dependency injection binding.
       if (!isRust) extractTypeHints(row.signature);
 
-      // Also check constructor injection if this is a method
-      if (containerName && !isRust) {
+      // Also check constructor injection if this is a method or class
+      const classOwner = containerName || (row.kind === "class" ? row.name : "");
+      if (classOwner && !isRust) {
         const ctor = this.db
-          .query<{ signature: string }, [number, string, string]>(
-            "SELECT signature FROM symbols WHERE file_id = ? AND (name = ? OR name LIKE ?) LIMIT 1"
+          .query<{ signature: string }, [number, string, string, string, string]>(
+            "SELECT signature FROM symbols WHERE file_id = ? AND (name = ? OR name = ? OR name = ? OR name LIKE ?) LIMIT 1"
           )
-          .get(row.file_id, `${containerName}::__construct`, `%::__construct`);
+          .get(
+            row.file_id,
+            `${classOwner}::__construct`,
+            `${classOwner}::constructor`,
+            `${classOwner}::__init__`,
+            `%::__construct`
+          );
         if (ctor) {
           extractTypeHints(ctor.signature);
         }
@@ -345,6 +462,14 @@ export class SymbolRepository {
           const rawSlice = lines.slice(start, end).join("\n");
           const sanitizedSlice = stripCommentsAndStrings(rawSlice);
 
+          // Track local `new ClassName(...)` assignments inside the symbol slice
+          for (const m of sanitizedSlice.matchAll(/(?:const|let|var)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*new\s+([A-Z][a-zA-Z0-9_]*)\s*\(/g)) {
+            varTypes.set(m[1], m[2]);
+          }
+          for (const m of sanitizedSlice.matchAll(/\$([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*new\s+([A-Z][a-zA-Z0-9_]*)\s*\(/g)) {
+            varTypes.set(m[1], m[2]);
+          }
+
           // Match Static invocations: ClassName::methodName(
           const staticCalls = sanitizedSlice.matchAll(/([A-Z][a-zA-Z0-9_]+)::([a-zA-Z0-9_]+)\s*\(/g);
           for (const m of staticCalls) {
@@ -358,7 +483,8 @@ export class SymbolRepository {
           for (const m of propCalls) {
             const propName = m[1];
             const methodName = m[2];
-            const inferredClass = propName.charAt(0).toUpperCase() + propName.slice(1);
+            const mappedType = varTypes.get(propName);
+            const inferredClass = mappedType || (propName.charAt(0).toUpperCase() + propName.slice(1));
             outboundCalls.add(`${inferredClass}::${methodName}`);
           }
 
@@ -368,8 +494,80 @@ export class SymbolRepository {
             const propName = m[1];
             const methodName = m[2];
             if (propName !== "db") {
-              const inferredClass = propName.charAt(0).toUpperCase() + propName.slice(1);
+              const mappedType = varTypes.get(propName);
+              const inferredClass = mappedType || (propName.charAt(0).toUpperCase() + propName.slice(1));
               outboundCalls.add(`${inferredClass}::${methodName}`);
+            }
+          }
+
+          // Collect same-file symbols and explicitly imported symbols for high-precision direct & receiver call detection
+          const sameFileSymbols = this.getSymbolsByFileId(row.file_id);
+          const knownDirectCallables = new Set<string>();
+          const knownStaticReceivers = new Set<string>();
+          for (const s of sameFileSymbols) {
+            if (s.id === row.id) continue;
+            if (s.kind === "function") knownDirectCallables.add(s.name);
+            else if (s.kind === "class") knownStaticReceivers.add(s.name);
+          }
+
+          const fileDeps = this.db
+            .query<{ import_statement: string }, [number]>(
+              "SELECT import_statement FROM dependencies WHERE source_file_id = ? AND is_external = 0"
+            )
+            .all(row.file_id);
+          for (const dep of fileDeps) {
+            const stmt = dep.import_statement || "";
+            if (/^\s*import\s+type\b/.test(stmt)) continue;
+            const braceMatch = stmt.match(/\{([^}]+)\}/);
+            if (braceMatch) {
+              for (const spec of braceMatch[1].split(",")) {
+                const trimmedSpec = spec.trim();
+                if (/^type\s+/.test(trimmedSpec)) continue;
+                const aliasParts = trimmedSpec.split(/\s+as\s+/);
+                const localName = (aliasParts[1] || aliasParts[0] || "").trim();
+                if (/^[a-z_$][a-zA-Z0-9_$]*$/.test(localName)) knownDirectCallables.add(localName);
+                else if (/^[A-Z][a-zA-Z0-9_$]*$/.test(localName)) knownStaticReceivers.add(localName);
+              }
+            }
+            const defaultMatch = stmt.match(/^\s*import\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\b/);
+            if (defaultMatch) {
+              const localName = defaultMatch[1];
+              if (/^[a-z_$]/.test(localName)) knownDirectCallables.add(localName);
+              else knownStaticReceivers.add(localName);
+            }
+          }
+
+          // Match calls on typed parameters / local instances (`repo.findSymbolsByName(` or `TopologyDetector.detect(`)
+          for (const m of sanitizedSlice.matchAll(/\b([a-zA-Z_$][a-zA-Z0-9_$]*)\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g)) {
+            const receiver = m[1];
+            const method = m[2];
+            if (receiver === "this" || receiver === "super" || receiver === "console" || receiver === "process" || receiver === "Math" || receiver === "JSON" || receiver === "Object" || receiver === "Array" || receiver === "Buffer" || receiver === "Promise" || receiver === "Number" || receiver === "String") continue;
+            const mappedType = varTypes.get(receiver);
+            if (mappedType) {
+              outboundCalls.add(`${mappedType}::${method}`);
+            } else if (knownStaticReceivers.has(receiver)) {
+              outboundCalls.add(`${receiver}::${method}`);
+            }
+          }
+          for (const m of sanitizedSlice.matchAll(/\$([a-zA-Z_][a-zA-Z0-9_]*)\s*->\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g)) {
+            const receiver = m[1];
+            const method = m[2];
+            if (receiver === "this") continue;
+            const mappedType = varTypes.get(receiver);
+            if (mappedType) {
+              outboundCalls.add(`${mappedType}::${method}`);
+            }
+          }
+
+          // Match direct function calls inside symbol body (after opening `{`)
+          const bodyStartIdx = sanitizedSlice.indexOf("{");
+          const bodySlice = bodyStartIdx !== -1 ? sanitizedSlice.slice(bodyStartIdx + 1) : "";
+          if (bodySlice && knownDirectCallables.size > 0) {
+            for (const m of bodySlice.matchAll(/(?:^|[^.\w$:])([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g)) {
+              const fnName = m[1];
+              if (fnName !== row.name && knownDirectCallables.has(fnName)) {
+                outboundCalls.add(fnName);
+              }
             }
           }
         }
