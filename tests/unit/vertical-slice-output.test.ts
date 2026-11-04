@@ -3,6 +3,7 @@ import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
 import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
+import { SEMANTIC_EXTRACTOR_REVISION } from "../../src/core/parser/semantic-revision.ts";
 
 describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
   let db: SeptumDatabase;
@@ -22,6 +23,8 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
   beforeEach(() => {
     db = new SeptumDatabase(":memory:");
     repo = new SeptumRepository(db.raw);
+    // These tests inject current formatter fixtures rather than running extraction.
+    repo.setMeta("semantic_extractor_revision", SEMANTIC_EXTRACTOR_REVISION);
   });
 
   afterEach(() => {
@@ -87,8 +90,32 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
     expect(json.chain[0].stage).toBe("ingress");
     expect(json.chain[1].symbol).toBe("OrderController@updateStatus");
     expect(json.summary).toBe(
-      "[INGRESS] POST /orders/{id}/status ➔ [CONTROLLER] OrderController@updateStatus ➔ [EGRESS] resources/js/Pages/Orders/Show.vue"
+      "[INGRESS] POST /orders/{id}/status [unknown; unknown]\n[CONTROLLER] OrderController@updateStatus [unknown; unknown]\n[EGRESS] resources/js/Pages/Orders/Show.vue [unknown; unknown]"
     );
+    expect(json.coverage).toBe("partial");
+    expect(json.confidence).toBe("exact");
+    expect(json.confidence_scope).toBe("query_to_catalog_target_only");
+    expect(json.message).toContain("Missing relationship metadata is unknown");
+    expect(json.relationship_limits).toContain("not a proven sequential execution path");
+  });
+
+  it("preserves mixed relationship kinds and derivation in JSON, summary and message", async () => {
+    repo.upsertVerticalSlice({ domain_id: null, feature_key: null, http_method: "GET", route_uri: "/mixed", route_name: null,
+      controller_class: "Handler", action_name: "run", controller_file: null, controller_line: 1,
+      architecture_style: "fixture", entry_kind: "http_route", execution_chain_json: JSON.stringify([
+        { stage: "ingress", symbol: "GET /mixed", relationship: { kind: "route_binding", derivation: "source", reason: "fixture" } },
+        { stage: "service", symbol: "Service.run", relationship: { kind: "calls", derivation: "inferred", reason: "fixture" } },
+        { stage: "entity", symbol: "Order", relationship: { kind: "schema_binding", derivation: "source", reason: "fixture" } },
+      ]) });
+    const result = await handleTraceVerticalSlice(repo, mockConfig, { query: "GET /mixed", max_depth: 1 });
+    const payload = JSON.parse(result.content[0].text);
+    for (const label of ["route_binding; source", "calls; inferred", "schema_binding; source"]) {
+      expect(payload.summary).toContain(label);
+      expect(payload.message).toContain(label);
+    }
+    expect(payload.summary).not.toContain("➔");
+    expect(payload.max_depth_applied).toBe(1);
+    expect(payload.coverage).toBe("partial");
   });
 
   it("accepts custom workspaceRoot parameter gracefully", async () => {

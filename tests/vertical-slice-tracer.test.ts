@@ -123,8 +123,10 @@ describe("VerticalSliceTracer End-to-End Tracing", () => {
     expect(routeTracer.trace("/users/{userId}").confidence).toBe("exact");
     expect(routeTracer.trace("/users").alternatives?.length).toBeGreaterThan(0);
     const multiple = new VerticalSliceTracer({ getAllVerticalSlices: () => [routes[2], { ...routes[2], id: 6, route_uri: "/users/{otherId}" }] } as any);
-    expect(multiple.trace("/users/{id}").confidence).toBe("inferred");
-    expect(multiple.trace("/users/{id}").alternatives?.length).toBe(1);
+    expect(multiple.trace("/users/{id}").found).toBe(false);
+    expect(multiple.trace("/users/{id}").diagnostics).toContain("ambiguous_target");
+    expect(multiple.trace("/users/{id}").entrypoint).toBeUndefined();
+    expect(multiple.trace("/users/{id}").alternatives?.length).toBe(2);
   });
 
   test("resolves vertical slice via Controller@action syntax", () => {

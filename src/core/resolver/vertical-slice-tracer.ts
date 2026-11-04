@@ -1,8 +1,9 @@
+import { SEMANTIC_EXTRACTOR_REVISION } from "../parser/semantic-revision.ts";
 import { readSourceFile } from "../resources/source-files.ts";
 import { computeContentHash } from "../ingestion/hasher.ts";
 import { assertPathContained } from "./path-resolver.ts";
 import { join, relative, resolve } from "node:path";
-import { collectSourceSkips } from "../resources/source-files.ts";
+import { collectSourceSkips, SOURCE_READ_REVISION, sourceObservationsCurrent } from "../resources/source-files.ts";
 import type {
   ExecutionChainNode,
   VerticalSliceRecord,
@@ -15,11 +16,12 @@ import { TopologyDetector } from "../discovery/topology-detector.ts";
 import { readdirSync } from "node:fs";
 import { ASTParserEngine } from "../parser/tree-sitter.ts";
 import { shouldIgnoreSourcePath } from "../resources/ignore.ts";
+import { formatSliceNode, SLICE_RELATIONSHIP_LIMITS } from "./slice-format.ts";
 
 export class VerticalSliceTracer {
   constructor(private repo: SeptumRepository, private projectRoot: string = process.cwd(), private ignorePatterns: string[] = [], private verifyMembership = true) {}
 
-  public async traceAsync(rawQuery: string, maxDepth = 5, signal?: AbortSignal): Promise<VerticalSliceTraceResponse> {
+  public async traceAsync(rawQuery: string, maxDepth = 5, signal?: AbortSignal, controllerFile?: string): Promise<VerticalSliceTraceResponse> {
     signal?.throwIfAborted();
     if (this.repo.getMeta("sync_state") === "error" || this.repo.getMeta("sync_state") === "running") {
       return { query: rawQuery, found: false, coverage: "partial", diagnostics: ["index_incomplete"], message: "Workspace synchronization is incomplete." };
@@ -28,7 +30,9 @@ export class VerticalSliceTracer {
     let membershipChanged = false;
     try {
       const inputs = JSON.parse(this.repo.getMeta("semantic_inputs") || "[]") as Array<{path:string;hash:string}>;
-      inputsChanged = inputs.some(input => {
+      inputsChanged = this.repo.getMeta("semantic_extractor_revision") !== SEMANTIC_EXTRACTOR_REVISION ||
+        (!!this.repo.getMeta("semantic_inputs") && this.repo.getMeta("semantic_input_revision") !== SOURCE_READ_REVISION) ||
+        !sourceObservationsCurrent(this.projectRoot, JSON.parse(this.repo.getMeta("semantic_observations") || '{"paths":[],"directories":[]}')) || inputs.some(input => {
         signal?.throwIfAborted();
         assertPathContained(input.path,this.projectRoot,"Semantic source");
         return computeContentHash(readSourceFile(resolve(this.projectRoot,input.path))) !== input.hash;
@@ -53,6 +57,9 @@ export class VerticalSliceTracer {
           for (const slice of extracted.value) this.repo.upsertVerticalSlice(slice);
           this.repo.setMeta("slices_dirty", "");
           this.repo.setMeta("semantic_inputs", JSON.stringify(extracted.inputs));
+          this.repo.setMeta("semantic_observations", JSON.stringify(extracted.observations));
+          this.repo.setMeta("semantic_input_revision", SOURCE_READ_REVISION);
+          this.repo.setMeta("semantic_extractor_revision", SEMANTIC_EXTRACTOR_REVISION);
           if (this.verifyMembership) this.repo.setMeta("semantic_catalog_files", JSON.stringify(this.listSourceFiles(this.projectRoot)));
         });
       } catch (error) {
@@ -61,7 +68,7 @@ export class VerticalSliceTracer {
         return { query: rawQuery, found: false, coverage: "partial", diagnostics: [error instanceof Error ? error.message : String(error)], message: "Semantic extraction failed; no complete catalog was published." };
       }
     }
-    return this.trace(rawQuery,maxDepth);
+    return this.trace(rawQuery,maxDepth,controllerFile);
   }
 
   private listSourceFiles(root: string): string[] {
@@ -91,18 +98,19 @@ export class VerticalSliceTracer {
    *  - "Ubah status order di dashboard"
    */
   // Synchronous compatibility API reads persisted slices only; use traceAsync for on-demand extraction.
-  public trace(rawQuery: string, maxDepth: number = 5): VerticalSliceTraceResponse {
+  public trace(rawQuery: string, maxDepth: number = 5, controllerFile?: string): VerticalSliceTraceResponse {
     const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
     const trimmed = rawQuery.trim();
     const lowerTrimmed = trimmed.toLowerCase();
-    let allSlices = this.repo.getAllVerticalSlices();
+    const allSlices = this.repo.getAllVerticalSlices().filter(slice => !controllerFile || slice.controller_file === controllerFile);
 
     if (allSlices.length === 0) {
       return {
         query: trimmed,
         found: false,
+        coverage: "partial",
         max_depth_applied: effectiveMaxDepth,
-        message: "No vertical slices cataloged. Run 'septum sync' to extract framework routes and MVC slices.",
+        message: controllerFile ? "No catalog target matches controller_file. Copy an exact file from the candidates or omit the filter." : "No vertical slices cataloged. Run 'septum sync' to extract framework routes and MVC slices.",
       };
     }
 
@@ -117,12 +125,12 @@ export class VerticalSliceTracer {
         return this.formatSuccessResponse(trimmed, literal[0], "exact", undefined, effectiveMaxDepth);
       }
       if (literal.length > 1 || candidates.length > 1) {
-        return this.formatSuccessResponse(trimmed, literal[0] ?? candidates[0], "inferred", (literal.length ? literal : candidates).slice(1), effectiveMaxDepth);
+        return this.ambiguousResponse(trimmed, literal.length ? literal : candidates, effectiveMaxDepth);
       }
       if (candidates.length === 1) {
         return this.formatSuccessResponse(trimmed, candidates[0], "inferred", undefined, effectiveMaxDepth);
       }
-      return { query: trimmed, found: false, max_depth_applied: effectiveMaxDepth, message: `No vertical slice found matching query '${trimmed}'.` };
+      return { query: trimmed, found: false, coverage: "partial", max_depth_applied: effectiveMaxDepth, message: `No vertical slice found matching query '${trimmed}'.` };
     }
 
     // 2. URI-only match: "/orders" or "orders/{id}"
@@ -133,16 +141,16 @@ export class VerticalSliceTracer {
       if (uriMatches.length === 1) {
         return this.formatSuccessResponse(trimmed, uriMatches[0], confidence, undefined, effectiveMaxDepth);
       }
-      // Multiple matches (e.g. GET /orders and POST /orders) -> return primary with alternatives
-      return this.formatSuccessResponse(trimmed, uriMatches[0], confidence, uriMatches.slice(1), effectiveMaxDepth);
+      return this.ambiguousResponse(trimmed, uriMatches, effectiveMaxDepth);
     }
 
     // 3. Named Route match: "orders.status.update" or "admin.users.index"
-    const nameMatch = allSlices.find(
+    const nameMatches = allSlices.filter(
       (s) => s.route_name && s.route_name.toLowerCase() === lowerTrimmed
     );
-    if (nameMatch) {
-      return this.formatSuccessResponse(trimmed, nameMatch, "exact", undefined, effectiveMaxDepth);
+    if (nameMatches.length) {
+      return nameMatches.length > 1 ? this.ambiguousResponse(trimmed, nameMatches, effectiveMaxDepth)
+        : this.formatSuccessResponse(trimmed, nameMatches[0], "exact", undefined, effectiveMaxDepth);
     }
 
     // 3b. Omni-Trigger Match: "JOB ProcessOrderJob", "job:ProcessOrderJob", "CLI order:cleanup", "EVENT OrderPlacedListener"
@@ -150,15 +158,16 @@ export class VerticalSliceTracer {
     if (omniTriggerMatch) {
       const triggerKind = omniTriggerMatch[1].toUpperCase();
       const targetName = omniTriggerMatch[2].toLowerCase();
-      const exact = allSlices.find(
+      const exact = allSlices.filter(
         (s) =>
           s.http_method.toUpperCase() === triggerKind &&
           (s.controller_class.toLowerCase() === targetName ||
             s.route_uri.toLowerCase() === targetName ||
             s.route_uri.toLowerCase() === `${triggerKind.toLowerCase()}:${targetName}`)
       );
-      if (exact) {
-        return this.formatSuccessResponse(trimmed, exact, "exact", undefined, effectiveMaxDepth);
+      if (exact.length) {
+        return exact.length > 1 ? this.ambiguousResponse(trimmed, exact, effectiveMaxDepth)
+          : this.formatSuccessResponse(trimmed, exact[0], "exact", undefined, effectiveMaxDepth);
       }
     }
 
@@ -170,7 +179,7 @@ export class VerticalSliceTracer {
       const lowerCtrl = ctrl.toLowerCase();
       const lowerAct = act ? act.toLowerCase() : undefined;
 
-      const exact = allSlices.find((s) => {
+      const exact = allSlices.filter((s) => {
         const sCtrlLower = s.controller_class.toLowerCase();
         const ctrlMatch =
           sCtrlLower === lowerCtrl ||
@@ -183,18 +192,20 @@ export class VerticalSliceTracer {
         }
         return true;
       });
-      if (exact) {
-        return this.formatSuccessResponse(trimmed, exact, "exact", undefined, effectiveMaxDepth);
+      if (exact.length) {
+        return exact.length > 1 ? this.ambiguousResponse(trimmed, exact, effectiveMaxDepth)
+          : this.formatSuccessResponse(trimmed, exact[0], "exact", undefined, effectiveMaxDepth);
       }
     }
 
     // 5. Symbol Match in Execution Chain or Action Name (e.g. "createOrder", "CreateOrderUseCase", "OrderController")
-    const symbolMatch = allSlices.find((s) => {
+    let invalidChains = false;
+    const symbolMatches = allSlices.filter((s) => {
       if (s.action_name.toLowerCase() === lowerTrimmed) return true;
       if (s.controller_class.toLowerCase() === lowerTrimmed) return true;
       if (s.execution_chain_json) {
         try {
-          const chain: ExecutionChainNode[] = JSON.parse(s.execution_chain_json);
+          const chain = this.parseChain(s.execution_chain_json);
           return chain.some(
             (node) =>
               node.symbol.toLowerCase() === lowerTrimmed ||
@@ -202,13 +213,15 @@ export class VerticalSliceTracer {
               (node.file && node.file.toLowerCase().includes(lowerTrimmed))
           );
         } catch {
+          invalidChains = true;
           return false;
         }
       }
       return false;
     });
-    if (symbolMatch) {
-      return this.formatSuccessResponse(trimmed, symbolMatch, "inferred", undefined, effectiveMaxDepth);
+    if (symbolMatches.length) {
+      return symbolMatches.length > 1 ? this.ambiguousResponse(trimmed, symbolMatches, effectiveMaxDepth)
+        : this.formatSuccessResponse(trimmed, symbolMatches[0], "inferred", undefined, effectiveMaxDepth);
     }
 
     // 6. Semantic / Token Scoring for Natural Language (e.g. "Ubah status order di dashboard")
@@ -237,6 +250,8 @@ export class VerticalSliceTracer {
       .sort((a, b) => b.score - a.score);
 
     if (scoredSlices.length > 0) {
+      const tied = scoredSlices.filter(item => item.score === scoredSlices[0].score);
+      if (tied.length > 1) return this.ambiguousResponse(trimmed, tied.map(item => item.slice), effectiveMaxDepth);
       const primary = scoredSlices[0].slice;
       const alternatives = scoredSlices.slice(1, 4).map((item) => item.slice);
       return this.formatSuccessResponse(trimmed, primary, "inferred", alternatives, effectiveMaxDepth);
@@ -245,6 +260,9 @@ export class VerticalSliceTracer {
     return {
       query: trimmed,
       found: false,
+      coverage: "partial",
+      diagnostics: invalidChains ? ["invalid_execution_chain"] : undefined,
+      next: invalidChains ? ["Run septum sync to rebuild the catalog before relying on a negative symbol search."] : undefined,
       max_depth_applied: effectiveMaxDepth,
       alternatives: allSlices.slice(0, 5).map((s) => ({
         method: s.http_method,
@@ -254,6 +272,30 @@ export class VerticalSliceTracer {
       })),
       message: `No vertical slice found matching query '${trimmed}'.`,
     };
+  }
+
+  private ambiguousResponse(query: string, candidates: VerticalSliceRecord[], maxDepth: number): VerticalSliceTraceResponse {
+    const alternatives = candidates.map(candidate => ({ method: candidate.http_method, uri: candidate.route_uri,
+      controller: candidate.controller_class, action: candidate.action_name, file: candidate.controller_file,
+      line: candidate.controller_line })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    return { query, found: false, coverage: "partial", diagnostics: ["ambiguous_target"],
+      max_depth_applied: maxDepth, alternatives: alternatives.slice(0, 20),
+      candidate_count: alternatives.length, alternatives_omitted: Math.max(0, alternatives.length - 20),
+      next: ["Narrow the query to METHOD /route or Controller@action and controller_file copied from a candidate. If candidates remain identical, inspect their source declarations."],
+      message: "Multiple catalog targets match; no entrypoint or chain was selected." };
+  }
+
+  private parseChain(serialized: string): ExecutionChainNode[] {
+    const chain: unknown = JSON.parse(serialized);
+    if (!Array.isArray(chain) || chain.some(node => !node || typeof node !== "object" ||
+      typeof node.stage !== "string" || typeof node.symbol !== "string" ||
+      (node.file !== undefined && typeof node.file !== "string") ||
+      (node.description !== undefined && typeof node.description !== "string") ||
+      ["guards", "mutations", "emits", "dispatches"].some(key => node[key] !== undefined &&
+        (!Array.isArray(node[key]) || node[key].some((value: unknown) => typeof value !== "string"))))) {
+      throw new Error("Invalid execution chain shape");
+    }
+    return chain;
   }
 
   private urisMatch(uriA: string, uriB: string): boolean {
@@ -283,19 +325,17 @@ export class VerticalSliceTracer {
     effectiveMaxDepth: number = 5
   ): VerticalSliceTraceResponse {
     let chain: ExecutionChainNode[] = [];
-    if (record.execution_chain_json) {
-      try {
-        chain = JSON.parse(record.execution_chain_json);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[Septum Slice Error] Corrupted execution chain JSON for slice ${record.id}: ${msg}`);
-      }
+    const diagnostics: string[] = [];
+    try {
+      chain = this.parseChain(record.execution_chain_json);
+    } catch {
+      diagnostics.push("invalid_execution_chain");
     }
 
     // Import expansion is derived per request, so cached depth cannot override the requested hop limit.
     chain = chain.filter(node => node.relationship?.kind !== "imports" && !node.description?.includes("(dependency)"));
     if (
-      record.controller_file &&
+      !diagnostics.length && record.controller_file &&
       typeof (this.repo as any).getAllFiles === "function"
     ) {
       try {
@@ -306,14 +346,13 @@ export class VerticalSliceTracer {
           effectiveMaxDepth
         );
       } catch {
-        // Ignore expansion errors on mock/partial repositories
+        diagnostics.push("dependency_expansion_failed");
       }
     }
 
-    let message = `Vertical slice resolved (${confidence}): ${record.http_method} ${record.route_uri} -> ${record.controller_class}@${record.action_name}`;
+    let message = `Vertical slice target match (${confidence}): ${record.http_method} ${record.route_uri}; catalog handler ${record.controller_class}@${record.action_name}. ${SLICE_RELATIONSHIP_LIMITS}`;
     if (chain.length > 0) {
       const stageLines = chain.map((node) => {
-        const stageLabel = `[${node.stage.toUpperCase()}]`.padEnd(14, " ");
         const loc = node.file ? ` (${node.file}${node.line ? `:${node.line}` : ""})` : "";
         let extra = "";
         if (node.table) {
@@ -329,16 +368,20 @@ export class VerticalSliceTracer {
           extra += ` [mutates: ${node.mutations.join(", ")}]`;
         }
         if (node.transactions && node.stage !== "transaction") {
-          extra += ` [tx: active]`;
+          extra += ` [transaction: statically detected]`;
         }
-        return `${stageLabel} ${node.symbol}${loc}${extra}`;
+        return `${formatSliceNode(node)}${loc}${extra}`;
       });
-      message = `=== VERTICAL SLICE TRACE (${confidence.toUpperCase()}) ===\n` + stageLines.join("\n");
+      message = `=== VERTICAL SLICE TRACE (TARGET MATCH: ${confidence.toUpperCase()}) ===\n${SLICE_RELATIONSHIP_LIMITS}\n` + stageLines.join("\n");
     }
+    if (diagnostics.length) message += `\nAnalysis incomplete: ${diagnostics.join(", ")}. Run septum sync and retry; inspect source if it persists.`;
 
     return {
       query,
       found: true,
+      coverage: "partial",
+      diagnostics: diagnostics.length ? diagnostics : undefined,
+      next: diagnostics.length ? ["Run septum sync to rebuild analysis; retry the query. Inspect source directly if the diagnostic persists."] : undefined,
       confidence,
       is_exact_match: confidence === "exact",
       architecture_style: record.architecture_style,
