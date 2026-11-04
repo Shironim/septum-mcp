@@ -5,7 +5,8 @@ import { ConfigLoader } from "../../core/config/loader.ts";
 import { SeptumDatabase } from "../../core/database/client.ts";
 import { SeptumRepository } from "../../core/database/repository.ts";
 import { ASTParserEngine } from "../../core/parser/tree-sitter.ts";
-import { SessionManager } from "../../core/session/session-manager.ts";
+import { resolveEffectiveFeature } from "../../core/session/effective-feature.ts";
+import { ModuleResolver } from "../../core/resolver/module-resolver.ts";
 
 interface ToolCallInfo {
   name?: string;
@@ -80,8 +81,11 @@ function blockHook(db: SeptumDatabase | null, reason: string): never {
 }
 
 async function runPreWriteHook(): Promise<void> {
+  const callerRoot = process.cwd();
+  const workspaceRoot = path.resolve(process.env.SEPTUM_HOOK_ROOT || callerRoot);
+  // Relative payload paths are relative to the invoking tool CWD.
   // If .septum/septum.db does not exist, pass through
-  const dbPath = path.resolve(process.cwd(), ".septum", "septum.db");
+  const dbPath = path.resolve(workspaceRoot, ".septum", "septum.db");
   if (!fs.existsSync(dbPath)) {
     process.exit(0);
   }
@@ -106,8 +110,9 @@ async function runPreWriteHook(): Promise<void> {
     payload.toolCall?.args ||
     (payload as Record<string, any>) ||
     {};
-  const targetFile: string | undefined =
+  const payloadTarget: string | undefined =
     toolInput.TargetFile || toolInput.file_path || toolInput.filePath || toolInput.path;
+  const targetFile = payloadTarget ? path.relative(workspaceRoot, path.resolve(callerRoot, payloadTarget)).replace(/\\/g, "/") : undefined;
   const chunkContent = Array.isArray(toolInput.ReplacementChunks)
     ? toolInput.ReplacementChunks.map((c: any) => c?.ReplacementContent || "").join("\n")
     : "";
@@ -123,10 +128,10 @@ async function runPreWriteHook(): Promise<void> {
     process.exit(0);
   }
 
-  const config = ConfigLoader.load();
-  const db = new SeptumDatabase(config.settings.db_path);
+  const config = ConfigLoader.load(undefined, workspaceRoot);
+  const db = new SeptumDatabase(path.resolve(workspaceRoot, config.settings.db_path));
   const repo = new SeptumRepository(db.raw);
-  const evaluator = new BoundaryEvaluator(repo);
+  const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(workspaceRoot, repo));
 
   try {
     const sourceDomain = evaluator.resolveSourceDomain(targetFile, config);
@@ -137,7 +142,7 @@ async function runPreWriteHook(): Promise<void> {
       // GATE 3: Mandatory Catalog Consultation
       // Verify that the AI has consulted the domain catalog before writing
       // -------------------------------------------------------------
-      const accessLogPath = path.resolve(process.cwd(), ".septum/catalog_access.json");
+      const accessLogPath = path.resolve(workspaceRoot, ".septum/catalog_access.json");
       let hasConsulted = false;
 
       if (fs.existsSync(accessLogPath)) {
@@ -172,12 +177,7 @@ async function runPreWriteHook(): Promise<void> {
     // -------------------------------------------------------------
     // GATE 1: Hard Touchpoint Lock (if features are defined)
     // -------------------------------------------------------------
-    const session = SessionManager.getActiveSession(process.cwd());
-    const requestedFeatureKey = toolInput.feature_key || process.env.SEPTUM_ACTIVE_FEATURE;
-    if (session && requestedFeatureKey && requestedFeatureKey !== session.feature_key) {
-      throw new Error(`Requested feature '${requestedFeatureKey}' does not own the active scope '${session.feature_key}'.`);
-    }
-    const activeFeatureKey = session?.feature_key || requestedFeatureKey;
+    const activeFeatureKey = resolveEffectiveFeature(workspaceRoot, config, toolInput.feature_key || process.env.SEPTUM_ACTIVE_FEATURE);
 
     if (activeFeatureKey) {
       const touchpointViolations = evaluator.checkFeatureTouchpoints(

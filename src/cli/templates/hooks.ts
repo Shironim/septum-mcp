@@ -36,6 +36,8 @@ if [ ! -f "$ROOT_DIR/.septum/septum.db" ]; then
   exit 0
 fi
 
+export SEPTUM_HOOK_ROOT="$ROOT_DIR"
+
 # Delegate directly to Septum's active 3-gate hook engine
 if command -v bun >/dev/null 2>&1 && [ -f "$ROOT_DIR/bin/septum.ts" ]; then
   exec bun run "$ROOT_DIR/bin/septum.ts" hook pre-write "$@"
@@ -58,6 +60,9 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 if [ ! -f "$ROOT_DIR/.septum/septum.db" ]; then
   exit 0
 fi
+
+# Sync always belongs to the workspace containing this generated wrapper.
+cd "$ROOT_DIR" || exit 1
 
 # Trigger background incremental sync
 if command -v bun >/dev/null 2>&1 && [ -f "$ROOT_DIR/bin/septum.ts" ]; then
