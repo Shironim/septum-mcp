@@ -1,10 +1,12 @@
 import { posix, relative, resolve, isAbsolute } from "node:path";
+import { existsSync } from "node:fs";
 import type { BoundaryViolation } from "../../types/index.ts";
 import type { ValidatedSeptumConfig } from "../config/schema.ts";
 import { ConfigLoader } from "../config/loader.ts";
 import type { SeptumRepository } from "../database/repository.ts";
 import { ModuleResolver } from "../resolver/module-resolver.ts";
 import { matchesSimpleGlob } from "../parser/extractors/base.ts";
+import { assertUniqueDomainRoots } from "../config/domain-ownership.ts";
 
 export class BoundaryEvaluator {
   private repo: SeptumRepository;
@@ -17,6 +19,10 @@ export class BoundaryEvaluator {
 
   public getResolver(): ModuleResolver {
     return this.resolver;
+  }
+
+  public withResolver(resolver: ModuleResolver): BoundaryEvaluator {
+    return new BoundaryEvaluator(this.repo, resolver);
   }
 
   public evaluate(
@@ -33,6 +39,7 @@ export class BoundaryEvaluator {
           ? fromRepo
           : ConfigLoader.loadFromDatabaseOrDefaults();
     }
+    assertUniqueDomainRoots(activeConfig.domains, this.resolver.getProjectRoot());
     const violations: BoundaryViolation[] = [];
 
     if (featureKey) {
@@ -47,6 +54,7 @@ export class BoundaryEvaluator {
   }
 
   public auditCodebase(config: ValidatedSeptumConfig): BoundaryViolation[] {
+    assertUniqueDomainRoots(config.domains, this.resolver.getProjectRoot());
     const violations: BoundaryViolation[] = [];
     const allDependencies = this.repo.getAllDependenciesWithDomains();
 
@@ -112,6 +120,7 @@ export class BoundaryEvaluator {
     }>,
     relevantFiles?: ReadonlySet<string>
   ): BoundaryViolation[] {
+    assertUniqueDomainRoots(config.domains, this.resolver.getProjectRoot());
     const violations: BoundaryViolation[] = [];
     let allDependencies = preloadedDeps ?? this.repo.getAllDependenciesWithDomains();
     if (!preloadedDeps && this.repo.getMeta?.("workspace_root")) {
@@ -143,7 +152,7 @@ export class BoundaryEvaluator {
     }
 
     const resolveTargetFile = (sourceFile: string, rawTarget: string): string | null => {
-      if (this.repo.getMeta?.("workspace_root")) {
+      if (this.repo.getMeta?.("workspace_root") || existsSync(resolve(this.resolver.getProjectRoot(), sourceFile))) {
         const result = this.resolver.resolveImport(rawTarget,sourceFile);
         const files = result.targets.flatMap(target => target.files);
         return result.status === "resolved" && result.coverage !== "conditional" && files.length === 1 ? files[0]! : null;

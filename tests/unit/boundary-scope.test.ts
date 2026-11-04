@@ -117,7 +117,7 @@ describe("boundary scope contract", () => {
       writeFileSync(join(root, "tsconfig.json"), JSON.stringify(tsconfig));
       writeFileSync(join(root, "src/orders/Order.ts"), `import { invoice } from '${alias}';\nexport const total = invoice;\n`);
       await new IngestionPipeline(repo, root).run(config, { verifyContent: true });
-      expect(Bun.spawnSync(["git", "add", "src/orders/Order.ts"], { cwd: root }).exitCode).toBe(0);
+      expect(Bun.spawnSync(["git", "add", "src", "tsconfig.json", "Invoice.ts"], { cwd: root }).exitCode).toBe(0);
       for (const args of [{ scope: "all" }, { scope: "staged" }, { file_path: "src/orders/Order.ts", proposed_imports: [alias] }]) {
         const result = await handleCheckBoundary(evaluator, config, args as any, repo, root);
         expect(JSON.parse(result.content[0].text).status).toBe(expected);
