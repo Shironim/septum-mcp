@@ -5,7 +5,6 @@ import { ConfigLoader } from "../../core/config/loader.ts";
 import { SeptumDatabase } from "../../core/database/client.ts";
 import { SeptumRepository } from "../../core/database/repository.ts";
 import { ASTParserEngine } from "../../core/parser/tree-sitter.ts";
-import { resolveEffectiveFeature } from "../../core/session/effective-feature.ts";
 import { ModuleResolver } from "../../core/resolver/module-resolver.ts";
 
 interface ToolCallInfo {
@@ -26,7 +25,6 @@ export interface ToolPayload {
     new_string?: string;
     content?: string;
     ReplacementChunks?: Array<{ ReplacementContent?: string }>;
-    feature_key?: string;
   };
   arguments?: Record<string, unknown>;
   TargetFile?: string;
@@ -83,7 +81,6 @@ function blockHook(db: SeptumDatabase | null, reason: string): never {
 async function runPreWriteHook(): Promise<void> {
   const callerRoot = process.cwd();
   const workspaceRoot = path.resolve(process.env.SEPTUM_HOOK_ROOT || callerRoot);
-  // Relative payload paths are relative to the invoking tool CWD.
   // If .septum/septum.db does not exist, pass through
   const dbPath = path.resolve(workspaceRoot, ".septum", "septum.db");
   if (!fs.existsSync(dbPath)) {
@@ -136,71 +133,8 @@ async function runPreWriteHook(): Promise<void> {
   try {
     const sourceDomain = evaluator.resolveSourceDomain(targetFile, config);
 
-    // If file is not inside any domain, allow or check feature scope
-    if (sourceDomain) {
-      // -------------------------------------------------------------
-      // GATE 3: Mandatory Catalog Consultation
-      // Verify that the AI has consulted the domain catalog before writing
-      // -------------------------------------------------------------
-      const accessLogPath = path.resolve(workspaceRoot, ".septum/catalog_access.json");
-      let hasConsulted = false;
-
-      if (fs.existsSync(accessLogPath)) {
-        try {
-          const rawAccess = JSON.parse(fs.readFileSync(accessLogPath, "utf-8"));
-          const domainsMap: Record<string, string> = rawAccess.domains || {};
-          const lowerSource = sourceDomain.toLowerCase();
-          const domainAccessedAt =
-            domainsMap[sourceDomain] ||
-            domainsMap[lowerSource] ||
-            Object.entries(domainsMap).find(([k]) => k.toLowerCase() === lowerSource)?.[1];
-          if (domainAccessedAt) {
-            hasConsulted = true;
-          }
-        } catch {
-          // ignore parse error
-        }
-      }
-
-      if (!hasConsulted) {
-        blockHook(
-          db,
-          `\n[SEPTUM GATE 3 VIOLATION - Mandatory Consultation Required]\n` +
-            `✕ Operation blocked: You are attempting to write to domain '${sourceDomain}' (${targetFile}) ` +
-            `without inspecting its authoritative symbol & file-connection catalog first.\n` +
-            `▶ REQUIRED ACTION: Call tool 'septum_domain({ action: "catalog", domain: "${sourceDomain}", detail_level: "compact" })' ` +
-            `or 'septum_feature({ action: "get" })' before writing code.\n`
-        );
-      }
-    }
-
-    // -------------------------------------------------------------
-    // GATE 1: Hard Touchpoint Lock (if features are defined)
-    // -------------------------------------------------------------
-    const activeFeatureKey = resolveEffectiveFeature(workspaceRoot, config, toolInput.feature_key || process.env.SEPTUM_ACTIVE_FEATURE);
-
-    if (activeFeatureKey) {
-      const touchpointViolations = evaluator.checkFeatureTouchpoints(
-        activeFeatureKey,
-        targetFile,
-        config
-      );
-
-      if (touchpointViolations.length > 0) {
-        blockHook(
-          db,
-          `\n[SEPTUM GATE 1 VIOLATION - Scope Touchpoint Lock]\n` +
-            `✕ Operation blocked: File '${targetFile}' is outside the declared allowed_touchpoints for feature '${activeFeatureKey}'.\n` +
-            `▶ REASON: ${touchpointViolations[0].message}\n` +
-            `▶ REQUIRED ACTION: Only modify files declared in allowed_touchpoints for this feature.\n`
-        );
-      }
-    }
-
-    // -------------------------------------------------------------
-    // GATE 2: Real-time AST Import Interception
+    // Real-time AST Import Interception:
     // Extract imports from proposed content and check for boundary leaks
-    // -------------------------------------------------------------
     if (content && sourceDomain) {
       const astEngine = new ASTParserEngine();
       const parsed = await astEngine.parseFile(targetFile, content);
@@ -219,7 +153,7 @@ async function runPreWriteHook(): Promise<void> {
         const v = boundaryViolations[0];
         blockHook(
           db,
-          `\n[SEPTUM GATE 2 VIOLATION - Forbidden Cross-Domain Import]\n` +
+          `\n[SEPTUM BOUNDARY VIOLATION - Forbidden Cross-Domain Import]\n` +
             `✕ Operation blocked: Proposed code imports forbidden domain '${v.target_domain}' from '${v.source_domain}'.\n` +
             `▶ OFFENDING IMPORT: ${v.imported_target}\n` +
             `▶ RULE: ${v.rule}\n` +

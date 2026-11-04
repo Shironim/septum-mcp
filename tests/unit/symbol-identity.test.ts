@@ -144,14 +144,14 @@ describe("declaration identity and source selection", () => {
     expect(SymbolToolSchema.safeParse({ action: "hotspots", symbol_ref: { ...ref, end_line: 3 } }).success).toBe(false);
     expect(SymbolToolSchema.safeParse({ action: "impact", symbol_ref: { ...ref, end_line: 3 } }).success).toBe(true);
   });
-  it("reads references from an existing v4 database without losing configuration", async () => {
+  it("reads references from an existing v5 database without losing configuration", async () => {
     db.close();
     const dbPath = join(root, "existing.db");
     db = new SeptumDatabase(dbPath); repo = new SeptumRepository(db.raw);
     await index("a.ts", "export function save() {}");
     repo.setMeta("features_json", JSON.stringify({ task: { domain: "core", allowed_touchpoints: ["a.ts"] } }));
     db.close(); db = new SeptumDatabase(dbPath); repo = new SeptumRepository(db.raw);
-    expect(db.raw.query("PRAGMA user_version").get()).toEqual({ user_version: 4 });
+    expect(db.raw.query("PRAGMA user_version").get()).toEqual({ user_version: 5 });
     expect(repo.getAllDomains()[0]!.name).toBe("core");
     expect(JSON.parse(repo.getMeta("features_json")!).task.domain).toBe("core");
     const result = await tool({ action: "inspect", query: "save", include_source: true });

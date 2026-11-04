@@ -471,40 +471,14 @@ export type TraceVerticalSliceArgs = z.infer<typeof TraceVerticalSliceSchema>;
 export const CheckBoundarySchema = z.preprocess(
   normalizeBoundaryArgs,
   z.object({
-    action: z.enum(["check", "plan", "verify"]).optional(),
-    changes: z.array(z.object({
-      file_path: z.string().trim().min(1),
-      proposed_imports: z.array(z.string().min(1)).max(256).default([]),
-      operation: z.enum(["edit", "delete"]).default("edit"),
-    }).strict()).min(1).max(100).optional(),
-    plan_ref: z.string().regex(/^[a-f0-9]{64}$/, "Copy the plan_ref from a saved approved plan.").optional(),
-    dry_run: z.boolean().optional(),
     file_path: z.string().trim().min(1, "file_path cannot be blank").optional(),
     file_paths: z.array(z.string().trim().min(1, "file_paths cannot contain blank paths")).optional(),
     proposed_imports: z.array(z.string()).optional().default([]),
-    feature_key: z.string().optional(),
     scope: z.enum(["file", "all", "staged", "domain"]).optional(),
     domain: z.string().trim().min(1, "domain cannot be blank").optional(),
     staged: z.boolean().optional(),
     workspace_path: z.string().optional(),
   }).superRefine((args, ctx) => {
-    if (args.action === "plan" || args.action === "verify") {
-      for (const key of ["scope", "file_path", "file_paths", "staged", "domain"] as const) {
-        if (args[key] !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `${args.action} does not accept ${key}; use changes for plan or plan_ref for verify.` });
-      }
-      if (args.proposed_imports.length) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["proposed_imports"], message: "Use per-file changes[].proposed_imports." });
-      if (args.action === "plan") {
-        if (!args.changes) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["changes"], message: "plan requires a non-empty changes list." });
-        if (args.plan_ref) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["plan_ref"], message: "A new plan cannot supply an existing plan_ref." });
-        for (const change of args.changes ?? []) if (change.operation === "delete" && change.proposed_imports.length) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["changes"], message: "Delete proposals cannot include imports." });
-        }
-      } else if (!args.plan_ref || args.changes || args.dry_run !== undefined || args.feature_key !== undefined) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["plan_ref"], message: "verify requires only the saved plan_ref and optional workspace_path; scope cannot be redefined." });
-      }
-      return;
-    }
-    if (args.changes || args.plan_ref || args.dry_run !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["action"], message: "changes/dry_run require action='plan'; plan_ref requires action='verify'." });
     const hasBatch = Boolean(args.file_paths?.length);
     const hasTarget = args.file_path !== undefined || hasBatch;
     const scope = args.scope ?? (args.staged ? "staged" : hasTarget ? "file" : args.domain ? "domain" : "all");
@@ -776,8 +750,8 @@ export type GetEnvironmentTopologyArgs = z.infer<typeof GetEnvironmentTopologySc
 // 5 UNIFIED TOOLS SCHEMAS & NORMALIZERS (Refactored Clean-Break MCP Engine)
 // =========================================================================
 
-// 1. septum_domain
-export function normalizeDomainToolArgs(raw: unknown): unknown {
+// 1. septum_map (Clean-Break rename from septum_domain)
+export function normalizeMapToolArgs(raw: unknown): unknown {
   const coerced = extractSingleStringFallback(raw, "domain", [
     "workspace_path",
     "workspacePath",
@@ -822,9 +796,6 @@ export function normalizeDomainToolArgs(raw: unknown): unknown {
     forbidden: "forbidden_dependencies",
     archetypes: "archetypes",
     ingestNow: "ingest_now",
-    resolveLayer: "resolve",
-    resolve_layer: "resolve",
-    resolveNode: "resolve_node",
     workspace: "workspace_path",
     workspacePath: "workspace_path",
     project_root: "workspace_path",
@@ -847,23 +818,9 @@ export function normalizeDomainToolArgs(raw: unknown): unknown {
     obj.detail_level = "full";
   }
 
-  if (typeof obj.resolve_node === "object" && obj.resolve_node !== null) {
-    obj.resolve_node = withAliases(obj.resolve_node, {
-      canonicalTag: "canonical_tag",
-      domainOrIp: "domain_or_ip",
-      connectedTo: "connected_to",
-      nodeId: "id",
-      node_id: "id",
-      nodeName: "name",
-      node_name: "name",
-    });
-  }
-
   if (!obj.action) {
     if (obj.root !== undefined || obj.ingest_now !== undefined) {
       obj.action = "register";
-    } else if (obj.resolve !== undefined || obj.resolve_node !== undefined || obj.resolveNode !== undefined || obj.refresh !== undefined) {
-      obj.action = "topology";
     } else {
       obj.action = "catalog";
     }
@@ -872,10 +829,12 @@ export function normalizeDomainToolArgs(raw: unknown): unknown {
   return obj;
 }
 
-export const DomainToolSchema = z.preprocess(
-  normalizeDomainToolArgs,
+export const normalizeDomainToolArgs = normalizeMapToolArgs;
+
+export const MapToolSchema = z.preprocess(
+  normalizeMapToolArgs,
   z.object({
-    action: z.enum(["catalog", "register", "topology"]).optional().default("catalog"),
+    action: z.enum(["catalog", "register"]).optional().default("catalog"),
     domain: z.string().optional(),
     name: z.string().optional(),
     detail_level: z.enum(["compact", "full"]).optional().default("compact"),
@@ -888,45 +847,14 @@ export const DomainToolSchema = z.preprocess(
     forbidden_dependencies: z.array(z.string()).optional(),
     archetypes: z.record(z.string()).optional(),
     ingest_now: z.boolean().optional().default(false),
-    resolve: z
-      .object({
-        layer: z.enum(["edge", "gateway", "host", "runtime", "storage", "telemetry"]),
-        platform: z.string().min(1, "platform name cannot be empty"),
-        constraints: z.array(z.string()).optional(),
-      })
-      .optional(),
-    resolve_node: z
-      .object({
-        id: z.string().min(1, "Node id cannot be empty"),
-        layer: z.enum(["edge", "gateway", "host", "runtime", "storage", "telemetry"]),
-        name: z.string().min(1, "Node name cannot be empty"),
-        platform: z.string().min(1, "Platform cannot be empty"),
-        canonical_tag: z
-          .enum([
-            "shared_hosting",
-            "vps",
-            "docker",
-            "serverless",
-            "kubernetes",
-            "managed_db",
-            "cdn_edge",
-            "paas",
-            "static_cdn",
-            "unspecified",
-          ])
-          .optional(),
-        domain_or_ip: z.string().optional(),
-        role: z.string().optional(),
-        constraints: z.array(z.string()).optional(),
-        connected_to: z.array(z.string()).optional(),
-      })
-      .optional(),
-    resolveNode: z.any().optional(),
-    refresh: z.boolean().optional().default(false),
     workspace_path: z.string().optional(),
   })
 );
-export type DomainToolArgs = z.infer<typeof DomainToolSchema>;
+export type MapToolArgs = z.infer<typeof MapToolSchema>;
+
+// Backward-compatible aliases
+export const DomainToolSchema = MapToolSchema;
+export type DomainToolArgs = MapToolArgs;
 
 // 2. septum_symbol
 export function normalizeSymbolToolArgs(raw: unknown): unknown {
@@ -940,9 +868,6 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
     "domain",
     "domain_name",
     "domainName",
-    "min_lines",
-    "min_nesting",
-    "sort_by",
     "limit",
   ]);
   if (typeof coerced !== "object" || coerced === null || Array.isArray(coerced)) return coerced;
@@ -960,11 +885,6 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
     dependencies: "include_dependencies",
     deps: "include_dependencies",
     max: "limit",
-    nesting: "min_nesting",
-    minNesting: "min_nesting",
-    lines: "min_lines",
-    minLines: "min_lines",
-    sortBy: "sort_by",
     workspace: "workspace_path",
     workspacePath: "workspace_path",
     project_root: "workspace_path",
@@ -981,9 +901,7 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
   }
 
   if (!obj.action) {
-    if (obj.min_lines !== undefined || obj.min_nesting !== undefined || obj.kind !== undefined || (obj.sort_by && !obj.query)) {
-      obj.action = "hotspots";
-    } else if (obj.include_dependencies !== undefined) {
+    if (obj.include_dependencies !== undefined || obj.include_source !== undefined || obj.budget_bytes !== undefined) {
       obj.action = "inspect";
     } else {
       obj.action = "locate";
@@ -1000,17 +918,13 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
 export const SymbolToolSchema = z.preprocess(
   normalizeSymbolToolArgs,
   z.object({
-    action: z.enum(["locate", "inspect", "impact", "hotspots", "context"]).optional().default("locate"),
+    action: z.enum(["locate", "inspect", "impact", "context"]).optional().default("locate"),
     query: z.string().optional(),
     symbol: z.string().optional(),
     domain: z.string().optional(),
     symbol_ref: SymbolReferenceSchema.optional(),
     include_dependencies: z.boolean().optional().default(true),
     limit: z.number().int().positive().optional(),
-    min_lines: z.number().int().nonnegative().optional(),
-    min_nesting: z.number().int().positive().optional(),
-    kind: z.string().optional(),
-    sort_by: z.enum(["lines", "nesting", "risk_score", "line_count"]).optional(),
     workspace_path: z.string().optional(),
     file_path: z.string().min(1).optional(),
     include_source: z.boolean().optional().default(false),
@@ -1036,105 +950,4 @@ export type SliceToolArgs = TraceVerticalSliceArgs;
 // 4. septum_boundary
 export const BoundaryToolSchema = CheckBoundarySchema;
 export type BoundaryToolArgs = CheckBoundaryArgs;
-
-// 5. septum_feature
-export function normalizeFeatureToolArgs(raw: unknown): unknown {
-  const coerced = extractSingleStringFallback(raw, "feature_key", [
-    "workspace_path",
-    "workspacePath",
-    "workspace",
-    "project_root",
-    "projectRoot",
-    "action",
-    "domain",
-    "domain_name",
-    "domainName",
-    "force",
-  ]);
-  if (typeof coerced !== "object" || coerced === null || Array.isArray(coerced)) return coerced;
-  const obj = { ...(coerced as Record<string, unknown>) };
-
-  const aliases: Record<string, string> = {
-    feature: "feature_key",
-    featureKey: "feature_key",
-    feature_name: "feature_key",
-    featureName: "feature_key",
-    feat: "feature_key",
-    name: "feature_key",
-    key: "feature_key",
-    domain_name: "domain",
-    domainName: "domain",
-    touchpoints: "allowed_touchpoints",
-    allowedTouchpoints: "allowed_touchpoints",
-    touchpoint: "allowed_touchpoints",
-    files: "allowed_touchpoints",
-    allowed_files: "allowed_touchpoints",
-    reuseSymbols: "reuse_symbols",
-    reuse: "reuse_symbols",
-    symbols: "reuse_symbols",
-    inputContract: "input_contract",
-    outputContract: "output_contract",
-    workspace: "workspace_path",
-    workspacePath: "workspace_path",
-    project_root: "workspace_path",
-    projectRoot: "workspace_path",
-  };
-
-  for (const [alias, target] of Object.entries(aliases)) {
-    if (obj[alias] !== undefined && obj[target] === undefined) {
-      obj[target] = obj[alias];
-    }
-  }
-
-  if (obj.feature_key !== undefined && obj.feature === undefined) {
-    obj.feature = obj.feature_key;
-  } else if (obj.feature !== undefined && obj.feature_key === undefined) {
-    obj.feature_key = obj.feature;
-  }
-
-  if (obj.domain !== undefined && obj.domain_name === undefined) {
-    obj.domain_name = obj.domain;
-  } else if (obj.domain_name !== undefined && obj.domain === undefined) {
-    obj.domain = obj.domain_name;
-  }
-
-  if (typeof obj.allowed_touchpoints === "string") {
-    obj.allowed_touchpoints = [obj.allowed_touchpoints];
-  } else if (!Array.isArray(obj.allowed_touchpoints) && obj.allowed_touchpoints !== undefined) {
-    obj.allowed_touchpoints = [];
-  }
-
-  if (typeof obj.reuse_symbols === "string") {
-    obj.reuse_symbols = [obj.reuse_symbols];
-  }
-
-  if (!obj.action) {
-    if (obj.allowed_touchpoints !== undefined || obj.domain !== undefined || obj.reuse_symbols !== undefined) {
-      obj.action = "lock";
-    } else {
-      obj.action = "get";
-    }
-  }
-
-  return obj;
-}
-
-export const FeatureToolSchema = z.preprocess(
-  normalizeFeatureToolArgs,
-  z.object({
-    action: z.enum(["get", "lock", "release"]).optional().default("get"),
-    feature_key: z.string().optional(),
-    feature: z.string().optional(),
-    domain: z.string().optional(),
-    domain_name: z.string().optional(),
-    description: z.string().optional(),
-    allowed_touchpoints: z.array(z.string()).optional(),
-    reuse_symbols: z.array(z.string()).optional(),
-    input_contract: z.record(z.unknown()).optional(),
-    output_contract: z.record(z.unknown()).optional(),
-    force: z.boolean().optional().default(false),
-    workspace_path: z.string().optional(),
-  })
-);
-export type FeatureToolArgs = z.infer<typeof FeatureToolSchema>;
 

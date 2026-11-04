@@ -3,7 +3,6 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { handleSyncCommand } from "./sync.ts";
 import { TopologyDetector } from "../../core/discovery/topology-detector.ts";
-import { EnvironmentDetector } from "../../core/topology/environment-detector.ts";
 import { SeptumDatabase } from "../../core/database/client.ts";
 import { SeptumRepository } from "../../core/database/repository.ts";
 import { ConfigLoader } from "../../core/config/loader.ts";
@@ -29,7 +28,6 @@ export async function handleInitCommand(force: boolean = false): Promise<void> {
   try {
     const repo = new SeptumRepository(db.raw);
     const domains = TopologyDetector.discoverAndPersist(repo, workspaceRoot);
-    EnvironmentDetector.detect(workspaceRoot, repo);
     const domainNames = Object.keys(domains);
     console.log(`\x1b[36m│\x1b[0m  \x1b[32m✓\x1b[0m Discovered and registered ${domainNames.length} domain(s) in SQLite SSOT:`);
     for (const name of domainNames) {

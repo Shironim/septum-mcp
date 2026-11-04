@@ -35,7 +35,6 @@ export type {
 } from "../../types/index.ts";
 import { DependencyRepository } from "./repositories/dependency.repository.ts";
 import { DomainRepository } from "./repositories/domain.repository.ts";
-import { EnvironmentRepository } from "./repositories/environment.repository.ts";
 import { FileRepository } from "./repositories/file.repository.ts";
 import { MetaRepository } from "./repositories/meta.repository.ts";
 import { SymbolRepository } from "./repositories/symbol.repository.ts";
@@ -48,7 +47,6 @@ export class SeptumRepository {
   public readonly symbols: SymbolRepository;
   public readonly dependencies: DependencyRepository;
   public readonly meta: MetaRepository;
-  public readonly environment: EnvironmentRepository;
 
   constructor(private db: Database) {
     this.domains = new DomainRepository(db);
@@ -56,7 +54,6 @@ export class SeptumRepository {
     this.symbols = new SymbolRepository(db);
     this.dependencies = new DependencyRepository(db);
     this.meta = new MetaRepository(db);
-    this.environment = new EnvironmentRepository(db);
   }
 
   public runInTransaction<T>(fn: () => T, immediate = false): T {
@@ -251,17 +248,6 @@ export class SeptumRepository {
     domain_name: string;
   } | null {
     return this.symbols.getFileWithDomain(filePath);
-  }
-
-  public getHotspotSymbols(options: {
-    minLines?: number;
-    minNesting?: number;
-    kind?: SymbolKind;
-    domain?: string;
-    limit?: number;
-    sortBy?: "lines" | "nesting" | "risk_score";
-  } = {}): Array<SymbolRecord & { file_path: string; domain_name: string; risk_score: number }> {
-    return this.symbols.getHotspotSymbols(options);
   }
 
   public getSymbolDetails(

@@ -1,15 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
-import { SessionManager } from "../../src/core/session/session-manager.ts";
-import { BoundaryEvaluator } from "../../src/core/boundary/evaluator.ts";
-import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
-import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
-import { handleRegisterFeature } from "../../src/mcp/tools/register-feature.ts";
 import { TABLE_STATEMENTS } from "../../src/core/database/schema.ts";
 import { GoExtractor } from "../../src/core/parser/extractors/go.ts";
 import { GetSymbolImpactSchema } from "../../src/mcp/schemas.ts";
@@ -32,68 +27,6 @@ describe("MCP follow-up fixes", () => {
     db.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
-
-  it("preserves a successful owner update across a rejected second process", () => {
-    const probe = Bun.spawnSync(["bun", resolve(import.meta.dir, "../integration/feature-lock-race.ts")]);
-    expect(probe.stderr.toString()).toBe("");
-    expect(probe.exitCode).toBe(0);
-  });
-
-  it("serializes two simultaneous owners so only one feature and lease is accepted", async () => {
-    const script = resolve(import.meta.dir, "../integration/feature-lock-race.ts");
-    const owners = ["contender-a", "contender-b"];
-    const children = owners.map(owner => Bun.spawn(["bun", script, "contend", root, owner], { stdout: "pipe", stderr: "pipe" }));
-    try {
-      const deadline = Date.now() + 3000;
-      while (!owners.every(owner => fs.existsSync(join(root, `.ready-${owner}`)))) {
-        expect(Date.now()).toBeLessThan(deadline);
-        await Bun.sleep(10);
-      }
-      fs.writeFileSync(join(root, ".start"), "start");
-      const responses = await Promise.all(children.map(async child => {
-        const [output, errors, exit] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-        expect(errors).toBe("");
-        expect(exit).toBe(0);
-        return JSON.parse(output);
-      }));
-      const winners = responses.filter(r => r.accepted);
-      expect(winners).toHaveLength(1);
-      expect(Object.keys(JSON.parse(repo.getMeta("features_json")!))).toEqual([winners[0].owner]);
-      expect(SessionManager.getActiveSession(root)?.owner_id).toBe(winners[0].owner);
-    } finally { for (const child of children) { child.kill(); await child.exited; } }
-  });
-
-  it("rejects a different owner before touching persisted metadata", async () => {
-    const config = ConfigLoader.loadFromRepository(repo);
-    SessionManager.saveActiveSession(root, { feature_key: "owned", domain: "orders", touchpoints: [] }, "other-owner");
-    db.raw.run("CREATE TRIGGER no_feature_write BEFORE INSERT ON repo_meta WHEN NEW.key='features_json' BEGIN SELECT RAISE(ABORT,'unexpected metadata mutation'); END");
-    await expect(handleRegisterFeature(repo, config, { feature_key: "contender", domain: "orders" }, root)).rejects.toThrow(/owned by/);
-    expect(repo.getMeta("features_json")).toBeNull();
-    expect(SessionManager.getActiveSession(root)?.feature_key).toBe("owned");
-  });
-
-  it("rolls back SQLite and preserves the old lease when atomic rename fails", async () => {
-    const config = ConfigLoader.loadFromRepository(repo);
-    await handleRegisterFeature(repo, config, { feature_key: "old", domain: "orders" }, root);
-    const before = repo.getMeta("features_json");
-    const lease = fs.readFileSync(join(root, ".septum/session.json"), "utf8");
-    const rename = spyOn(fs, "renameSync").mockImplementation(() => { throw new Error("injected rename failure"); });
-    try {
-      await expect(handleRegisterFeature(repo, config, { feature_key: "new", domain: "orders" }, root)).rejects.toThrow("injected rename failure");
-    } finally { rename.mockRestore(); }
-    expect(repo.getMeta("features_json")).toBe(before);
-    expect(fs.readFileSync(join(root, ".septum/session.json"), "utf8")).toBe(lease);
-    expect(config.features.new).toBeUndefined();
-  });
-
-  for (const content of ["{broken", "{}", '{"feature_key":"f","domain":"orders","touchpoints":[null]}']) {
-    it(`rejects an untrusted session in the boundary handler: ${content}`, async () => {
-      fs.writeFileSync(join(root, ".septum/session.json"), content);
-      const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(root, repo));
-      await expect(handleCheckBoundary(evaluator, ConfigLoader.loadFromRepository(repo), { file_path: "src/orders/a.ts" }, repo, root)).rejects.toThrow(/session/i);
-      expect(SessionManager.clearActiveSession(root, undefined, true)).toBe(true);
-    });
-  }
 
   function legacyDomains(forbidden = "[]") {
     db.raw.run("PRAGMA foreign_keys=OFF; DROP TABLE domains;");
@@ -159,10 +92,10 @@ describe("MCP follow-up fixes", () => {
     expect(repo.getSymbolDetails("A", { includeDependencies: false })?.connected_files).toEqual({ imports_from: [], imported_by_count: 0 });
   });
 
-  it("emits exactly five public MCP ingress entries with the dispatched boundary wrapper", () => {
+  it("emits exactly four public MCP ingress entries with the dispatched boundary wrapper", () => {
     const entries = new McpCliSemanticExtractor().extractSlices(resolve(import.meta.dir, "../..")).filter(s => s.http_method === "MCP");
-    expect(entries).toHaveLength(5);
-    expect(new Set(entries.map(s => s.route_name)).size).toBe(5);
+    expect(entries).toHaveLength(4);
+    expect(new Set(entries.map(s => s.route_name)).size).toBe(4);
     expect(entries.find(s => s.route_name === "septum_boundary")?.controller_file).toBe("src/mcp/tools/boundary.ts");
   });
 

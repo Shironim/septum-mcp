@@ -15,11 +15,11 @@ describe("F2-05: Initial Ingestion Failure Propagation and Partial State Reporti
       fs.mkdirSync(path.join(tmpDir, "src", "billing"), { recursive: true });
       fs.writeFileSync(path.join(tmpDir, "src", "billing", "Invoice.ts"), "export const invoice = 1;", "utf-8");
 
-      // Inject corrupt features_json in .septum/septum.db before init
+      // Inject corrupt settings_json in .septum/septum.db before init
       fs.mkdirSync(path.join(tmpDir, ".septum"), { recursive: true });
       const db = new SeptumDatabase(path.join(tmpDir, ".septum", "septum.db"));
       const repo = new SeptumRepository(db.raw);
-      repo.setMeta("features_json", "{bad feature JSON");
+      repo.setMeta("settings_json", "{bad settings JSON");
       db.close();
 
       const septumBin = path.resolve(__dirname, "../../bin/septum.ts");

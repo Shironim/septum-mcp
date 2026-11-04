@@ -5,7 +5,6 @@ import type { SymbolToolArgs } from "../schemas.ts";
 import { handleLocateSymbol } from "./locate-symbol.ts";
 import { handleGetSymbol } from "./get-symbol.ts";
 import { handleGetSymbolImpact } from "./get-symbol-impact.ts";
-import { handleGetSymbolHotspots } from "./get-symbol-hotspots.ts";
 import { retrieveContext } from "../../core/retrieval/context.ts";
 import { symbolWorkspace } from "../../core/retrieval/symbol-evidence.ts";
 
@@ -47,7 +46,7 @@ export async function handleSymbolTool(
     }
 
     case "impact": {
-      const symbol = args.symbol || args.query || "";
+      const symbol = args.symbol || args.query || args.symbol_ref?.name || "";
       return handleGetSymbolImpact(
         repo,
         config,
@@ -62,22 +61,6 @@ export async function handleSymbolTool(
         workspaceRoot
       );
     }
-
-    case "hotspots":
-      return handleGetSymbolHotspots(
-        repo,
-        config,
-        {
-          min_lines: args.min_lines,
-          min_nesting: args.min_nesting,
-          kind: args.kind,
-          domain: args.domain,
-          limit: args.limit ?? 30,
-          sort_by: (args.sort_by === "line_count" ? "lines" : args.sort_by) as any,
-          workspace_path: args.workspace_path,
-        },
-        workspaceRoot
-      );
 
     case "locate":
     default:

@@ -14,7 +14,6 @@ export async function auditStagedFiles(
   evaluator: BoundaryEvaluator,
   config: ValidatedSeptumConfig,
   workspaceRoot: string,
-  featureKey?: string,
   repo?: SeptumRepository
 ): Promise<{ files: string[]; violations: BoundaryViolation[]; resolution_issues: ImportResolution[] }> {
   const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: workspaceRoot, encoding: "utf8" }).trim();
@@ -53,14 +52,12 @@ export async function auditStagedFiles(
     evaluator = evaluator.withResolver(new ModuleResolver(snapshotRoot));
     const violations: BoundaryViolation[] = [];
     const resolutionIssues: ImportResolution[] = [];
-    if (featureKey) for (const file of deleted) violations.push(...evaluator.checkFeatureTouchpoints(featureKey, file, config));
     const stagedDependencies: ReturnType<SeptumRepository["getAllDependenciesWithDomains"]> = [];
     const parser = new ASTParserEngine();
     const interpretationChanged = [...files, ...deleted].some(file => /(?:\.(?:json|jsonc|toml)|(?:^|\/)(?:go\.mod|go\.work|Cargo\.lock))$/i.test(file));
     const changed = new Set(files);
     const sourceFiles = indexedPaths.filter(inside).map(file => (prefix ? relative(prefix, file) : file).replace(/\\/g, "/"));
     for (const file of sourceFiles) {
-      if (featureKey && changed.has(file)) violations.push(...evaluator.checkFeatureTouchpoints(featureKey, file, config));
       if (!ASTParserEngine.isSourceFile(file) || !evaluator.resolveSourceDomain(file, config)) continue;
       const content = await Bun.file(resolve(snapshotRoot, file)).text();
       const parsed = await parser.parseFile(resolve(snapshotRoot, file), content);

@@ -1,4 +1,3 @@
-import { resolveEffectiveFeature } from "../../core/session/effective-feature.ts";
 import { BoundaryEvaluator } from "../../core/boundary/evaluator.ts";
 import { ConfigLoader } from "../../core/config/loader.ts";
 import { SeptumDatabase } from "../../core/database/client.ts";
@@ -13,7 +12,7 @@ import { join, isAbsolute } from "node:path";
 export interface CheckCommandOptions {
   strict?: boolean;
   staged?: boolean;
-  feature?: string;
+  domain?: string;
   json?: boolean;
 }
 
@@ -59,8 +58,7 @@ export async function handleCheckCommand(
     }
 
     if (options.staged) {
-      const feature = resolveEffectiveFeature(workspaceRoot, config, options.feature);
-      const staged = await auditStagedFiles(evaluator, config, workspaceRoot, feature, repo);
+      const staged = await auditStagedFiles(evaluator, config, workspaceRoot, repo);
       violations = staged.violations;
       if (staged.resolution_issues.length && violations.length === 0) {
         console.warn(options.json ? JSON.stringify({ status: "unknown", resolution_issues: staged.resolution_issues }) : "Staged import resolution is incomplete; approval is unknown.");

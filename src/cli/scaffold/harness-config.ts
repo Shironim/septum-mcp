@@ -437,7 +437,7 @@ export function scaffoldHarnessCustomizations(
       console.log(`  ✓ Created onboarding instructions: '${options.rootDoc}'.`);
     } else if (force) {
       const existing = fs.readFileSync(rootDocPath, "utf-8");
-      if (!existing.includes("septum_domain")) {
+      if (!existing.includes("septum_map") && !existing.includes("septum_domain")) {
         fs.writeFileSync(rootDocPath, existing.trimEnd() + "\n\n" + SEPTUM_RULES_TEMPLATE + "\n", "utf-8");
         console.log(`  ✓ Appended Septum boundary rules to '${options.rootDoc}' (--force).`);
       }

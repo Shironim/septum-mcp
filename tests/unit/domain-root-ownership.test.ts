@@ -152,7 +152,7 @@ describe("single domain owner per physical root", () => {
     expect(() => new ModuleResolver(root).resolveSourceDomain("app.py", cfg)).toThrow("Domain root conflict");
     const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(root));
     expect(() => evaluator.auditCodebase(cfg)).toThrow("Domain root conflict");
-    expect(() => evaluator.evaluate("app.py", [], undefined, cfg)).toThrow("Domain root conflict");
+    expect(() => evaluator.evaluate("app.py", [], cfg)).toThrow("Domain root conflict");
     expect(() => evaluator.detectCircularDependencies(cfg, [])).toThrow("Domain root conflict");
   });
 

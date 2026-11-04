@@ -91,37 +91,4 @@ describe("BoundaryEvaluator", () => {
       expect(violations.length).toBe(0);
     });
   });
-
-  describe("checkFeatureTouchpoints (Scope Touchpoint Lock)", () => {
-    it("should approve file that is explicitly listed in allowed_touchpoints", () => {
-      const violations = evaluator.checkFeatureTouchpoints(
-        "checkout_flow",
-        "src/domains/orders/services/CheckoutService.ts",
-        mockConfig
-      );
-
-      expect(violations.length).toBe(0);
-    });
-
-    it("should approve file that matches a glob pattern in allowed_touchpoints", () => {
-      const violations = evaluator.checkFeatureTouchpoints(
-        "checkout_flow",
-        "src/domains/orders/controllers/CheckoutController.ts",
-        mockConfig
-      );
-
-      expect(violations.length).toBe(0);
-    });
-
-    it("should reject file outside allowed_touchpoints for the feature", () => {
-      const violations = evaluator.checkFeatureTouchpoints(
-        "checkout_flow",
-        "src/domains/orders/repositories/OrderRepository.ts",
-        mockConfig
-      );
-
-      expect(violations.length).toBe(1);
-      expect(violations[0].rule).toBe("touchpoint_violation");
-    });
-  });
 });

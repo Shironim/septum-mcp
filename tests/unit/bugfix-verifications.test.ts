@@ -6,7 +6,6 @@ import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { handleSymbolTool } from "../../src/mcp/tools/symbol.ts";
 import { SymbolToolSchema } from "../../src/mcp/schemas.ts";
-import { SessionManager } from "../../src/core/session/session-manager.ts";
 import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -120,74 +119,6 @@ describe("Bugfix Verifications: 4 Root Cause Fixes", () => {
       expect(parsedNonExistent.inbound_callers.length).toBe(0);
     } finally {
       db.close();
-    }
-  });
-
-  it("Bug 2: checkFeatureTouchpoints supports wildcard globs (*.ts, **, etc.)", () => {
-    const db = new SeptumDatabase(":memory:");
-    const repo = new SeptumRepository(db.raw);
-
-    try {
-      const config = SeptumConfigSchema.parse({
-        domains: { core: { root: "src/core" } },
-        features: {
-          test_glob: {
-            domain: "core",
-            description: "Test glob patterns",
-            allowed_touchpoints: ["src/core/*.ts", "src/core/sub/**/*.ts"],
-          },
-        },
-      });
-
-      const evaluator = new BoundaryEvaluator(repo);
-
-      // Matches direct *.ts pattern
-      const v1 = evaluator.checkFeatureTouchpoints("test_glob", "src/core/utils.ts", config);
-      expect(v1.length).toBe(0);
-
-      // Matches nested **/*.ts pattern
-      const v2 = evaluator.checkFeatureTouchpoints("test_glob", "src/core/sub/nested/file.ts", config);
-      expect(v2.length).toBe(0);
-
-      // Rejects non-matching extension or path
-      const v3 = evaluator.checkFeatureTouchpoints("test_glob", "src/core/utils.py", config);
-      expect(v3.length).toBe(1);
-      expect(v3[0].rule).toBe("touchpoint_violation");
-    } finally {
-      db.close();
-    }
-  });
-
-  it("Bug 3: SessionManager detects dead process locks and clears orphaned sessions cleanly", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "septum-session-test-"));
-    try {
-      const septumDir = join(tempDir, ".septum");
-      mkdirSync(septumDir, { recursive: true });
-
-      // An impossibly high PID or known dead PID
-      const deadPid = 999999999;
-      expect(SessionManager.isOwnerAlive(`process:${deadPid}`)).toBe(false);
-
-      // Write session with dead owner
-      writeFileSync(
-        join(septumDir, "session.json"),
-        JSON.stringify({
-          feature_key: "orphan_feature",
-          domain: "core",
-          touchpoints: ["src/core/**"],
-          locked_at: new Date().toISOString(),
-          owner_id: `process:${deadPid}`,
-        })
-      );
-
-      // Attempt to clear without force from a different process
-      const currentPid = `process:${process.pid}`;
-      expect(SessionManager.clearActiveSession(tempDir, currentPid, false)).toBe(true);
-
-      // Confirm session is cleared
-      expect(SessionManager.getActiveSession(tempDir)).toBeNull();
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
     }
   });
 

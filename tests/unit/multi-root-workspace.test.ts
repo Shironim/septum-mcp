@@ -7,7 +7,6 @@ import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { BoundaryEvaluator } from "../../src/core/boundary/evaluator.ts";
 import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
-import { handleRegisterFeature } from "../../src/mcp/tools/register-feature.ts";
 import { handleRegisterDomain } from "../../src/mcp/tools/register-domain.ts";
 import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
 import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
@@ -43,7 +42,6 @@ describe("Multi-Root Workspace Resolution & WorkspaceRoot Propagation", () => {
           archetypes: {},
         },
       },
-      features: {},
     };
   });
 
@@ -53,50 +51,6 @@ describe("Multi-Root Workspace Resolution & WorkspaceRoot Propagation", () => {
       fs.rmSync(tempWorkspace1, { recursive: true, force: true });
       fs.rmSync(tempWorkspace2, { recursive: true, force: true });
     } catch {}
-  });
-
-  it("handleRegisterFeature writes .septum/session.json into the provided workspaceRoot", async () => {
-    await handleRegisterFeature(
-      repo,
-      mockConfig,
-      {
-        feature_key: "cart-v2",
-        domain: "orders",
-        allowed_touchpoints: ["packages/orders/Cart.php"],
-      },
-      tempWorkspace1
-    );
-
-    const sessionFile = path.join(tempWorkspace1, ".septum", "session.json");
-    expect(fs.existsSync(sessionFile)).toBe(true);
-
-    const sessionData = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
-    expect(sessionData.feature_key).toBe("cart-v2");
-    expect(sessionData.domain).toBe("orders");
-
-    // Must NOT bleed into tempWorkspace2
-    expect(fs.existsSync(path.join(tempWorkspace2, ".septum", "session.json"))).toBe(false);
-  });
-
-  it("handleRegisterFeature persists session into the provided workspaceRoot and updates SQLite SSOT without septum.config.json drift", async () => {
-    await handleRegisterFeature(
-      repo,
-      mockConfig,
-      {
-        feature_key: "checkout-step",
-        domain: "orders",
-        allowed_touchpoints: ["packages/orders/Checkout.php"],
-      },
-      tempWorkspace2
-    );
-
-    const configFile = path.join(tempWorkspace2, "septum.config.json");
-    expect(fs.existsSync(configFile)).toBe(false);
-
-    const sessionFile = path.join(tempWorkspace2, ".septum", "session.json");
-    expect(fs.existsSync(sessionFile)).toBe(true);
-    expect(mockConfig.features["checkout-step"]).toBeDefined();
-    expect(mockConfig.features["checkout-step"].domain).toBe("orders");
   });
 
   it("BoundaryEvaluator with ModuleResolver correctly resolves relative paths inside workspaceRoot", async () => {

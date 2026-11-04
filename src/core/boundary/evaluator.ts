@@ -28,7 +28,6 @@ export class BoundaryEvaluator {
   public evaluate(
     filePath: string,
     proposedImports: string[] = [],
-    featureKey?: string,
     config?: ValidatedSeptumConfig
   ): BoundaryViolation[] {
     let activeConfig = config;
@@ -41,10 +40,6 @@ export class BoundaryEvaluator {
     }
     assertUniqueDomainRoots(activeConfig.domains, this.resolver.getProjectRoot());
     const violations: BoundaryViolation[] = [];
-
-    if (featureKey) {
-      violations.push(...this.checkFeatureTouchpoints(featureKey, filePath, activeConfig));
-    }
 
     if (proposedImports.length > 0) {
       violations.push(...this.checkProposedChanges(filePath, proposedImports, activeConfig));
@@ -386,66 +381,5 @@ export class BoundaryEvaluator {
     sourceFilePath?: string
   ): string | null {
     return this.resolver.resolveTargetDomain(targetStatement, sourceFilePath, config);
-  }
-
-  public checkFeatureTouchpoints(
-    featureKey: string,
-    targetFilePath: string,
-    config: ValidatedSeptumConfig
-  ): BoundaryViolation[] {
-    const violations: BoundaryViolation[] = [];
-    const features = config.features ?? {};
-    const featureConfig = features[featureKey];
-
-    if (!featureConfig) {
-      violations.push({
-        file: targetFilePath,
-        line: 1,
-        source_domain: "unknown",
-        target_domain: "unknown",
-        imported_target: targetFilePath,
-        rule: "unknown_feature",
-        message: `Feature '${featureKey}' is not defined in septum configuration.`,
-      });
-      return violations;
-    }
-
-    const root = this.resolver.getProjectRoot();
-    const normalizedTarget = relative(root, resolve(root, targetFilePath.replace(/\\/g, "/"))).replace(/\\/g, "/");
-    const allowedTouchpoints = featureConfig.allowed_touchpoints.map((tp) =>
-      isAbsolute(tp) ? relative(root, tp).replace(/\\/g, "/") : posix.normalize(tp.replace(/\\/g, "/"))
-    );
-
-    const domainCfg = config.domains[featureConfig.domain];
-    const domainRoot = domainCfg?.root ? domainCfg.root.replace(/\\/g, "/").replace(/^\.\//, "") : "";
-
-    const matches = (pattern: string): boolean => {
-      if (normalizedTarget === pattern) return true;
-      if (pattern.endsWith("/**")) {
-        return normalizedTarget.startsWith(pattern.slice(0, -3) + "/");
-      }
-      if (pattern.endsWith("/*")) {
-        const prefix = pattern.slice(0, -2) + "/";
-        return normalizedTarget.startsWith(prefix) && !normalizedTarget.slice(prefix.length).includes("/");
-      }
-      return matchesSimpleGlob(normalizedTarget, pattern, false);
-    };
-    const isAllowed = allowedTouchpoints.some(pattern =>
-      matches(pattern) || Boolean(domainRoot && matches(posix.normalize(`${domainRoot}/${pattern}`)))
-    );
-
-    if (!isAllowed) {
-      violations.push({
-        file: targetFilePath,
-        line: 1,
-        source_domain: featureConfig.domain,
-        target_domain: "unknown",
-        imported_target: targetFilePath,
-        rule: "touchpoint_violation",
-        message: `Scope violation: File '${targetFilePath}' is outside the declared allowed_touchpoints for feature '${featureKey}'. Permitted: [${allowedTouchpoints.join(", ")}].`,
-      });
-    }
-
-    return violations;
   }
 }

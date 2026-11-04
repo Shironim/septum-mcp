@@ -42,7 +42,6 @@ export interface SeptumConfig {
     ignore_patterns?: string[];
   };
   domains: Record<string, DomainConfig>;
-  features?: Record<string, FeatureConfig>;
 }
 
 export interface DomainConfig {
@@ -53,56 +52,10 @@ export interface DomainConfig {
   description?: string;
 }
 
-export interface FeatureConfig {
-  domain: string;
-  description?: string;
-  allowed_touchpoints: string[];
-  reuse_symbols?: string[];
-  input_contract?: Record<string, unknown>;
-  output_contract?: Record<string, unknown>;
-}
-
-export interface FeatureContextResponse {
-  feature_key: string;
-  feature?: string;
-  domain: string;
-  description?: string;
-  allowed_touchpoints: string[];
-  reuse_symbols: Array<{
-    status?: "resolved" | "ambiguous" | "not_found" | "stale";
-    symbol_ref?: SymbolReference;
-    candidates?: SymbolReference[];
-    name: string;
-    kind: string;
-    signature?: string;
-    methods?: string[];
-    properties?: string[];
-    file_path?: string;
-    domain?: string;
-  }>;
-  input_contract: Record<string, unknown>;
-  output_contract: Record<string, unknown>;
-  governance_directives?: string[];
-  is_inferred?: boolean;
-}
-
-export interface RegisterFeatureArgs {
-  feature_key: string;
-  feature?: string;
-  domain: string;
-  description?: string;
-  allowed_touchpoints?: string[];
-  reuse_symbols?: string[];
-  input_contract?: Record<string, unknown>;
-  output_contract?: Record<string, unknown>;
-  workspace_path?: string;
-}
-
 export interface CheckBoundaryArgs {
   file_path?: string;
   file_paths?: string[];
   proposed_imports?: string[];
-  feature_key?: string;
   scope?: "file" | "all" | "staged" | "domain";
   domain?: string;
   workspace_path?: string;
@@ -131,13 +84,6 @@ export interface FileRecord {
   last_scanned_at: string;
 }
 
-export interface ActiveFeatureSession {
-  owner_id?: string;
-  feature_key: string;
-  domain: string;
-  touchpoints: string[];
-  locked_at: string;
-}
 
 export interface SymbolReference {
   file_path: string;
@@ -243,8 +189,6 @@ export interface ParsedFileAST {
 export type BoundaryViolationRule =
   | "forbidden_dependency"
   | "disallowed_dependency"
-  | "touchpoint_violation"
-  | "unknown_feature"
   | "unmapped_domain"
   | "circular_dependency";
 

@@ -124,7 +124,7 @@ describe("F2-06: Config & Template Preservation on Init", () => {
       scaffoldAgentCustomizations(tmpDir, true);
 
       expect(fs.readFileSync(skillPath, "utf-8")).toContain("name: septum-map");
-      expect(fs.readFileSync(rulePath, "utf-8")).toContain("septum_domain");
+      expect(fs.readFileSync(rulePath, "utf-8")).toContain("septum_map");
 
       const parsedHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
       expect(parsedHooks["user-custom-hook"]).toEqual({ enabled: true });

@@ -477,14 +477,13 @@ class InvoiceRepository {
     });
   });
 
-  describe("6. Agentic Scaffolding Templates & 5-Tool MCP Contracts", () => {
-    it("should include all 5 Unified MCP tools in SEPTUM_MAP_SKILL_TEMPLATE with compact mode, max_depth, and circular_dependency", async () => {
+  describe("6. Agentic Scaffolding Templates & 4-Tool MCP Contracts", () => {
+    it("should include all 4 Unified MCP tools in SEPTUM_MAP_SKILL_TEMPLATE with compact mode, max_depth, and circular_dependency", async () => {
       const expectedTools = [
-        "septum_domain",
+        "septum_map",
         "septum_symbol",
         "septum_slice",
         "septum_boundary",
-        "septum_feature",
       ];
 
       for (const tool of expectedTools) {

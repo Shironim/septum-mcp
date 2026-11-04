@@ -9,8 +9,6 @@ import { BoundaryEvaluator } from '../../src/core/boundary/evaluator.ts';
 import { ModuleResolver } from '../../src/core/resolver/module-resolver.ts';
 import { IngestionPipeline } from '../../src/core/ingestion/pipeline.ts';
 import { ASTParserEngine } from '../../src/core/parser/tree-sitter.ts';
-import { SessionManager } from '../../src/core/session/session-manager.ts';
-import { handleRegisterFeature } from '../../src/mcp/tools/register-feature.ts';
 import { auditStagedFiles } from '../../src/core/boundary/staged-auditor.ts';
 import { VerticalSliceTracer } from '../../src/core/resolver/vertical-slice-tracer.ts';
 
@@ -33,31 +31,6 @@ function command(root: string, args: string[], input?: string) {
 afterEach(() => { for (const db of databases.splice(0)) db.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe('Reliability regressions', () => {
-  it('limits folder touchpoints to normalized directory boundaries', () => {
-    const { root, repo } = project();
-    const config = SeptumConfigSchema.parse({ domains: { orders: { root: 'src/orders' } }, features: { edit: { domain: 'orders', allowed_touchpoints: ['src/orders/controllers/**'] } } });
-    const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(root, repo));
-    expect(evaluator.checkFeatureTouchpoints('edit', 'src/orders/controllers/Order.ts', config)).toHaveLength(0);
-    for (const path of ['src/orders/controllers-other/Secret.ts', 'src/orders/controllers/../Secret.ts', join(root, 'src/orders/controllers-other/Secret.ts')]) {
-      expect(evaluator.checkFeatureTouchpoints('edit', path, config)).toHaveLength(1);
-    }
-    expect(evaluator.checkFeatureTouchpoints('edit', join(root, 'src/orders/controllers/Order.ts'), config)).toHaveLength(0);
-    config.features.edit.allowed_touchpoints = ['src/orders/controllers/*'];
-    expect(evaluator.checkFeatureTouchpoints('edit', 'src/orders/controllers/nested/Order.ts', config)).toHaveLength(1);
-  });
-
-  it('loads persisted feature rules before a separate hook checks scope', async () => {
-    const { root, repo } = project();
-    const config = SeptumConfigSchema.parse({ domains: { orders: { root: 'src/orders' } } });
-    repo.upsertDomain('orders', config.domains.orders);
-    await handleRegisterFeature(repo, config, { feature_key: 'edit', domain: 'orders', allowed_touchpoints: ['src/orders/allowed.ts'] }, root);
-    writeFileSync(join(root, '.septum/catalog_access.json'), JSON.stringify({ domains: { orders: new Date().toISOString() } }));
-    expect(ConfigLoader.load(undefined, root).features.edit).toBeDefined();
-    const result = command(root, ['hook', 'pre-write'], JSON.stringify({ tool_input: { file_path: 'src/orders/outside.ts', content: 'export const value=1;' } }));
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr.toString()).toContain('Scope Touchpoint Lock');
-  });
-
   it('strict CLI checks disallowed imports before deciding the exit code', async () => {
     const { root, repo } = project();
     const config = SeptumConfigSchema.parse({ domains: { orders: { root: 'src/orders' }, billing: { root: 'src/billing' } } });
@@ -117,16 +90,6 @@ describe('Reliability regressions', () => {
       expect((await parser.parseFile(path, source) as any).status).toBe('unsupported');
     }
   });
-
-  it('rejects acquisition and clearing by a different session owner', () => {
-    const { root } = project();
-    const session = { feature_key: 'edit', domain: 'orders', touchpoints: ['src/orders/allowed.ts'], locked_at: new Date().toISOString() };
-    (SessionManager.saveActiveSession as any)(root, session, 'agent-A');
-    expect(() => (SessionManager.saveActiveSession as any)(root, session, 'agent-B')).toThrow();
-    expect(() => (SessionManager.clearActiveSession as any)(root, 'agent-B')).toThrow();
-    expect(SessionManager.getActiveSession(root)?.feature_key).toBe('edit');
-    expect((SessionManager.clearActiveSession as any)(root, 'agent-A')).toBe(true);
-  });
 });
 
 describe('Distributed parser assets', () => {
@@ -153,25 +116,6 @@ describe('Audit completeness', () => {
     const result = command(root, ['check', '--strict']);
     expect(result.exitCode).toBe(1);
     expect(result.stderr.toString()).toContain('unsupported');
-  });
-
-  it('supports domain-relative folder scopes with the same directory limits', () => {
-    const { root, repo } = project();
-    const config = SeptumConfigSchema.parse({ domains: { orders: { root: 'src/orders' } }, features: { edit: { domain: 'orders', allowed_touchpoints: ['controllers/**'] } } });
-    const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(root, repo));
-    expect(evaluator.checkFeatureTouchpoints('edit', 'src/orders/controllers/Order.ts', config)).toHaveLength(0);
-    expect(evaluator.checkFeatureTouchpoints('edit', 'src/orders/controllers-other/Order.ts', config)).toHaveLength(1);
-  });
-
-  it('enforces the active session even when the payload tries another feature', async () => {
-    const { root, repo } = project();
-    const config = SeptumConfigSchema.parse({ domains: { orders: { root: 'src/orders' } } });
-    repo.upsertDomain('orders', config.domains.orders);
-    await handleRegisterFeature(repo, config, { feature_key: 'locked', domain: 'orders', allowed_touchpoints: ['src/orders/allowed.ts'] }, root);
-    repo.setMeta('features_json', JSON.stringify({ ...config.features, other: { ...config.features.locked, allowed_touchpoints: ['src/orders/outside.ts'] } }));
-    writeFileSync(join(root, '.septum/catalog_access.json'), JSON.stringify({ domains: { orders: new Date().toISOString() } }));
-    const result = command(root, ['hook', 'pre-write'], JSON.stringify({ tool_input: { feature_key: 'other', file_path: 'src/orders/outside.ts', content: 'export const value=1;' } }));
-    expect(result.exitCode).toBe(1);
   });
 });
 

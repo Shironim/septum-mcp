@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { TopologyDetector } from "../../src/core/discovery/topology-detector.ts";
-import { EnvironmentDetector } from "../../src/core/topology/environment-detector.ts";
 
 describe("F2-02: Domain Registration & Topology Preservation on Repeat Init", () => {
   it("should preserve manual domain root, dependencies, and archetypes on repeat init", () => {
@@ -40,21 +39,9 @@ describe("F2-02: Domain Registration & Topology Preservation on Repeat Init", ()
         allowed_dependencies: ["billing"],
       });
       repo.setMeta("settings_json", JSON.stringify({ enforcement: "strict" }));
-      repo.setMeta(
-        "features_json",
-        JSON.stringify({ userFeature: { domain: "core", allowed_touchpoints: ["manual/core/value.ts"] } })
-      );
-      repo.environment.saveLayer({
-        layer: "host",
-        platform: "User VPS",
-        status: "VERIFIED",
-        constraints: ["USER_CONSTRAINT"],
-        detected_from: ["manual"],
-      });
 
       // 3. Run repeat init discovery (force = false)
       const domains = TopologyDetector.discoverAndPersist(repo, tmpDir, false);
-      EnvironmentDetector.detect(tmpDir, repo, false);
 
       // 4. Verify that manual core domain properties are preserved
       const coreRecord = repo.domains.getDomainByName("core");
@@ -77,16 +64,9 @@ describe("F2-02: Domain Registration & Topology Preservation on Repeat Init", ()
       expect(typesRecord).toBeDefined();
       expect(typesRecord?.root_path).toBe(path.join("src", "types"));
 
-      // 7. Verify settings, features, and VERIFIED host environment survived
+      // 7. Verify settings survived
       const settings = repo.getMeta("settings_json");
       expect(settings).toBe(JSON.stringify({ enforcement: "strict" }));
-
-      const features = repo.getMeta("features_json");
-      expect(features).toContain("userFeature");
-
-      const hostLayer = repo.environment.getLayer("host");
-      expect(hostLayer?.status).toBe("VERIFIED");
-      expect(hostLayer?.platform).toBe("User VPS");
 
       // 8. Verify the returned domains map reflects existing preserved roots
       expect(domains["core"]?.root).toBe("manual/core");

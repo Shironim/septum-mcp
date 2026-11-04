@@ -4,10 +4,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-describe("Optimized 7 CLI Commands Suite", () => {
+describe("Optimized 5 CLI Commands Suite", () => {
   const septumBin = join(import.meta.dir, "../../bin/septum.ts");
 
-  it("lists exactly the 7 supported commands in --help", () => {
+  it("lists exactly the 5 supported commands in --help", () => {
     const res = spawnSync("bun", ["run", septumBin, "--help"], {
       encoding: "utf-8",
       timeout: 5000,
@@ -16,16 +16,16 @@ describe("Optimized 7 CLI Commands Suite", () => {
     expect(res.status).toBe(0);
     const output = res.stdout || "";
 
-    // The 7 active commands must be present
+    // The 5 active commands must be present
     expect(output).toContain("init");
     expect(output).toContain("sync");
     expect(output).toContain("check");
-    expect(output).toContain("feature");
     expect(output).toContain("hook");
-    expect(output).toContain("topology");
     expect(output).toContain("serve");
 
-    // The 4 removed commands must NOT be listed under COMMANDS
+    // The removed commands must NOT be listed under COMMANDS
+    expect(output).not.toContain("feature");
+    expect(output).not.toContain("topology");
     expect(output).not.toContain("ingest ");
     expect(output).not.toContain("query [domain]");
     expect(output).not.toContain("locate <query>");
@@ -33,7 +33,7 @@ describe("Optimized 7 CLI Commands Suite", () => {
   });
 
   it("rejects removed commands with exit code 1", () => {
-    const removedCommands = ["ingest", "query", "locate", "slice"];
+    const removedCommands = ["ingest", "query", "locate", "slice", "feature", "topology"];
 
     for (const cmd of removedCommands) {
       const res = spawnSync("bun", ["run", septumBin, cmd], {

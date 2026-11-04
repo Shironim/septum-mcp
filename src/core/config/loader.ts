@@ -66,7 +66,6 @@ export class ConfigLoader {
         ],
       },
       domains: {},
-      features: {},
     };
   }
 
@@ -85,8 +84,6 @@ export class ConfigLoader {
     }
 
     if (typeof repo?.getMeta === "function") {
-      const features = repo.getMeta("features_json");
-      if (features) config.features = JSON.parse(features);
       const settings = repo.getMeta("settings_json");
       if (settings) Object.assign(config.settings, JSON.parse(settings));
     }

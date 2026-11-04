@@ -261,68 +261,6 @@ export class SymbolRepository {
     return this.db.query<any, [string]>(query).get(filePath) ?? null;
   }
 
-  public getHotspotSymbols(options: {
-    minLines?: number;
-    minNesting?: number;
-    kind?: SymbolKind;
-    domain?: string;
-    limit?: number;
-    sortBy?: "lines" | "nesting" | "risk_score";
-  } = {}): Array<SymbolRecord & { file_path: string; domain_name: string; risk_score: number }> {
-    const minLines = options.minLines ?? 0;
-    const minNesting = options.minNesting ?? 1;
-    const limit = options.limit ?? 50;
-    const sortBy = options.sortBy ?? "risk_score";
-
-    let sql = `
-      SELECT 
-        s.id,
-        s.file_id,
-        s.name,
-        s.kind,
-        s.signature,
-        s.visibility,
-        s.line_start,
-        s.line_end,
-        s.line_count,
-        s.nesting_depth,
-        f.path AS file_path,
-        d.name AS domain_name
-      FROM symbols s
-      JOIN files f ON s.file_id = f.id
-      JOIN domains d ON f.domain_id = d.id
-      WHERE s.line_count >= ? AND s.nesting_depth >= ?
-    `;
-
-    const params: any[] = [minLines, minNesting];
-
-    if (options.kind) {
-      sql += " AND s.kind = ?";
-      params.push(options.kind);
-    }
-
-    if (options.domain) {
-      sql += " AND d.name = ?";
-      params.push(options.domain);
-    }
-
-    if (sortBy === "nesting") {
-      sql += " ORDER BY s.nesting_depth DESC, s.line_count DESC, s.name ASC LIMIT ?";
-    } else if (sortBy === "lines") {
-      sql += " ORDER BY s.line_count DESC, s.nesting_depth DESC, s.name ASC LIMIT ?";
-    } else {
-      sql += " ORDER BY (s.line_count * (1.0 + s.nesting_depth * 0.3)) DESC, s.nesting_depth DESC, s.name ASC LIMIT ?";
-    }
-    params.push(limit);
-
-    const rows = this.db.query<any, any[]>(sql).all(...params);
-    return rows.map((r) => ({
-      ...r,
-      nesting_depth: r.nesting_depth ?? 1,
-      risk_score: Math.round((r.line_count ?? 1) * (1.0 + (r.nesting_depth ?? 1) * 0.3)),
-    }));
-  }
-
   public getSymbolDetails(
     symbolQuery: string,
     options: SymbolSelectionOptions & { includeDependencies?: boolean; workspaceRoot?: string } = {}

@@ -5,7 +5,7 @@ import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { ASTParserEngine } from "../../src/core/parser/tree-sitter.ts";
 
-describe("Septum 3-Gate Active Hook Verification", () => {
+describe("Septum Active Pre-write Hook AST Boundary Verification", () => {
   const db = new SeptumDatabase(":memory:");
   const repo = new SeptumRepository(db.raw);
   const evaluator = new BoundaryEvaluator(repo);
@@ -41,45 +41,9 @@ describe("Septum 3-Gate Active Hook Verification", () => {
         archetypes: {},
       },
     },
-    features: {
-      cancel_order_flow: {
-        domain: "orders",
-        description: "Order cancellation flow",
-        allowed_touchpoints: [
-          "src/domains/orders/controllers/CancelOrderController.ts",
-          "src/domains/orders/services/OrderCancellationService.ts",
-        ],
-        reuse_symbols: ["PaymentService"],
-        input_contract: { order_id: "string" },
-        output_contract: { cancelled: "boolean" },
-      },
-    },
   };
 
-  it("Gate 1: should block target files outside allowed_touchpoints", () => {
-    // Attempting to edit an unauthorized file under the active feature
-    const violations = evaluator.checkFeatureTouchpoints(
-      "cancel_order_flow",
-      "src/domains/orders/controllers/UnrelatedController.ts",
-      mockConfig
-    );
-
-    expect(violations.length).toBe(1);
-    expect(violations[0].rule).toBe("touchpoint_violation");
-    expect(violations[0].message).toContain("outside the declared allowed_touchpoints");
-  });
-
-  it("Gate 1: should permit target files declared in allowed_touchpoints", () => {
-    const violations = evaluator.checkFeatureTouchpoints(
-      "cancel_order_flow",
-      "src/domains/orders/controllers/CancelOrderController.ts",
-      mockConfig
-    );
-
-    expect(violations.length).toBe(0);
-  });
-
-  it("Gate 2: should block forbidden cross-domain imports in proposed code", async () => {
+  it("should block forbidden cross-domain imports in proposed code", async () => {
     const proposedCode = `
 import { OrderProcessor } from "../../orders/processor";
 export class PaymentService {
@@ -104,7 +68,7 @@ export class PaymentService {
     expect(violations[0].target_domain).toBe("orders");
   });
 
-  it("Gate 2: should permit approved cross-domain imports", async () => {
+  it("should permit approved cross-domain imports", async () => {
     const proposedCode = `
 import { User } from "../../identity/user";
 export class PaymentService {
@@ -126,7 +90,7 @@ export class PaymentService {
     expect(violations.length).toBe(0);
   });
 
-  it("Gate 3: should identify whether a source domain was properly resolved for consultation check", () => {
+  it("should resolve source domain correctly", () => {
     const domain = evaluator.resolveSourceDomain(
       "src/domains/billing/services/PaymentService.ts",
       mockConfig

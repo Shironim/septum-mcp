@@ -8,15 +8,6 @@ export const DomainConfigSchema = z.object({
   archetypes: z.record(z.string()).optional().default({}),
 });
 
-export const FeatureConfigSchema = z.object({
-  domain: z.string().min(1, "domain reference is required"),
-  description: z.string().optional(),
-  allowed_touchpoints: z.array(z.string()).min(1, "allowed_touchpoints must contain at least one file/path"),
-  reuse_symbols: z.array(z.string()).optional().default([]),
-  input_contract: z.record(z.unknown()).optional().default({}),
-  output_contract: z.record(z.unknown()).optional().default({}),
-});
-
 export const SeptumConfigSchema = z.object({
   version: z.string().default("1.0"),
   settings: z
@@ -63,7 +54,6 @@ export const SeptumConfigSchema = z.object({
       ],
     }),
   domains: z.record(DomainConfigSchema).default({}),
-  features: z.record(FeatureConfigSchema).optional().default({}),
 });
 
 export type ValidatedSeptumConfig = z.infer<typeof SeptumConfigSchema>;

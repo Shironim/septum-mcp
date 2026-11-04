@@ -45,7 +45,7 @@ export function handleGetDomainCatalog(
     if (allDomains.length === 0) {
       const root = targetRoot;
       let agentGuidance =
-        "Panggil tool 'septum_domain(action: \"register\", name: \"core\", root: \"src\", ingest_now: true)' untuk mendaftarkan dan mengindeks domain utama secara otomatis, atau jalankan 'septum init' di terminal workspace.";
+        "Panggil tool 'septum_map(action: \"register\", name: \"core\", root: \"src\", ingest_now: true)' untuk mendaftarkan dan mengindeks domain utama secara otomatis, atau jalankan 'septum init' di terminal workspace.";
       if (runtimeVersion.update_available) {
         agentGuidance += ` Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Recommend running '${runtimeVersion.upgrade_command}' and reloading the MCP server if schema/features differ.`;
       }
@@ -56,7 +56,7 @@ export function handleGetDomainCatalog(
         runtime_version: runtimeVersion,
         message: `Workspace '${root}' belum memiliki domain terdaftar dalam Septum catalog.`,
         suggested_action: {
-          tool: "septum_domain",
+          tool: "septum_map",
           params: {
             action: "register",
             name: "core",
@@ -92,7 +92,7 @@ export function handleGetDomainCatalog(
         : repo.getAllVerticalSlices().length;
 
     let agentInstruction =
-      "Macro semantic map loaded from SQLite SSOT. Use 'septum_domain' with domain='<name>' for granular file/symbol catalogs, or 'septum_slice' with query='<route|command|intent>' for end-to-end execution flow.";
+      "Macro semantic map loaded from SQLite SSOT. Use 'septum_map' with domain='<name>' for granular file/symbol catalogs, or 'septum_slice' with query='<route|command|intent>' for end-to-end execution flow.";
     if (isDirty) {
       agentInstruction += " Notice: Index has pending or unsynchronized file changes. Run 'septum sync' to ensure all symbol coordinates and call graphs are fully refreshed.";
     }
@@ -160,7 +160,7 @@ export function handleGetDomainCatalog(
       available_domains: available,
       suggestions: suggestions.length > 0 ? suggestions : available,
       suggested_action: {
-        tool: "septum_domain",
+        tool: "septum_map",
         params: { action: "register", domain: domainName, root: `src/domains/${domainName}` },
       },
     };
@@ -178,9 +178,6 @@ export function handleGetDomainCatalog(
       runtime_version: runtimeVersion,
     };
   }
-
-  // Record access log for Gate 3 (Mandatory Catalog Consultation)
-  recordCatalogAccess(domainName, targetRoot);
 
   const catalogPayload: Record<string, any> = {
     ...catalog,
@@ -204,23 +201,4 @@ export function handleGetDomainCatalog(
     metadata: { runtime_version: runtimeVersion },
     runtime_version: runtimeVersion,
   };
-}
-
-function recordCatalogAccess(domain: string, projectRoot: string = process.cwd()): void {
-  try {
-    const septumDir = path.resolve(projectRoot, ".septum");
-    if (!fs.existsSync(septumDir)) {
-      return;
-    }
-    const logPath = path.join(septumDir, "catalog_access.json");
-    let log: { domains?: Record<string, string>; features?: Record<string, string> } = {};
-    if (fs.existsSync(logPath)) {
-      try {
-        log = JSON.parse(fs.readFileSync(logPath, "utf-8"));
-      } catch {}
-    }
-    log.domains = log.domains || {};
-    log.domains[domain] = new Date().toISOString();
-    fs.writeFileSync(logPath, JSON.stringify(log, null, 2), "utf-8");
-  } catch {}
 }

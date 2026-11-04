@@ -10,11 +10,8 @@ import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
 import { auditStagedFiles } from "../../src/core/boundary/staged-auditor.ts";
 import { BehavioralAnalyzer } from "../../src/core/parser/behavioral-analyzer.ts";
 import { LaravelMigrationSchemaProvider } from "../../src/core/parser/schema/providers/laravel-migration-provider.ts";
-import { handleGetFeatureContext } from "../../src/mcp/tools/get-feature-context.ts";
 import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
-import { resolveEffectiveFeature } from "../../src/core/session/effective-feature.ts";
-import { SEPTUM_PRE_WRITE_SCRIPT, SEPTUM_POST_WRITE_SCRIPT } from "../../src/cli/templates/hooks.ts";
-import { installGitHook } from "../../src/cli/commands/init.ts";
+import { SEPTUM_POST_WRITE_SCRIPT } from "../../src/cli/templates/hooks.ts";
 import { SEMANTIC_EXTRACTOR_REVISION } from "../../src/core/parser/semantic-revision.ts";
 import { VerticalSliceTracer } from "../../src/core/resolver/vertical-slice-tracer.ts";
 
@@ -55,14 +52,7 @@ test("staged aliases, inherited config and target membership ignore unstaged edi
   expect((await audit()).violations).toHaveLength(0);
 });
 
-test("feature reuse exposes ambiguity and file-qualified identity, then detects deletion", async () => {
-  const f = fixture(); await new IngestionPipeline(f.repo, f.root).run(f.config);
-  f.config.features = { pay: { domain: "orders", allowed_touchpoints: [], reuse_symbols: ["invoice", "src/billing/Invoice.ts#invoice"] } };
-  const get = () => JSON.parse(handleGetFeatureContext(f.repo, f.config, { feature_key: "pay" }, f.root).content[0].text).reuse_symbols;
-  expect(get()[0].status).toBe("ambiguous"); expect(get()[0].candidates).toHaveLength(2);
-  expect(get()[1].status).toBe("resolved"); expect(get()[1].symbol_ref.file_path).toBe("src/billing/Invoice.ts");
-  unlinkSync(join(f.root, "src/billing/Invoice.ts")); expect(get()[1].status).toBe("stale");
-});
+
 
 test("proposal approval declares omitted and explicit empty imports without certifying existing imports", async () => {
   const f = fixture(); await new IngestionPipeline(f.repo, f.root).run(f.config);
@@ -108,29 +98,9 @@ test("migration summary scopes tables and up, applies column removals and rename
   expect(schema?.fields.map(field => field.name)).toEqual(["state"]);
 });
 
-test("generated pre-write wrapper and CLI enforce the same active lease from a subfolder", async () => {
-  const f = fixture(); await new IngestionPipeline(f.repo, f.root).run(f.config);
-  f.put(".septum/session.json", JSON.stringify({ feature_key: "pay", domain: "orders", touchpoints: ["src/orders/Order.ts"], owner_id: "another-owner" }));
-  f.put(".septum/catalog_access.json", JSON.stringify({ domains: { orders: "consulted" } }));
-  f.put(".agents/hooks/pre.sh", SEPTUM_PRE_WRITE_SCRIPT);
-  f.put("bin/septum.ts", `import ${JSON.stringify(cli)};`);
-  for (const [cwd, target] of [[f.root, "src/orders/Local.ts"], [join(f.root, "src/orders"), "Local.ts"], [join(f.root, "src/orders"), join(f.root, "src/orders/Local.ts")]]) {
-    const result = Bun.spawnSync(["sh", join(f.root, ".agents/hooks/pre.sh")], { cwd, stdin: Buffer.from(JSON.stringify({ tool_input: { file_path: target } })) });
-    expect(result.exitCode).toBe(1); expect(JSON.parse(result.stdout.toString()).decision).toBe("deny");
-  }
-  f.git("init", "-q"); f.git("add", "src", "configs", "tsconfig.json", "package.json");
-  f.repo.setMeta("settings_json", JSON.stringify(f.config.settings));
-  const cliResult = Bun.spawnSync(["bun", cli, "check", "--staged", "--strict", "--json"], { cwd: f.root });
-  expect(cliResult.exitCode).toBe(1); expect(JSON.parse(cliResult.stdout.toString()).violations.some((v: any) => v.rule === "touchpoint_violation")).toBe(true);
-  installGitHook(f.root);
-  const commitGuard = Bun.spawnSync(["sh", join(f.root, ".git/hooks/pre-commit")], { cwd: f.root });
-  expect(commitGuard.exitCode).toBe(1); expect(commitGuard.stderr.toString()).toContain("TOUCHPOINT_VIOLATION");
-  expect(() => resolveEffectiveFeature(f.root, f.config, "other")).toThrow(/Active feature lock/);
-  f.put(".septum/session.json", "{broken"); expect(() => resolveEffectiveFeature(f.root, f.config)).toThrow(/Corrupted/);
-  unlinkSync(join(f.root, ".septum/session.json")); expect(resolveEffectiveFeature(f.root, f.config)).toBeUndefined();
-});
 
-test("a staged config-only alias change checks unchanged sources and deletion-only changes honor the lease", async () => {
+
+test("a staged config-only alias change checks unchanged sources", async () => {
   const f = fixture();
   f.put("configs/base.json", JSON.stringify({ compilerOptions: { baseUrl: "..", paths: { "@invoice": ["src/orders/Local.ts"] } } }));
   await new IngestionPipeline(f.repo, f.root).run(f.config);
@@ -141,12 +111,6 @@ test("a staged config-only alias change checks unchanged sources and deletion-on
   const changed = await auditStagedFiles(f.evaluator, f.config, f.root, undefined, f.repo);
   expect(changed.files).toEqual(["configs/base.json"]);
   expect(changed.violations.some(v => v.file === "src/orders/Order.ts" && v.rule === "forbidden_dependency")).toBe(true);
-  f.git("restore", "--staged", "configs/base.json");
-  f.git("rm", "src/orders/Local.ts");
-  f.put(".septum/session.json", JSON.stringify({ feature_key: "pay", domain: "orders", touchpoints: ["src/orders/Order.ts"], owner_id: "other" }));
-  const key = resolveEffectiveFeature(f.root, f.config);
-  const deleted = await auditStagedFiles(f.evaluator, f.config, f.root, key, f.repo);
-  expect(deleted.violations.some(v => v.file === "src/orders/Local.ts" && v.rule === "touchpoint_violation")).toBe(true);
 });
 
 test("generated post-write wrapper syncs its workspace when invoked from a subfolder", async () => {

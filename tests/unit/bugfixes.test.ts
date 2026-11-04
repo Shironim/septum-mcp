@@ -12,10 +12,7 @@ import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
 import { handleGetDomainCatalog } from "../../src/mcp/tools/get-domain-catalog.ts";
 import { handleGetSymbolImpact } from "../../src/mcp/tools/get-symbol-impact.ts";
 import { GoExtractor } from "../../src/core/parser/extractors/go.ts";
-import { GetEnvironmentTopologySchema } from "../../src/mcp/schemas.ts";
 import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
-import { handleGetFeatureContext } from "../../src/mcp/tools/get-feature-context.ts";
-import { handleRegisterFeature } from "../../src/mcp/tools/register-feature.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 
 describe("Septum Bugfixes Regression Suite (SP-1 to SP-7)", () => {
@@ -159,25 +156,7 @@ describe("Septum Bugfixes Regression Suite (SP-1 to SP-7)", () => {
     });
   });
 
-  describe("SP-5: Contextual Target Root for Catalog Access Audit Log", () => {
-    it("should record catalog access in the specified workspace root instead of process.cwd()", () => {
-      repo.upsertDomain("billing", {
-        root: "src/domains/billing",
-        description: "Billing domain",
-        allowed_dependencies: [],
-        forbidden_dependencies: [],
-        archetypes: {},
-      });
 
-      fs.mkdirSync(path.join(tempDir, ".septum"), { recursive: true });
-      handleGetDomainCatalog(repo, mockConfig, { domain: "billing" }, tempDir);
-
-      const auditFile = path.join(tempDir, ".septum", "catalog_access.json");
-      expect(fs.existsSync(auditFile)).toBe(true);
-      const auditContent = JSON.parse(fs.readFileSync(auditFile, "utf-8"));
-      expect(auditContent.domains?.billing).toBeDefined();
-    });
-  });
 
   describe("SP-6: found_in_index Status and Diagnostic Warning in getSymbolImpact", () => {
     it("should return found_in_index: false and diagnostic warning for unindexed/fictional symbols", () => {
@@ -330,31 +309,7 @@ describe("Septum Bugfixes Regression Suite (SP-1 to SP-7)", () => {
     });
   });
 
-  describe("SP-12: BoundaryEvaluator Cross-Domain Feature Touchpoint Isolation", () => {
-    it("should reject touchpoint with same filename in different domain", () => {
-      const evaluator = new BoundaryEvaluator(repo);
-      const configWithFeature: ValidatedSeptumConfig = {
-        ...mockConfig,
-        features: {
-          "user-auth": {
-            domain: "identity",
-            description: "User authentication",
-            allowed_touchpoints: ["types.ts"],
-          },
-        },
-      };
 
-      // File in billing domain with same name types.ts should NOT be allowed for identity feature
-      const violations = evaluator.checkFeatureTouchpoints(
-        "user-auth",
-        "src/domains/billing/types.ts",
-        configWithFeature
-      );
-
-      expect(violations.length).toBe(1);
-      expect(violations[0].rule).toBe("touchpoint_violation");
-    });
-  });
 
   describe("SP-13: GoExtractor Third-Party Module External Classification", () => {
     it("should classify third-party Go modules as external and stdlib as external", async () => {
@@ -379,30 +334,6 @@ import (
     });
   });
 
-  describe("SP-14: GetEnvironmentTopologySchema Snake_Case Aliases Preprocessing", () => {
-    it("should accept resolve_node and snake_case nested keys without throwing validation error", () => {
-      const input = {
-        resolve_node: {
-          id: "runtime-node-1",
-          layer: "runtime",
-          name: "Bun Runtime",
-          platform: "bun",
-          canonical_tag: "vps",
-          domain_or_ip: "127.0.0.1",
-          role: "api-server",
-        },
-      };
-
-      const parsed = GetEnvironmentTopologySchema.safeParse(input);
-      expect(parsed.success).toBe(true);
-      if (parsed.success) {
-        expect(parsed.data.resolveNode).toBeDefined();
-        expect(parsed.data.resolveNode?.id).toBe("runtime-node-1");
-        expect(parsed.data.resolveNode?.name).toBe("Bun Runtime");
-      }
-    });
-  });
-
   describe("SP-15: CheckBoundary Batch Evaluation Unindexed Warning", () => {
     it("should include unindexed notice in batch mode when domain catalog has 0 domains", async () => {
       repo.setMeta("sync_state", "complete");
@@ -422,43 +353,6 @@ import (
       const parsed = JSON.parse(res.content[0].text);
       expect(parsed.status).toBe("approved");
       expect(parsed.message).toContain("Domain catalog is currently unindexed");
-    });
-  });
-
-  describe("SP-16: handleRegisterFeature Workspace Root Session Lease", () => {
-    it("should save active session inside specified workspaceRoot instead of process.cwd()", async () => {
-      repo.upsertDomain("orders", { root: "src/domains/orders" });
-      const configWithFeature: ValidatedSeptumConfig = {
-        ...mockConfig,
-        domains: {
-          orders: {
-            root: "src/domains/orders",
-            allowed_dependencies: [],
-            forbidden_dependencies: [],
-            archetypes: {},
-          },
-        },
-        features: {
-          "order-checkout": {
-            domain: "orders",
-            description: "Checkout flow",
-            allowed_touchpoints: ["src/domains/orders/checkout.ts"],
-          },
-        },
-      };
-
-      await handleRegisterFeature(
-        repo,
-        configWithFeature,
-        { feature_key: "order-checkout", domain: "orders", allowed_touchpoints: ["src/domains/orders/checkout.ts"] },
-        tempDir
-      );
-
-      const sessionFile = path.join(tempDir, ".septum", "session.json");
-      expect(fs.existsSync(sessionFile)).toBe(true);
-      const sessionData = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
-      expect(sessionData.feature_key).toBe("order-checkout");
-      expect(sessionData.domain).toBe("orders");
     });
   });
 
