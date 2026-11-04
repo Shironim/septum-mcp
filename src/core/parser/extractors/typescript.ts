@@ -306,8 +306,8 @@ export class TypeScriptExtractor implements CodeExtractor {
               ...(importedSymbols.length > 0 ? { imported_symbols: importedSymbols } : {}),
             });
           }
+          return;
         }
-        return;
       }
 
       if (node.type === "call_expression") {

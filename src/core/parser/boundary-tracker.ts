@@ -393,6 +393,21 @@ export function blankCommentsAndStrings(
       continue;
     }
 
+    // PHP heredoc/nowdoc is non-code, including quotes and comment-like text.
+    if (ch === "<" && content.slice(i, i + 3) === "<<<") {
+      const header = /^<<<[ \t]*['"]?([A-Za-z_]\w*)['"]?[ \t]*\r?\n/.exec(content.slice(i));
+      if (header) {
+        const rest = content.slice(i + header[0].length);
+        const ending = new RegExp(`^[ \\t]*${header[1]}\\b`, "m").exec(rest);
+        const end = ending ? i + header[0].length + ending.index + ending[0].length : len;
+        while (i < end) {
+          if (out[i] !== "\n" && out[i] !== "\r") out[i] = " ";
+          i++;
+        }
+        continue;
+      }
+    }
+
     // Normal code state
     if (ch === "/" && next === "/") {
       out[i] = " ";

@@ -2,7 +2,7 @@ import * as path from "node:path";
 import grammarPackage from "tree-sitter-wasms/package.json";
 
 // Keep this revision aligned with ingestion invalidation; coverage is never implied by parse success.
-export const PARSER_REVISION = "4";
+export const PARSER_REVISION = "5";
 
 type LanguageDefinition = {
   id: string;

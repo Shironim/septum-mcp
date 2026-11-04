@@ -165,7 +165,7 @@ export class SymfonySemanticExtractor implements SemanticSliceExtractor {
                   });
 
                   slices.push({
-                    domain_id: domainId ?? 1,
+                    domain_id: domainId ?? null,
                     feature_key: fullRouteName || null,
                     http_method: httpMethod,
                     route_uri: fullUri,

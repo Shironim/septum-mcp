@@ -46,6 +46,11 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     projectRootOrDomainId?: string | number,
     maybeDomainId?: number
   ): LaravelSemanticExtractionResult {
+    // The registry reuses one adapter across workspaces. Keep helpers bound to
+    // this invocation's root without mutating the shared adapter instance.
+    if (typeof projectRootOrDomainId === "string" && path.resolve(projectRootOrDomainId) !== path.resolve(this.projectRoot)) {
+      return new LaravelSemanticExtractor(projectRootOrDomainId).extractSlices(maybeDomainId);
+    }
     let root = this.projectRoot;
     let domainId: number | undefined;
 
@@ -273,7 +278,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
         controller_line: controllerInfo.line,
         architecture_style: "mvc",
         entry_kind: "http_route",
-        execution_chain_json: JSON.stringify(chain),
+        execution_chain_json: JSON.stringify(chain.map(node => (node.guards || node.mutations || node.emits || node.dispatches || node.transactions) ? { ...node, semantic_analysis: "lexical_heuristic" } : node)),
       });
     }
 
@@ -290,11 +295,13 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
    */
   public parseRoutesContent(content: string): ParsedRoute[] {
     const routes: ParsedRoute[] = [];
+    const executable = blankCommentsAndStrings(content, { hashComments: true });
 
     // 1. Process Route::resource
     const resourceRegex = /Route::resource\s*\(\s*['"]([^'"]+)['"]\s*,\s*([\\A-Za-z0-9_]+)::class\s*\)/gi;
     let resMatch;
     while ((resMatch = resourceRegex.exec(content)) !== null) {
+      if (executable.slice(resMatch.index, resMatch.index + "Route::resource".length).toLowerCase() !== "route::resource") continue;
       const baseUri = resMatch[1].replace(/^\//, "");
       const controllerClass = resMatch[2];
       const resourceActions = [
@@ -322,6 +329,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     const apiResourceRegex = /Route::apiResource\s*\(\s*['"]([^'"]+)['"]\s*,\s*([\\A-Za-z0-9_]+)::class\s*\)/gi;
     let apiResMatch;
     while ((apiResMatch = apiResourceRegex.exec(content)) !== null) {
+      if (executable.slice(apiResMatch.index, apiResMatch.index + "Route::apiResource".length).toLowerCase() !== "route::apiresource") continue;
       const baseUri = apiResMatch[1].replace(/^\//, "");
       const controllerClass = apiResMatch[2];
       const apiResourceActions = [
@@ -549,16 +557,26 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
       if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
         resolvedFilePath = path.resolve(this.projectRoot, res.targets[0].files[0]);
       }
+      if (!resolvedFilePath) return { line: 0 };
     } else if (routeFilePath && fs.existsSync(sourceRef)) {
       const routeContent = readOptionalSourceFile(sourceRef, "utf-8");
-      const useRegex = new RegExp(`use\\s+([^;]+?\\\\${controllerClass})(?:\\s+as\\s+[A-Za-z0-9_]+)?;`, "i");
-      const match = useRegex.exec(routeContent);
-      if (match) {
-        const fqn = match[1].trim();
+      const executable = blankCommentsAndStrings(routeContent, { hashComments: true });
+      const bindings = [...executable.matchAll(/\buse\s+([\\A-Za-z0-9_]+)(?:\s+as\s+([A-Za-z0-9_]+))?\s*;/gi)]
+        .filter(match => (match[2] || match[1]!.split("\\").pop())?.toLowerCase() === controllerClass.toLowerCase());
+      if (bindings.length > 1) return { line: 0 };
+      if (bindings.length === 1) {
+        const fqn = bindings[0]![1]!;
         const res = resolver.resolve(fqn, sourceRef);
         if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
           resolvedFilePath = path.resolve(this.projectRoot, res.targets[0].files[0]);
         }
+        // Existing source-only fixtures may omit composer.json. A conventional
+        // App namespace maps to its exact conventional path, never the alias.
+        if (!resolvedFilePath && !fs.existsSync(path.join(this.projectRoot, "composer.json")) && fqn.startsWith("App\\Http\\Controllers\\")) {
+          const conventional = path.join(this.projectRoot, "app", fqn.slice(4).replace(/\\/g, "/") + ".php");
+          if (fs.existsSync(conventional)) resolvedFilePath = conventional;
+        }
+        if (!resolvedFilePath) return { line: 0 };
       }
     }
 
@@ -580,7 +598,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     }
 
     if (resolvedFilePath && fs.existsSync(resolvedFilePath)) {
-      const lines = readOptionalSourceFile(resolvedFilePath, "utf-8").split("\n");
+      const lines = blankCommentsAndStrings(readOptionalSourceFile(resolvedFilePath, "utf-8"), { hashComments: true }).split("\n");
       let targetLine = 1;
       for (let i = 0; i < lines.length; i++) {
         if (new RegExp(`function\\s+${actionName}\\s*\\(`, "i").test(lines[i])) {
@@ -948,7 +966,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
         controller_line: 1,
         architecture_style: "clean",
         entry_kind: "queue_job",
-        execution_chain_json: JSON.stringify(chain),
+        execution_chain_json: JSON.stringify(chain.map(node => (node.guards || node.mutations || node.emits || node.dispatches || node.transactions) ? { ...node, semantic_analysis: "lexical_heuristic" } : node)),
       });
     }
 
@@ -1027,7 +1045,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
         controller_line: 1,
         architecture_style: "clean",
         entry_kind: "scheduled_command",
-        execution_chain_json: JSON.stringify(chain),
+        execution_chain_json: JSON.stringify(chain.map(node => (node.guards || node.mutations || node.emits || node.dispatches || node.transactions) ? { ...node, semantic_analysis: "lexical_heuristic" } : node)),
       });
     }
 
@@ -1106,7 +1124,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
         controller_line: 1,
         architecture_style: "clean",
         entry_kind: "event_listener",
-        execution_chain_json: JSON.stringify(chain),
+        execution_chain_json: JSON.stringify(chain.map(node => (node.guards || node.mutations || node.emits || node.dispatches || node.transactions) ? { ...node, semantic_analysis: "lexical_heuristic" } : node)),
       });
     }
 

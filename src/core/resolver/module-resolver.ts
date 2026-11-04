@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ValidatedSeptumConfig } from "../config/schema.ts";
 import type { SeptumRepository } from "../database/repository.ts";
+import { assertUniqueDomainRoots } from "../config/domain-ownership.ts";
 
 export interface PathAliasRule {
   prefix: string;
@@ -102,6 +103,7 @@ export class ModuleResolver {
     filePath: string,
     config: ValidatedSeptumConfig
   ): string | null {
+    assertUniqueDomainRoots(config.domains, this.projectRoot);
     return this.matchDomainByPath(filePath, config);
   }
 
@@ -113,6 +115,7 @@ export class ModuleResolver {
     sourceFilePath: string | undefined,
     config: ValidatedSeptumConfig
   ): string | null {
+    assertUniqueDomainRoots(config.domains, this.projectRoot);
     if (sourceFilePath && (fs.existsSync(path.resolve(this.projectRoot,sourceFilePath)) || this.repo?.getMeta?.("workspace_root"))) {
       const resolution = this.resolveImport(targetStatement,sourceFilePath);
       if (resolution.status !== "resolved" || resolution.coverage === "conditional") return null;

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { ASTParserEngine } from "../../src/core/parser/tree-sitter.ts";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
@@ -16,9 +16,10 @@ describe("declaration identity and source selection", () => {
   beforeEach(() => { root = mkdtempSync(join(tmpdir(), "septum-identity-")); db = new SeptumDatabase(":memory:"); repo = new SeptumRepository(db.raw); });
   afterEach(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
   async function index(file: string, source: string, domain = "core") {
-    const domainId = repo.upsertDomain(domain, { root: "." });
+    const domainId = repo.upsertDomain(domain, { root: domain === "core" ? "." : dirname(file) });
     const ast = await new ASTParserEngine().parseFile(file, source);
     expect(ast.status).toBe("parsed");
+    mkdirSync(dirname(join(root, file)), { recursive: true });
     writeFileSync(join(root, file), source);
     const id = repo.upsertFile(domainId, file, "service", computeContentHash(source), source.split("\n").length);
     repo.replaceFileSymbols(id, ast.symbols);
@@ -69,12 +70,12 @@ describe("declaration identity and source selection", () => {
     expect(result.symbol_ref.language).toBe("rust");
   });
   it("does not choose a class from another domain or a same-file foreign method", async () => {
-    await index("a.ts", "export class A { own() {} }\nexport class B { foreign() {} }", "alpha");
-    await index("b.ts", "export class A { own() {} }", "beta");
+    await index("alpha/a.ts", "export class A { own() {} }\nexport class B { foreign() {} }", "alpha");
+    await index("beta/b.ts", "export class A { own() {} }", "beta");
     expect((await tool({ action: "locate", query: "A::own" })).status).toBe("ambiguous");
-    expect((await tool({ action: "locate", query: "A::own", domain: "beta" })).file_path).toBe("b.ts");
-    expect((await tool({ action: "locate", query: "A::foreign", file_path: "a.ts" })).found).toBe(false);
-    expect((await tool({ action: "locate", query: "A::own", file_path: "a.ts", domain: "beta" })).found).toBe(false);
+    expect((await tool({ action: "locate", query: "A::own", domain: "beta" })).file_path).toBe("beta/b.ts");
+    expect((await tool({ action: "locate", query: "A::foreign", file_path: "alpha/a.ts" })).found).toBe(false);
+    expect((await tool({ action: "locate", query: "A::own", file_path: "alpha/a.ts", domain: "beta" })).found).toBe(false);
   });
   it("exposes every declaration in a full catalog without losing overloads", async () => {
     await index("Order.java", java);

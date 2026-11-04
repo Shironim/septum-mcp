@@ -9,6 +9,7 @@ import type {
   SymbolRecord,
 } from "../../../types/index.ts";
 import { DependencyRepository } from "./dependency.repository.ts";
+import { domainNameKey, domainRootIdentity, DomainRootConflictError } from "../../config/domain-ownership.ts";
 
 const CONTAINER_KINDS = new Set<SymbolKind>([
   "class",
@@ -21,9 +22,19 @@ const CONTAINER_KINDS = new Set<SymbolKind>([
 export class DomainRepository {
   constructor(private db: Database) {}
 
-  public upsertDomain(name: string, config: DomainConfig): number {
+  public upsertDomain(name: string, config: DomainConfig, workspaceRoot?: string): number {
     return this.db.transaction(() => {
       const normalizedName = name.trim();
+      const root = workspaceRoot ?? this.db.query<{ value: string }, []>("SELECT value FROM repo_meta WHERE key='workspace_root'").get()?.value ?? process.cwd();
+      const claims = Object.fromEntries(this.getAllDomains()
+        .filter(domain => domainNameKey(domain.name) !== domainNameKey(normalizedName))
+        .map(domain => [domain.name, { root: domain.root_path }]));
+      // Validate the proposed root inside the same immediate transaction as the write.
+      // Unrelated legacy conflicts can be repaired one domain at a time.
+      const proposed = domainRootIdentity(config.root, root);
+      for (const [owner, claim] of Object.entries(claims)) {
+        if (domainRootIdentity(claim.root, root) === proposed) throw new DomainRootConflictError(owner, normalizedName, proposed);
+      }
       let existing = this.getDomainByName(normalizedName);
 
       // MCP-13: If duplicates exist with different casing, consolidate into canonical primary row

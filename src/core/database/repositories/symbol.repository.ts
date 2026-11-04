@@ -1,5 +1,4 @@
 import { symbolReference, matchesSymbolName, matchesSymbolReference } from "../../resolver/symbol-reference.ts";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Database } from "bun:sqlite";
 import type {
@@ -16,6 +15,8 @@ import type {
   SymbolSelectionOptions,
 } from "../../../types/index.ts";
 import { DependencyRepository } from "./dependency.repository.ts";
+import { probeSourcePath, readSourceFile } from "../../resources/source-files.ts";
+import { assertPathContained } from "../../resolver/path-resolver.ts";
 
 const SQL_KEYWORD_BLACKLIST = new Set([
   "VALUES",
@@ -396,8 +397,10 @@ export class SymbolRepository {
         const fullPath = options.workspaceRoot
           ? path.resolve(options.workspaceRoot, row.file_path)
           : row.file_path;
-        if (fs.existsSync(fullPath)) {
-          const fileContent = fs.readFileSync(fullPath, "utf-8");
+        // Public handlers provide a workspace; the legacy rootless repository API also accepts absolute paths.
+        if (options.workspaceRoot) assertPathContained(fullPath, options.workspaceRoot, "Outbound call source");
+        if (probeSourcePath(fullPath) === "file") {
+          const fileContent = readSourceFile(fullPath);
           const lines = fileContent.split(/\r?\n/);
           const start = Math.max(0, row.line_start - 1);
           const end = Math.min(lines.length, row.line_end);

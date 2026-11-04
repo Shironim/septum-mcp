@@ -1,10 +1,9 @@
 import { assertPathContained } from "../../resolver/path-resolver.ts";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
-import { readSourceFile } from "../../resources/source-files.ts";
+import { readSourceFile, probeSourcePath } from "../../resources/source-files.ts";
 import { computeContentHash } from "../../ingestion/hasher.ts";
 import { getLanguageCapability } from "../../parser/language-capabilities.ts";
 import type { ImportRelationship } from "../../../types/index.ts";
-import * as fs from "node:fs";
 import { dirname, join, posix, resolve, sep } from "node:path";
 import type { Database } from "bun:sqlite";
 import type {
@@ -41,10 +40,12 @@ export class DependencyRepository {
     slice: Omit<VerticalSliceRecord, "id" | "created_at">
   ): void {
     const existing = this.db
-      .query<VerticalSliceRecord, [string, string]>(
-        "SELECT id FROM vertical_slices WHERE http_method = ? AND route_uri = ?"
+      .query<VerticalSliceRecord, [string, string, number | null, string | null, string, string, string]>(
+        `SELECT id FROM vertical_slices WHERE http_method = ? AND route_uri = ?
+         AND domain_id IS ? AND controller_file IS ? AND controller_class = ? AND action_name = ? AND entry_kind = ?`
       )
-      .get(slice.http_method, slice.route_uri);
+      .get(slice.http_method, slice.route_uri, slice.domain_id, slice.controller_file,
+        slice.controller_class, slice.action_name, slice.entry_kind ?? "http_route");
 
     if (existing) {
       this.db
@@ -575,8 +576,9 @@ export class DependencyRepository {
       for (const filePath of uniqueCallerFiles) {
         try {
           const fullPath = options.workspaceRoot ? resolve(options.workspaceRoot, filePath) : filePath;
-          if (fs.existsSync(fullPath)) {
-            const content = fs.readFileSync(fullPath, "utf-8");
+          if (options.workspaceRoot) assertPathContained(fullPath, options.workspaceRoot, "Inbound caller source");
+          if (probeSourcePath(fullPath) === "file") {
+            const content = readSourceFile(fullPath);
             const lines = content.split(/\r?\n/);
             for (let i = 0; i < lines.length; i++) {
               const line = lines[i];

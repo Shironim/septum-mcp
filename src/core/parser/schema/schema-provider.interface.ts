@@ -7,6 +7,7 @@ export interface SchemaFieldSummary {
 }
 
 export interface SchemaMetadata {
+  interpretation?: "static_migration_summary";
   entityName: string;
   tableName: string;
   schemaSourceFile: string;

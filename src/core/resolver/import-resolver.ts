@@ -2,10 +2,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { builtinModules } from "node:module";
 import { computeContentHash } from "../ingestion/hasher.ts";
-import { readSourceFile } from "../resources/source-files.ts";
+import { readSourceFile, probeSourcePath, readSourceDirectory } from "../resources/source-files.ts";
 import type { ImportResolution, ResolutionTarget } from "../../types/index.ts";
 
-export const RESOLVER_REVISION = "3";
+export const RESOLVER_REVISION = "4";
 const GO_STDLIB = new Set("archive bufio builtin bytes cmp compress container context crypto database debug embed encoding errors expvar flag fmt go hash html image index io iter log maps math mime net os path plugin reflect regexp runtime slices sort strconv strings structs sync syscall testing text time unicode unique unsafe".split(" "));
 
 const PYTHON_STDLIB = new Set("abc argparse array ast asyncio atexit base64 bdb binascii bisect builtins bz2 calendar cgi cgitb chunk cmath cmd code codecs codeop collections colorsys compileall concurrent configparser contextlib contextvars copy copyreg cProfile crypt csv ctypes curses dataclasses datetime dbm decimal difflib dis distutils doctest email encodings ensurepip enum errno faulthandler fcntl filecmp fileinput fnmatch fractions ftplib functools gc getopt getpass gettext glob graphlib gzip hashlib heapq hmac html http idlelib imaplib imghdr imp importlib inspect io ipaddress itertools json keyword lib2to3 linecache locale logging lzma mailbox mailcap marshal math mimetypes mmap modulefinder msilib msvcrt multiprocessing netrc nntplib numbers operator optparse os ossaudiodev pathlib pdb pickle pickletools pipes pkgutil platform plistlib poplib posix posixpath pprint profile pstats pty pwd py_compile pyclbr pydoc queue quopri random re readline reprlib resource rlcompleter runpy sched secrets select selectors shelve shlex shutil signal site smtpd smtplib sndhdr socket socketserver spwd sqlite3 ssl stat statistics string stringprep struct subprocess sunau symbol symtable sys sysconfig syslog tabnanny tarfile telnetlib tempfile termios test textwrap threading time timeit tkinter token tokenize tomllib trace traceback tracemalloc tty turtle turtledemo types typing unicodedata unittest urllib uu uuid venv warnings wave weakref webbrowser winreg winsound wsgiref xdrlib xml xmlrpc zipapp zipfile zipimport zlib zoneinfo".split(" "));
@@ -53,7 +53,7 @@ export class ImportResolver {
     });
     const read = (file: string): string | undefined => {
       this.assertContained(file);
-      if (!fs.existsSync(file)) { manifests[path.relative(this.root, file)] = "missing"; return undefined; }
+      if (probeSourcePath(file) === "missing") { manifests[path.relative(this.root, file)] = "missing"; return undefined; }
       const text = readSourceFile(file); manifests[path.relative(this.root, file)] = computeContentHash(text); return text;
     };
     const json = (file: string): any => {
@@ -83,7 +83,7 @@ export class ImportResolver {
       const candidates = [base, ...extraCandidates, ...extensions.map(ext => base + ext), ...extensions.map(ext => path.join(base, "index" + ext))];
       return [...new Set(candidates.filter(file => {
         this.assertContained(file);
-        return fs.existsSync(file) && fs.statSync(file).isFile();
+        return probeSourcePath(file) === "file";
       }).map(file => path.relative(this.root, file).replace(/\\/g, "/")))];
     };
     const resolvedFiles = (files: string[], reason: string) => {
@@ -318,7 +318,7 @@ export class ImportResolver {
       if (target.startsWith(".") || path.isAbsolute(target)) return resolvedFiles(filesAt(path.resolve(path.dirname(source), target), extensions), "relative_path");
       if (builtinModules.includes(target) || target.startsWith("node:") && builtinModules.includes(target.slice(5)) || target === "bun" || target.startsWith("bun:")) return finish("external", "runtime_builtin");
       for (let dir = path.dirname(source); dir.startsWith(this.root + path.sep); dir = path.dirname(dir)) {
-        if (fs.existsSync(path.join(dir, "tsconfig.json"))) return finish("unsupported", "nested_tsconfig_project_selection_unknown");
+        if (probeSourcePath(path.join(dir, "tsconfig.json")) !== "missing") return finish("unsupported", "nested_tsconfig_project_selection_unknown");
       }
       const loadTsConfig = (configPath: string, visited = new Set<string>()): any => {
         if (visited.has(configPath)) throw new Error("circular_tsconfig_extends");
@@ -333,12 +333,12 @@ export class ImportResolver {
             : path.resolve(this.root, "node_modules", extRef);
           this.assertContained(base);
           let parentPath = base.endsWith(".json") ? base : base + ".json";
-          if (!fs.existsSync(parentPath) && fs.existsSync(base) && fs.statSync(base).isDirectory()) {
+          if (probeSourcePath(parentPath) === "missing" && probeSourcePath(base) === "directory") {
             const pkg = json(path.join(base, "package.json"));
             parentPath = path.resolve(base, typeof pkg.tsconfig === "string" ? pkg.tsconfig : "tsconfig.json");
           }
           this.assertContained(parentPath);
-          if (!fs.existsSync(parentPath)) throw new Error("tsconfig_extends_not_found");
+          if (probeSourcePath(parentPath) === "missing") throw new Error("tsconfig_extends_not_found");
           options = { ...options, ...loadTsConfig(parentPath, visited) };
         }
         const own = cfg.compilerOptions ?? {};
@@ -386,7 +386,7 @@ export class ImportResolver {
         if (typeof pattern !== "string") return finish("unsupported","malformed_workspace_pattern");
         if (pattern.endsWith("/*")) {
           const parent = path.resolve(this.root,pattern.slice(0,-2)); this.assertContained(parent);
-          if (fs.existsSync(parent)) roots.push(...fs.readdirSync(parent,{withFileTypes:true}).filter(entry=>entry.isDirectory()).map(entry=>path.relative(this.root,path.join(parent,entry.name))));
+          if (probeSourcePath(parent) !== "missing") roots.push(...readSourceDirectory(parent).filter(entry=>entry.isDirectory()).map(entry=>path.relative(this.root,path.join(parent,entry.name))));
         } else if (!pattern.includes("*")) roots.push(pattern);
         else return finish("unsupported","workspace_glob_not_supported");
       }

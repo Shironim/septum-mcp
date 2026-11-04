@@ -150,7 +150,9 @@ class SendOrderInvoiceListener {
     expect(traceJob.message).toContain("[INGRESS]");
     expect(traceJob.message).toContain("JOB ProcessPaymentJob");
     expect(traceJob.message).toContain("[CONTROLLER]");
-    expect(traceJob.message).toContain("ProcessPaymentJob::handle [mutates: order.status]");
+    expect(traceJob.message).toContain("ProcessPaymentJob::handle");
+    expect(traceJob.message).toContain("[unknown; unknown]");
+    expect(traceJob.message).toContain("[mutates: order.status]");
     expect(traceJob.message).toContain("[EVENT]");
     expect(traceJob.message).toContain("PaymentCompleted");
 

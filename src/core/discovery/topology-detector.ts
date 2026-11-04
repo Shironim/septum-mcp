@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { DomainConfig } from "../../types/index.ts";
 import type { SeptumRepository } from "../database/repository.ts";
 import { DEFAULT_IGNORED_DIRECTORIES, isIgnoredDirectory } from "../resources/ignore.ts";
+import { assertUniqueDomainRoots, domainNameKey, domainRootIdentity } from "../config/domain-ownership.ts";
 
 export type ProjectType =
   | "monorepo"
@@ -547,12 +548,17 @@ export class TopologyDetector {
     projectRoot: string = process.cwd(),
     forceResetPolicies: boolean = false
   ): Record<string, DomainConfig> {
+    assertUniqueDomainRoots(Object.fromEntries(repo.getAllDomains().map(domain => [domain.name, { root: domain.root_path }])), projectRoot);
     const topology = this.detect(projectRoot);
 
     for (const [name, config] of Object.entries(topology.domains)) {
       const existing = repo.domains.getDomainByName(name);
       if (!existing || forceResetPolicies) {
-        repo.upsertDomain(name, config);
+        const identity = domainRootIdentity(config.root, projectRoot);
+        const owner = repo.getAllDomains().find(domain => domainRootIdentity(domain.root_path, projectRoot) === identity && domainNameKey(domain.name) !== domainNameKey(name));
+        // Inference must not create an alias for an explicitly registered owner.
+        if (owner && !existing) continue;
+        repo.domains.upsertDomain(name, config, projectRoot);
       }
     }
 

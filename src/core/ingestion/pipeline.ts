@@ -1,4 +1,6 @@
+import { SEMANTIC_EXTRACTOR_REVISION } from "../parser/semantic-revision.ts";
 import { RESOLVER_REVISION } from "../resolver/import-resolver.ts";
+import { SOURCE_READ_REVISION, sourceObservationsCurrent } from "../resources/source-files.ts";
 import { shouldIgnoreSourcePath } from "../resources/ignore.ts";
 import { RESOURCE_LIMITS } from "../resources/limits.ts";
 import { readSourceFile, SourceFileLimitError, collectSourceSkips, type SkippedSourceFile, type SourceReadFingerprint } from "../resources/source-files.ts";
@@ -16,6 +18,8 @@ import { ASTParserEngine } from "../parser/tree-sitter.ts";
 import { CallGraphTracer } from "../resolver/call-graph-tracer.ts";
 import { ModuleResolver } from "../resolver/module-resolver.ts";
 import { computeContentHash } from "./hasher.ts";
+import { assertUniqueDomainRoots, domainNameKey, DomainRootConflictError } from "../config/domain-ownership.ts";
+import { ConfigLoader } from "../config/loader.ts";
 
 export interface IngestionMetrics {
   domains_processed: number;
@@ -24,6 +28,8 @@ export interface IngestionMetrics {
   files_skipped: number;
   symbols_indexed: number;
   dependencies_indexed: number;
+  /** Indexed-file parse attempts across this sync, including recovered retries; excludes semantic extraction. */
+  parser_invocations: number;
   duration_ms: number;
 }
 
@@ -44,10 +50,11 @@ export class IngestionPipeline {
     this.repo.setMeta("workspace_root", this.resolveWorkspaceRoot(config, Object.values(config.domains)[0]?.root ?? "."));
     this.repo.setMeta("resolver_revision", RESOLVER_REVISION);
     this.repo.setMeta("sync_state", "running");
+    const work = { parserInvocations: 0 };
     try {
       let result: IngestionMetrics | undefined;
       for (let attempt = 0; attempt < 2; attempt++) {
-        try { result = await this.runSync(config, options); break; }
+        try { result = await this.runSync(config, options, work); break; }
         catch (error) {
           if (attempt || !(error instanceof Error) || !error.message.startsWith("Source changed during synchronization:")) throw error;
           options.signal?.throwIfAborted();
@@ -55,16 +62,15 @@ export class IngestionPipeline {
       }
       this.repo.setMeta("sync_state", "complete");
       this.repo.setMeta("sync_error", "");
+      this.repo.setMeta("sync_error_code", "");
       return result!;
     } catch (error) {
-      this.repo.setMeta("sync_state", "error");
-      this.repo.setMeta("sync_error", String(error));
+      this.recordSyncFailure(error);
       throw error;
     }
   }
 
-  private async runSync(config: ValidatedSeptumConfig, options: { verifyContent?: boolean; signal?: AbortSignal }): Promise<IngestionMetrics> {
-    this.ensureParserRevision();
+  private async runSync(config: ValidatedSeptumConfig, options: { verifyContent?: boolean; signal?: AbortSignal }, work: { parserInvocations: number }): Promise<IngestionMetrics> {
     const startTime = performance.now();
     let filesScanned = 0;
     let filesUpdated = 0;
@@ -78,9 +84,10 @@ export class IngestionPipeline {
     let domainNames = Object.keys(config.domains);
     const projectRoot = this.customWorkspaceRoot || resolveWorkspaceRoot();
 
-    // Auto-discovery mode if no domains explicitly declared in config
+    // Existing SQLite ownership precedes inference when the caller omits domains.
     if (domainNames.length === 0) {
-      const discovered = this.autoDiscoverDomains(projectRoot);
+      const discovered = this.repo.getAllDomains().length
+        ? ConfigLoader.loadFromRepository(this.repo).domains : this.autoDiscoverDomains(projectRoot);
       for (const [dName, dCfg] of Object.entries(discovered)) {
         config.domains[dName] = {
           root: dCfg.root,
@@ -92,6 +99,8 @@ export class IngestionPipeline {
       }
       domainNames = Object.keys(config.domains);
     }
+    this.assertDomainOwnership(config, projectRoot);
+    this.ensureParserRevision();
     const inventory = this.sourceInventory(projectRoot, config.settings.ignore_patterns, options.signal);
 
     const existingFilesMap = new Map<string, import("../../types/index.ts").FileRecord>();
@@ -259,6 +268,7 @@ export class IngestionPipeline {
 
         const lineCount = content.split("\n").length;
         const archetype = detectArchetype(relPath, domainCfg.archetypes ?? {});
+        work.parserInvocations++;
         const ast = await this.parserEngine.parseFile(fullPath, content);
         if (ast.status === "unsupported") {
           unsupportedFiles.push(relPath);
@@ -303,8 +313,8 @@ export class IngestionPipeline {
     // Membership covers newly added semantic files outside registered domains.
     const inventoryRevision = computeContentHash(JSON.stringify(inventory));
     const priorInputs: SourceReadFingerprint[] = JSON.parse(this.repo.getMeta("semantic_inputs") || "[]");
-    let semanticInputChanged = false;
-    for (let index = 0; index < priorInputs.length; index++) {
+    let semanticInputChanged = !sourceObservationsCurrent(projectRoot, JSON.parse(this.repo.getMeta("semantic_observations") || '{"paths":[],"directories":[]}'));
+    for (let index = 0; index < priorInputs.length && !semanticInputChanged; index++) {
       if (index % RESOURCE_LIMITS.batchFiles === 0) { await new Promise<void>(done => setTimeout(done, 0)); options.signal?.throwIfAborted(); }
       const input = priorInputs[index];
       const file = resolve(projectRoot, input.path);
@@ -316,7 +326,7 @@ export class IngestionPipeline {
       catch (error) { if (error instanceof SourceFileLimitError) semanticInputChanged = input.hash !== "file_too_large"; else throw error; }
       if (semanticInputChanged) break;
     }
-    const extractorRevision = "3"; // Bump when extractor or inferred-chain semantics change.
+    const extractorRevision = SEMANTIC_EXTRACTOR_REVISION;
     if (this.repo.getMeta("semantic_extractor_revision") !== extractorRevision || this.repo.getMeta("semantic_inventory") !== inventoryRevision || semanticInputChanged || filesUpdated > 0 || removedFiles > 0 || this.repo.getMeta("slices_dirty") === "1" || this.repo.getMeta("semantic_revision") !== semanticRevision) {
       const extracted = await collectSourceSkips(projectRoot, async () => {
         const detectedTopology = TopologyDetector.detect(projectRoot);
@@ -338,6 +348,8 @@ export class IngestionPipeline {
         this.repo.setMeta("semantic_extractor_revision", extractorRevision);
         this.repo.setMeta("semantic_inventory", inventoryRevision);
         this.repo.setMeta("semantic_inputs", JSON.stringify(extracted.inputs));
+        this.repo.setMeta("semantic_observations", JSON.stringify(extracted.observations));
+        this.repo.setMeta("semantic_input_revision", SOURCE_READ_REVISION);
         this.repo.setMeta("semantic_skipped_files", JSON.stringify(extracted.skipped));
       });
     }
@@ -379,6 +391,7 @@ export class IngestionPipeline {
       files_skipped: filesSkipped,
       symbols_indexed: symbolsIndexed,
       dependencies_indexed: dependenciesIndexed,
+      parser_invocations: work.parserInvocations,
       duration_ms: durationMs,
     };
   }
@@ -510,6 +523,20 @@ export class IngestionPipeline {
     return ASTParserEngine.isSourceFile(path);
   }
 
+  private assertDomainOwnership(config: ValidatedSeptumConfig, projectRoot: string): void {
+    const proposedNames = new Set(Object.keys(config.domains).map(domainNameKey));
+    const retained = Object.fromEntries(this.repo.getAllDomains()
+      .filter(domain => !proposedNames.has(domainNameKey(domain.name)))
+      .map(domain => [domain.name, { root: domain.root_path }]));
+    assertUniqueDomainRoots({ ...retained, ...config.domains }, projectRoot);
+  }
+
+  private recordSyncFailure(error: unknown): void {
+    this.repo.setMeta("sync_state", "error");
+    this.repo.setMeta("sync_error", String(error));
+    this.repo.setMeta("sync_error_code", error instanceof DomainRootConflictError ? error.code : "");
+  }
+
   private ensureParserRevision(): void {
     const revision = PARSER_REVISION;
     if (this.repo.getMeta("parser_revision") === revision) return;
@@ -527,6 +554,8 @@ export class IngestionPipeline {
    * symbols, and dependencies in SQLite if its mtime or content hash has changed.
    */
   public async ingestFile(targetFilePath: string, config: ValidatedSeptumConfig): Promise<boolean> {
+    try { this.assertDomainOwnership(config, this.customWorkspaceRoot || resolveWorkspaceRoot()); }
+    catch (error) { this.recordSyncFailure(error); throw error; }
     this.ensureParserRevision();
     const fullPath = resolve(targetFilePath);
     if (!existsSync(fullPath)) return false;
@@ -596,6 +625,16 @@ export class IngestionPipeline {
       return false;
     }
     if (ast.status === "degraded") throw new Error(`Cannot reliably index '${relPath}': parser is degraded. ${ast.diagnostics?.map(d => `${d.code}: ${d.message}`).join("; ") ?? ""}`);
+
+    let latestHash: string | undefined;
+    try { latestHash = computeContentHash(readSourceFile(fullPath)); }
+    catch { /* A vanished, unreadable or oversized source must not publish the parsed version. */ }
+    if (latestHash !== currentHash) {
+      const message = `Source changed during synchronization: '${relPath}' changed during single-file parsing. Run sync against stable inputs.`;
+      this.repo.setMeta("sync_state", "error");
+      this.repo.setMeta("sync_error", message);
+      throw new Error(message);
+    }
 
     this.repo.runInTransaction(() => {
       const fileId = this.repo.upsertFile(

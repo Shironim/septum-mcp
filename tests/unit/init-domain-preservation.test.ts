@@ -36,7 +36,7 @@ describe("F2-02: Domain Registration & Topology Preservation on Repeat Init", ()
         archetypes: { widget: "*.ts" },
       });
       repo.upsertDomain("user-domain", {
-        root: "manual/core",
+        root: "manual/user",
         allowed_dependencies: ["billing"],
       });
       repo.setMeta("settings_json", JSON.stringify({ enforcement: "strict" }));
@@ -67,7 +67,7 @@ describe("F2-02: Domain Registration & Topology Preservation on Repeat Init", ()
       // 5. Verify that user-domain is preserved
       const userDomainRecord = repo.domains.getDomainByName("user-domain");
       expect(userDomainRecord).toBeDefined();
-      expect(userDomainRecord?.root_path).toBe("manual/core");
+      expect(userDomainRecord?.root_path).toBe("manual/user");
 
       // 6. Verify that new domains (cli, types) were discovered and added
       const cliRecord = repo.domains.getDomainByName("cli");
@@ -90,7 +90,7 @@ describe("F2-02: Domain Registration & Topology Preservation on Repeat Init", ()
 
       // 8. Verify the returned domains map reflects existing preserved roots
       expect(domains["core"]?.root).toBe("manual/core");
-      expect(domains["user-domain"]?.root).toBe("manual/core");
+      expect(domains["user-domain"]?.root).toBe("manual/user");
       expect(domains["cli"]?.root).toBe(path.join("src", "cli"));
 
       db.close();
