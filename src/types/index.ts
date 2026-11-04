@@ -69,6 +69,9 @@ export interface FeatureContextResponse {
   description?: string;
   allowed_touchpoints: string[];
   reuse_symbols: Array<{
+    status?: "resolved" | "ambiguous" | "not_found" | "stale";
+    symbol_ref?: SymbolReference;
+    candidates?: SymbolReference[];
     name: string;
     kind: string;
     signature?: string;
@@ -321,6 +324,7 @@ export interface ExecutionChainNode {
   mutations?: string[];
   emits?: string[];
   dispatches?: string[];
+  semantic_analysis?: "lexical_heuristic";
   transactions?: boolean;
   payload_props?: string[];
 }
@@ -345,6 +349,9 @@ export interface VerticalSliceRecord {
 export interface VerticalSliceTraceResponse {
   coverage?: "partial";
   diagnostics?: string[];
+  next?: string[];
+  candidate_count?: number;
+  alternatives_omitted?: number;
   query: string;
   found: boolean;
   confidence?: "exact" | "inferred";
@@ -367,6 +374,8 @@ export interface VerticalSliceTraceResponse {
     uri: string;
     controller: string;
     action: string;
+    file?: string | null;
+    line?: number;
   }>;
   message: string;
 }
