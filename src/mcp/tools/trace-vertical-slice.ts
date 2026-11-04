@@ -3,6 +3,7 @@ import type { SeptumRepository } from "../../core/database/repository.ts";
 import { VerticalSliceTracer } from "../../core/resolver/vertical-slice-tracer.ts";
 import type { VerticalSliceTraceResponse } from "../../types/index.ts";
 import type { TraceVerticalSliceArgs } from "../schemas.ts";
+import { formatSliceNode, SLICE_RELATIONSHIP_LIMITS } from "../../core/resolver/slice-format.ts";
 
 export type { TraceVerticalSliceArgs } from "../schemas.ts";
 
@@ -33,35 +34,44 @@ export function handleTraceVerticalSlice(
     process.cwd();
   const maxDepth = Math.min(Math.max(Math.trunc(Number(args.max_depth ?? 5)), 1), 8);
   const tracer = new VerticalSliceTracer(repo, root, config.settings.ignore_patterns, false);
-  return tracer.traceAsync(query, maxDepth, signal).then((result: VerticalSliceTraceResponse) => {
+  return tracer.traceAsync(query, maxDepth, signal, args.controller_file).then((result: VerticalSliceTraceResponse) => {
   const chain = result.chain || result.slice || [];
 
   let summary = "";
   if (result.found && chain.length > 0) {
-    summary = chain
-      .map((node) => `[${(node.stage || "STAGE").toUpperCase()}] ${node.symbol}`)
-      .join(" ➔ ");
+    summary = chain.map(formatSliceNode).join("\n");
   } else if (result.found && result.entrypoint) {
-    summary = `[ENTRYPOINT] ${result.entrypoint.method} ${result.entrypoint.uri} ➔ ${result.entrypoint.controller}@${result.entrypoint.action}`;
-  } else if (result.diagnostics?.length || result.coverage === "partial") {
+    summary = `[ENTRYPOINT] ${result.entrypoint.method} ${result.entrypoint.uri}; catalog handler ${result.entrypoint.controller}@${result.entrypoint.action} [unknown; unknown]`;
+  } else if (result.diagnostics?.length) {
     summary = ` [UNKNOWN] ${result.message || `No matching slice in the available static catalog for '${query}'.`}`.trim();
   } else {
     summary = `[NOT FOUND] No matching slice in the available static catalog for '${query}'; this does not prove the route is absent at runtime.`;
   }
+  if (result.diagnostics?.includes("ambiguous_target")) {
+    summary = `[AMBIGUOUS] ${result.message}`;
+  } else if (result.diagnostics?.length && result.found) {
+    summary = `[UNKNOWN: ${result.diagnostics.join(", ")}]\n${summary}`;
+  }
 
   const payload = {
-    status: result.diagnostics?.length ? "unknown" : result.found ? "success" : "not_found",
+    status: result.diagnostics?.includes("ambiguous_target") ? "ambiguous" : result.diagnostics?.length ? "unknown" : result.found ? "success" : "not_found",
     coverage: result.coverage,
     diagnostics: result.diagnostics,
+    next: result.next ?? [result.found ? "Inspect the selected implementation and unresolved relationships before planning edits." : "Refine the query or synchronize the workspace; no match does not prove runtime absence."],
+    controller_file_filter: args.controller_file ?? null,
     query,
     found: result.found,
-    confidence: result.confidence || (result.found ? "exact" : undefined),
+    confidence: result.confidence,
+    confidence_scope: "query_to_catalog_target_only",
+    relationship_limits: SLICE_RELATIONSHIP_LIMITS,
     is_exact_match: result.is_exact_match,
     architecture_style: result.architecture_style,
     max_depth_applied: result.max_depth_applied ?? maxDepth,
     entrypoint: result.entrypoint || null,
     chain,
     alternatives: result.alternatives || [],
+    candidate_count: result.candidate_count,
+    alternatives_omitted: result.alternatives_omitted,
     summary,
     message: result.message || summary,
   };

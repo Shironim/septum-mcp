@@ -9,6 +9,7 @@ import {
   type SymbolLocationResult,
 } from "../../core/resolver/symbol-locator.ts";
 import type { LocateSymbolArgs } from "../schemas.ts";
+import { symbolWorkspace, withSymbolEvidence } from "../../core/retrieval/symbol-evidence.ts";
 
 export type { LocateSymbolArgs } from "../schemas.ts";
 
@@ -26,7 +27,8 @@ export async function handleLocateSymbol(
     );
   }
 
-  const root = workspaceRoot || args.workspace_path || process.cwd();
+  const root = symbolWorkspace(repo, workspaceRoot || args.workspace_path);
+  const diagnostics: string[] = [];
   const limit = args.limit ?? 10;
 
   // 1. Guarded Lazy Ingestion on Empty Catalog / Cold Start
@@ -34,7 +36,7 @@ export async function handleLocateSymbol(
     try {
       await pipeline.run(config);
     } catch {
-      // Ingestion fallback
+      diagnostics.push("initial_index_refresh_failed");
     }
 
     if (repo.countFiles() === 0) {
@@ -51,7 +53,7 @@ export async function handleLocateSymbol(
           "Panggil tool 'septum_domain(action: \"register\", name: \"core\", root: \"src\", ingest_now: true)' untuk mendaftarkan dan mengindeks codebase ini, atau jalankan 'septum init' di terminal workspace.",
       };
 
-      return {
+      return withSymbolEvidence(repo, root, { operation: "locate", requested: args.symbol_ref, diagnostics }, () => ({
         content: [
           {
             type: "text",
@@ -59,7 +61,7 @@ export async function handleLocateSymbol(
           },
         ],
         metadata: diagnostic,
-      };
+      }));
     }
   }
 
@@ -77,7 +79,7 @@ export async function handleLocateSymbol(
         result = locator.locate(query, args.domain, { filePath: args.file_path, reference: args.symbol_ref });
       }
     } catch {
-      // Silently fall back to existing result
+      diagnostics.push("target_index_refresh_failed");
     }
   }
 
@@ -97,7 +99,7 @@ export async function handleLocateSymbol(
         }
       }
     } catch {
-      // Ignore candidate scan errors
+      diagnostics.push("candidate_refresh_failed");
     }
   }
 
@@ -115,7 +117,11 @@ export async function handleLocateSymbol(
       : undefined;
 
   const suggestions = (result.suggestions || []).slice(0, limit);
-  let summary = result.found
+  let summary = result.status === "ambiguous"
+    ? `[AMBIGUOUS] Multiple declarations match '${query}'; select a candidate with symbol_ref or file_path.`
+    : result.status === "stale_reference"
+    ? `[STALE REFERENCE] Locate '${query}' again before using its indexed coordinates.`
+    : result.found
     ? `[FOUND] ${result.exact_symbol?.name || query} in ${result.file_path} (lines ${result.exact_symbol?.line_start}-${result.exact_symbol?.line_end})`
     : `[NOT FOUND] Symbol '${query}' not found. ${suggestions.length > 0 ? `Top suggestions: ${suggestions.map((s) => s.name).slice(0, 3).join(", ")}` : "No close suggestions."}`;
 
@@ -145,7 +151,7 @@ export async function handleLocateSymbol(
     message: result.message || summary,
   };
 
-  return {
+  return withSymbolEvidence(repo, root, { operation: "locate", requested: args.symbol_ref, diagnostics }, () => ({
     content: [
       {
         type: "text" as const,
@@ -153,7 +159,7 @@ export async function handleLocateSymbol(
       },
     ],
     metadata: payload,
-  };
+  }));
 }
 
 /**

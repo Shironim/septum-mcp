@@ -6,8 +6,20 @@ import { isPathContained } from "../../core/resolver/path-resolver.ts";
 import { readSourceFile } from "../../core/resources/source-files.ts";
 import { SymbolLocator } from "../../core/resolver/symbol-locator.ts";
 import type { GetSymbolArgs } from "../../types/index.ts";
+import { symbolWorkspace, withSymbolEvidence } from "../../core/retrieval/symbol-evidence.ts";
 
 export function handleGetSymbol(
+  repo: SeptumRepository,
+  config: ValidatedSeptumConfig,
+  args: GetSymbolArgs,
+  workspaceRoot?: string
+) {
+  const root = symbolWorkspace(repo, workspaceRoot || args.workspace_path);
+  return withSymbolEvidence(repo, root, { operation: "inspect", requested: args.symbol_ref },
+    () => inspectSymbol(repo, config, args, root));
+}
+
+function inspectSymbol(
   repo: SeptumRepository,
   _config: ValidatedSeptumConfig,
   args: GetSymbolArgs,

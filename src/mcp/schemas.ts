@@ -83,6 +83,8 @@ export function normalizeBoundaryArgs(raw: unknown): unknown {
     raw = { file_paths: raw };
   }
   const coerced = extractSingleStringFallback(raw, "file_path", [
+    "action",
+    "plan_ref",
     "workspace_path",
     "workspacePath",
     "workspace",
@@ -416,7 +418,9 @@ export const GetSymbolImpactSchema = z.preprocess(
 export type GetSymbolImpactArgs = z.infer<typeof GetSymbolImpactSchema>;
 
 export function normalizeTraceVerticalSliceArgs(raw: unknown): unknown {
-  const coerced = extractSingleStringFallback(raw, "query");
+  const coerced = extractSingleStringFallback(raw, "query", [
+    "workspace_path", "workspacePath", "workspace", "project_root", "projectRoot", "controller_file",
+  ]);
   if (typeof coerced !== "object" || coerced === null || Array.isArray(coerced)) return coerced;
   const obj = withAliases(coerced, {
     route: "query",
@@ -457,6 +461,7 @@ export const TraceVerticalSliceSchema = z.preprocess(
   z.object({
     query: z.string().min(1, "query is required"),
     symbol: z.string().optional(),
+    controller_file: z.string().min(1).optional(),
     max_depth: z.number().int().min(1).max(8).optional().default(5),
     workspace_path: z.string().optional(),
   })
@@ -466,6 +471,14 @@ export type TraceVerticalSliceArgs = z.infer<typeof TraceVerticalSliceSchema>;
 export const CheckBoundarySchema = z.preprocess(
   normalizeBoundaryArgs,
   z.object({
+    action: z.enum(["check", "plan", "verify"]).optional(),
+    changes: z.array(z.object({
+      file_path: z.string().trim().min(1),
+      proposed_imports: z.array(z.string().min(1)).max(256).default([]),
+      operation: z.enum(["edit", "delete"]).default("edit"),
+    }).strict()).min(1).max(100).optional(),
+    plan_ref: z.string().regex(/^[a-f0-9]{64}$/, "Copy the plan_ref from a saved approved plan.").optional(),
+    dry_run: z.boolean().optional(),
     file_path: z.string().trim().min(1, "file_path cannot be blank").optional(),
     file_paths: z.array(z.string().trim().min(1, "file_paths cannot contain blank paths")).optional(),
     proposed_imports: z.array(z.string()).optional().default([]),
@@ -475,6 +488,23 @@ export const CheckBoundarySchema = z.preprocess(
     staged: z.boolean().optional(),
     workspace_path: z.string().optional(),
   }).superRefine((args, ctx) => {
+    if (args.action === "plan" || args.action === "verify") {
+      for (const key of ["scope", "file_path", "file_paths", "staged", "domain"] as const) {
+        if (args[key] !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `${args.action} does not accept ${key}; use changes for plan or plan_ref for verify.` });
+      }
+      if (args.proposed_imports.length) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["proposed_imports"], message: "Use per-file changes[].proposed_imports." });
+      if (args.action === "plan") {
+        if (!args.changes) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["changes"], message: "plan requires a non-empty changes list." });
+        if (args.plan_ref) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["plan_ref"], message: "A new plan cannot supply an existing plan_ref." });
+        for (const change of args.changes ?? []) if (change.operation === "delete" && change.proposed_imports.length) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["changes"], message: "Delete proposals cannot include imports." });
+        }
+      } else if (!args.plan_ref || args.changes || args.dry_run !== undefined || args.feature_key !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["plan_ref"], message: "verify requires only the saved plan_ref and optional workspace_path; scope cannot be redefined." });
+      }
+      return;
+    }
+    if (args.changes || args.plan_ref || args.dry_run !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["action"], message: "changes/dry_run require action='plan'; plan_ref requires action='verify'." });
     const hasBatch = Boolean(args.file_paths?.length);
     const hasTarget = args.file_path !== undefined || hasBatch;
     const scope = args.scope ?? (args.staged ? "staged" : hasTarget ? "file" : args.domain ? "domain" : "all");
@@ -970,7 +1000,7 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
 export const SymbolToolSchema = z.preprocess(
   normalizeSymbolToolArgs,
   z.object({
-    action: z.enum(["locate", "inspect", "impact", "hotspots"]).optional().default("locate"),
+    action: z.enum(["locate", "inspect", "impact", "hotspots", "context"]).optional().default("locate"),
     query: z.string().optional(),
     symbol: z.string().optional(),
     domain: z.string().optional(),
@@ -986,9 +1016,14 @@ export const SymbolToolSchema = z.preprocess(
     include_source: z.boolean().optional().default(false),
     source_start_line: z.number().int().positive().optional(),
     source_line_limit: z.number().int().positive().max(200).optional().default(120),
+    budget_bytes: z.number().int().min(2048).max(2 * 1024 * 1024).optional(),
+    continuation: z.string().min(1).max(4096).optional(),
   }).superRefine((args, ctx) => {
-    if (args.symbol_ref && args.action !== "locate" && args.action !== "inspect" && args.action !== "impact") {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["symbol_ref"], message: "symbol_ref is supported only for locate, inspect, and impact." });
+    if (args.symbol_ref && args.action !== "locate" && args.action !== "inspect" && args.action !== "impact" && args.action !== "context") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["symbol_ref"], message: "symbol_ref is supported only for locate, inspect, impact, and context." });
+    }
+    if (args.action !== "context" && (args.budget_bytes !== undefined || args.continuation !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["action"], message: "budget_bytes and continuation are supported only for context." });
     }
   })
 );

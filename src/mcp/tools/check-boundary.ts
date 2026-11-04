@@ -6,7 +6,7 @@ import { auditStagedFiles } from "../../core/boundary/staged-auditor.ts";
 import type { BoundaryEvaluator } from "../../core/boundary/evaluator.ts";
 import type { ValidatedSeptumConfig } from "../../core/config/schema.ts";
 import type { SeptumRepository } from "../../core/database/repository.ts";
-import { SessionManager } from "../../core/session/session-manager.ts";
+import { resolveEffectiveFeature } from "../../core/session/effective-feature.ts";
 import type { BoundaryViolation } from "../../types/index.ts";
 import { CheckBoundarySchema, type CheckBoundaryArgs } from "../schemas.ts";
 
@@ -20,6 +20,9 @@ export async function handleCheckBoundary(
   workspaceRoot?: string
 ) {
   const args = CheckBoundarySchema.parse(rawArgs ?? {});
+  if (args.action === "plan" || args.action === "verify") {
+    throw new Error("plan/verify require the septum_boundary dispatcher; they cannot be treated as a check audit.");
+  }
   if (args.domain) {
     const domain = Object.keys(config.domains || {}).find(name => name.toLowerCase() === args.domain!.toLowerCase());
     if (!domain) throw new Error(`Unknown boundary domain '${args.domain}'. Choose a registered domain.`);
@@ -27,29 +30,9 @@ export async function handleCheckBoundary(
   }
   const root = workspaceRoot || args.workspace_path || process.cwd();
   const proposedImports = args.proposed_imports ?? [];
+  const evaluatedScope = { mode: "proposal", proposed_imports_supplied: ["proposed_imports", "proposedImports", "imports", "to_files"].some(key => Object.prototype.hasOwnProperty.call(rawArgs ?? {}, key)), existing_imports_checked: false, omissions: ["Existing file imports are not certified by proposal approval."] };
 
-  const activeSession = SessionManager.getActiveSession(root);
-
-  let effectiveFeatureKey = args.feature_key;
-  if (activeSession) {
-    if (args.feature_key && args.feature_key !== activeSession.feature_key) {
-      throw new Error(
-        `Active feature lock is '${activeSession.feature_key}' (owner: ${activeSession.owner_id}). Cannot check boundaries for different feature '${args.feature_key}' while another feature is locked.`
-      );
-    }
-    effectiveFeatureKey = activeSession.feature_key;
-    if (!config.features) config.features = {};
-    if (!config.features[activeSession.feature_key]) {
-      config.features[activeSession.feature_key] = {
-        domain: activeSession.domain,
-        description: `Active session: ${activeSession.feature_key}`,
-        allowed_touchpoints: activeSession.touchpoints,
-        reuse_symbols: [],
-        input_contract: {},
-        output_contract: {},
-      };
-    }
-  }
+  const effectiveFeatureKey = resolveEffectiveFeature(root, config, args.feature_key);
 
   const syncState = repo?.getMeta("sync_state");
   const syncError = repo?.getMeta("sync_error");
@@ -275,6 +258,7 @@ export async function handleCheckBoundary(
       const impact = repo?.getFileInboundImpact(filePath);
       return {
         file: filePath,
+        evaluated_scope: evaluatedScope,
         status: violations.length > 0 ? "rejected" : "approved",
         violations,
         impact_summary: impact
@@ -329,6 +313,7 @@ export async function handleCheckBoundary(
             {
               status: "rejected",
               file: singleFile,
+              evaluated_scope: evaluatedScope,
               violations_count: violations.length,
               violations,
               impact_summary: impact
@@ -362,6 +347,7 @@ export async function handleCheckBoundary(
           {
             status: "approved",
             file: singleFile,
+            evaluated_scope: evaluatedScope,
             impact_summary: impact
               ? {
                   direct_dependents: impact.direct_dependents_count,
@@ -375,7 +361,7 @@ export async function handleCheckBoundary(
                 ? "No boundary violations detected. [Septum Notice: Domain catalog is currently unindexed. Run 'septum_domain' with action='register' to initialize bounded contexts.]"
                 : impact && impact.direct_dependents_count > 0
                 ? `No boundary violations detected. Caution: ${impact.direct_dependents_count} dependent file(s) consume this file.`
-                : "No boundary violations detected. Proposed imports are permissible.",
+                : "Proposal approved. Existing file imports were not audited.",
           },
           null,
           2

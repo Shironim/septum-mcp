@@ -12,6 +12,7 @@ import { IngestionPipeline } from '../core/ingestion/pipeline.ts';
 import { RESOURCE_LIMITS } from '../core/resources/limits.ts';
 import { SerialWorkQueue } from '../core/resources/work-queue.ts';
 import { WatchBudget, WorkspaceWatcher } from './workspace-watcher.ts';
+import { DomainRootConflictError } from '../core/config/domain-ownership.ts';
 
 export function resolveServerWorkspace(options: {workspacePath?: string; filePath?: string; fallbackRoot?: string; knownRoots?: string[]; initial?: boolean; cwd?: string} = {}): string {
   const cwd = options.cwd || process.cwd();
@@ -108,7 +109,15 @@ export class WorkspaceManager {
         const pipeline = new IngestionPipeline(repo, root);
         const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(root, repo));
         const abort = new AbortController();
-        const ready = this.queue.run(async () => { abort.signal.throwIfAborted(); await pipeline.run(config, {verifyContent:true,signal:abort.signal}); });
+        const ready = this.queue.run(async () => {
+          abort.signal.throwIfAborted();
+          try { await pipeline.run(config, {verifyContent:true,signal:abort.signal}); }
+          catch (error) {
+            // Keep a conflicting legacy workspace open for explicit domain repair.
+            // Its index remains in error and cannot serve normal tool requests.
+            if (!(error instanceof DomainRootConflictError)) throw error;
+          }
+        });
         const watcher = new WorkspaceWatcher(root, repo, pipeline, ready, this.queue, this.budget, () => ConfigLoader.load(undefined, root));
         entry = {context:{root,config,db,repo,evaluator,pipeline,ready,watcher},leases:0,lastUsed:this.now(),initializing:true,abort};
         this.contexts.set(root, entry);

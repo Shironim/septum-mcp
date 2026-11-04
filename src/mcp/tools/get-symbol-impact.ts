@@ -1,8 +1,21 @@
 import type { ValidatedSeptumConfig } from "../../core/config/schema.ts";
 import type { SeptumRepository } from "../../core/database/repository.ts";
 import type { GetSymbolImpactArgs } from "../../types/index.ts";
+import { partitionResolutionWarnings } from "../../core/retrieval/resolution-warnings.ts";
+import { symbolWorkspace, withSymbolEvidence } from "../../core/retrieval/symbol-evidence.ts";
 
 export function handleGetSymbolImpact(
+  repo: SeptumRepository,
+  config: ValidatedSeptumConfig,
+  args: GetSymbolImpactArgs,
+  workspaceRoot?: string
+) {
+  const root = symbolWorkspace(repo, workspaceRoot || args.workspace_path);
+  return withSymbolEvidence(repo, root, { operation: "impact", requested: args.symbol_ref },
+    () => inspectImpact(repo, config, args, root));
+}
+
+function inspectImpact(
   repo: SeptumRepository,
   _config: ValidatedSeptumConfig,
   args: GetSymbolImpactArgs,
@@ -48,10 +61,17 @@ export function handleGetSymbolImpact(
   const relationships = repo.getImportRelationships(workspaceRoot || args.workspace_path);
   const targetFiles = candidates.map(candidate => candidate.file_path);
   const importDependents = relationships.filter(edge => edge.resolution.status === "resolved" && edge.resolution.targets.some(target => target.files.some(file => targetFiles.includes(file))));
-  const payload = { ...impact, coverage: "partial", inbound_callers_complete: false,
+  const warnings = partitionResolutionWarnings(relationships, targetFiles);
+  const payload = { ...impact, symbol_ref: selectedCandidate?.symbol_ref, coverage: "partial", inbound_callers_complete: false,
     relationship_limits: "Legacy inbound caller hints are inferred; import dependencies are reported separately and do not prove executed calls.",
     import_dependents: importDependents,
-    resolution_warnings: relationships.filter(edge => !["resolved","external"].includes(edge.resolution.status) || edge.resolution.coverage === "conditional"),
+    resolution_warnings: warnings.relevant,
+    workspace_resolution_diagnostics: {
+      count: warnings.workspace.length, returned_details: 0, omitted_details: warnings.workspace.length,
+      reason: "Current resolved imports to unrelated indexed files are summarized separately; unresolved, ambiguous, unsupported and stale relationships remain conservatively in resolution_warnings.",
+    },
+    diagnostic_accounting: { total: warnings.relevant.length + warnings.workspace.length,
+      target_or_possible_target: warnings.relevant.length, unrelated_workspace: warnings.workspace.length },
   };
   return {
     content: [

@@ -13,6 +13,7 @@ import { handleDomainTool } from "./tools/domain.ts";
 import { handleSymbolTool } from "./tools/symbol.ts";
 import { handleSliceTool } from "./tools/slice.ts";
 import { handleBoundaryTool } from "./tools/boundary.ts";
+import { DomainRootConflictError } from "../core/config/domain-ownership.ts";
 import { handleFeatureTool } from "./tools/feature.ts";
 
 import {
@@ -132,7 +133,7 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_domain",
           description:
-            "Domain Catalog, Registration & Environment Topology Engine. Manages macro architecture, domain topology, bounded-context registration, and infrastructure plane (Edge, Gateway, Host, Runtime, Storage, Telemetry). Token-efficient (< 400 tokens).",
+            "Discover registered architecture, rules, parser coverage and index state with catalog; register records domain policy, topology records/detects declared environment constraints. These operations may update metadata; topology is not a live infrastructure probe. Use symbol for exact declarations and boundary for decisions. Example: {action:'catalog',detail_level:'compact'}.",
           inputSchema: {
             type: "object",
             properties: {
@@ -228,15 +229,15 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_symbol",
           description:
-            "Unified Symbol Engine: single entrypoint for symbol location, full contract inspection, refactoring blast radius (impact), and Single Responsibility / God Function complexity hotspots.",
+            "Symbol location, bounded source inspection, TypeScript context with bound local/import references and a byte budget, static impact hints, and complexity hotspots. Inspect/context do not prove runtime behavior or business correctness.",
           inputSchema: {
             type: "object",
             properties: {
               action: {
                 type: "string",
-                enum: ["locate", "inspect", "impact", "hotspots"],
+                enum: ["locate", "inspect", "impact", "hotspots", "context"],
                 default: "locate",
-                description: "Sub-operation: 'locate' (fuzzy search/error log resolution), 'inspect' (physical coordinates & signatures), 'impact' (blast radius & inbound callers), or 'hotspots' (complexity & SRP smells).",
+                description: "'locate' selects declarations; 'inspect' reads a bounded symbol; 'context' selects TypeScript target/local/import-bound declarations up to three import edges with evidence, omissions and a byte budget (no TSX or complete business closure); 'impact' reports static hints, not runtime calls; 'hotspots' ranks complexity. Example: {action:'context',query:'submit',file_path:'src/submit.ts'}.",
               },
               query: {
                 type: "string",
@@ -289,6 +290,14 @@ export async function runMCPServer(): Promise<void> {
                 default: true,
                 description: "Whether to include injected dependencies and outbound calls (action='inspect').",
               },
+              budget_bytes: {
+                type: "integer", minimum: 2048, maximum: 2097152, default: 65536,
+                description: "For action='context': maximum UTF-8 bytes of the serialized MCP tool result, including evidence and continuation. Whole declarations are not silently cut.",
+              },
+              continuation: {
+                type: "string", minLength: 1, maxLength: 4096,
+                description: "For action='context': copy the previous page token with the same target and budget. Source/index/config changes require retrieval again.",
+              },
               min_lines: {
                 type: "number",
                 description: "Minimum physical lines of code threshold (action='hotspots', default: 30).",
@@ -322,13 +331,18 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_slice",
           description:
-            "Vertical Execution Slice Tracer: traces end-to-end execution flow (Ingress -> Validation -> Controller -> Service -> Repository -> Entity) from route URI, controller action, or high-level intent without guessing files.",
+            "Find partial static framework relationships from a route, handler or intent before choosing files. Ambiguous targets return candidates without a selected chain; narrow with METHOD /route and controller_file. Nodes label relationship evidence/heuristics; a chain is not proof of execution order or complete runtime reachability. Use symbol inspection for implementation and boundary for policy. Example: {query:'POST /orders',max_depth:5}.",
           inputSchema: {
             type: "object",
             properties: {
               query: {
                 type: "string",
                 description: "Route URI (e.g. 'POST /orders/{id}/pay'), action (e.g. 'OrderController@pay'), or high-level task intent.",
+              },
+              controller_file: {
+                type: "string",
+                minLength: 1,
+                description: "Exact catalog controller/handler file copied from an ambiguity candidate. Filters target selection; does not restrict dependency traversal. Combine with query to distinguish routes sharing a file.",
               },
               max_depth: {
                 type: "number",
@@ -348,14 +362,29 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_boundary",
           description:
-            "Architecture Guard & Circular Dependency Gate: Pre-flight boundary check verifying proposed file edits, additions, and imports against domain rules and feature touchpoints, or auditing the entire repository / staged files for cross-domain and circular dependencies.",
+            "Check architecture/scope before and after edits. Default check audits file proposals, staged or indexed architecture. plan evaluates per-file imports and saves a Git-visible baseline (dry_run previews); verify compares subsequent worktree/index changes with that plan. No application correctness or human approval claim. Example: {action:'plan',changes:[{file_path:'src/orders.ts',proposed_imports:['./shared']}]}.",
           inputSchema: {
             type: "object",
             properties: {
+              action: {
+                type: "string", enum: ["check", "plan", "verify"], default: "check",
+                description: "check preserves existing scope-based audits. plan evaluates per-file changes and saves one baseline per workspace. verify accepts a saved plan_ref without redefining scope.",
+              },
+              changes: {
+                type: "array", minItems: 1, maxItems: 100,
+                items: { type: "object", additionalProperties: false, properties: {
+                  file_path: { type: "string", minLength: 1 },
+                  proposed_imports: { type: "array", maxItems: 256, items: { type: "string", minLength: 1 } },
+                  operation: { type: "string", enum: ["edit", "delete"], default: "edit" },
+                }, required: ["file_path"] },
+                description: "action='plan' only: exact workspace-relative paths, each with its own import targets. Delete proposals cannot include imports.",
+              },
+              plan_ref: { type: "string", pattern: "^[a-f0-9]{64}$", description: "action='verify': copy the saved plan_ref. Source baseline/policy belong to that plan; no human-approval claim." },
+              dry_run: { type: "boolean", description: "action='plan' only: evaluate without replacing the saved plan. Preview references are not persisted." },
               scope: {
                 type: "string",
                 enum: ["file", "staged", "all", "domain"],
-                description: "Audit scope: 'file' requires file_path or non-empty file_paths; 'staged', 'all', and 'domain' reject file targets and proposed_imports. 'domain' requires a registered domain; 'all' rejects domain filters. If omitted, infer file/staged/domain/all from arguments.",
+                description: "For action='check': 'file' requires file_path or non-empty file_paths; staged/all/domain reject file targets and proposed_imports. domain requires a registered domain; all rejects domain filters. Omit scope for plan/verify.",
               },
               file_path: {
                 type: "string",
@@ -390,7 +419,7 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_feature",
           description:
-            "Active Touchpoint & Scope Lock Engine: manages feature task context, touchpoint locks (.septum/session.json), and session release to enforce surgical blast-radius boundaries.",
+            "Get configured/inferred task context without acquiring a lease; lock records supplied scope/contracts and acquires a touchpoint lease; release ends the owned lease. Stored contracts and scope are not proof of business correctness or human approval. Use boundary for change decisions. Example: {action:'get',feature_key:'submit_order'}.",
           inputSchema: {
             type: "object",
             properties: {
@@ -531,8 +560,12 @@ export async function runMCPServer(): Promise<void> {
     const ctx = lease.context;
     await ctx.ready;
     extra?.signal?.throwIfAborted();
-    await ctx.watcher.flush(true, extra?.signal);
-    if (ctx.repo.getMeta("sync_error")) throw new Error(`Workspace index synchronization failed: ${ctx.repo.getMeta("sync_error")}`);
+    const isDomainRegistration = name === "septum_domain" && record.action === "register";
+    try { await ctx.watcher.flush(true, extra?.signal); }
+    catch (error) { if (!isDomainRegistration || !(error instanceof DomainRootConflictError)) throw error; }
+    if (ctx.repo.getMeta("sync_error") && !(isDomainRegistration && ctx.repo.getMeta("sync_error_code") === "DOMAIN_ROOT_CONFLICT")) {
+      throw new Error(`Workspace index synchronization failed: ${ctx.repo.getMeta("sync_error")}`);
+    }
     ctx.config = ConfigLoader.load(undefined, ctx.root);
     ctx.evaluator.getResolver().setRepository(ctx.repo);
 
@@ -576,7 +609,7 @@ export async function runMCPServer(): Promise<void> {
             ],
           };
         }
-        return await handleSymbolTool(ctx.repo, ctx.config, parsed.data, ctx.pipeline, ctx.root);
+        return await handleSymbolTool(ctx.repo, ctx.config, parsed.data, ctx.pipeline, ctx.root, extra?.signal);
       } else if (name === "septum_slice") {
         const parsed = SliceToolSchema.safeParse(args ?? {});
         if (!parsed.success) {
@@ -615,7 +648,7 @@ export async function runMCPServer(): Promise<void> {
             ],
           };
         }
-        return await handleBoundaryTool(ctx.evaluator, ctx.config, parsed.data, ctx.repo, ctx.root);
+        return await handleBoundaryTool(ctx.evaluator, ctx.config, parsed.data, ctx.repo, ctx.root, args);
       } else if (name === "septum_feature") {
         const parsed = FeatureToolSchema.safeParse(args ?? {});
         if (!parsed.success) {

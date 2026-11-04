@@ -1,3 +1,5 @@
+import { computeContentHash } from "../../core/ingestion/hasher.ts";
+import { readSourceFile } from "../../core/resources/source-files.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ValidatedSeptumConfig } from "../../core/config/schema.ts";
@@ -91,9 +93,9 @@ export function handleGetFeatureContext(
         if (slice.controller_file) {
           candidateTouchpoints.add(slice.controller_file);
         }
-        candidateSymbols.add(slice.controller_class);
+        candidateSymbols.add(slice.controller_file ? `${slice.controller_file}#${slice.controller_class}` : slice.controller_class);
         if (slice.action_name) {
-          candidateSymbols.add(`${slice.controller_class}@${slice.action_name}`);
+          candidateSymbols.add(slice.controller_file ? `${slice.controller_file}#${slice.controller_class}::${slice.action_name}` : `${slice.controller_class}::${slice.action_name}`);
         }
 
         if (slice.execution_chain_json) {
@@ -102,7 +104,7 @@ export function handleGetFeatureContext(
             if (Array.isArray(chain)) {
               for (const node of chain) {
                 if (node.file) candidateTouchpoints.add(node.file);
-                if (node.symbol) candidateSymbols.add(node.symbol);
+                if (node.symbol) candidateSymbols.add(node.file ? `${node.file}#${node.symbol}` : node.symbol);
               }
             }
           } catch {}
@@ -150,24 +152,25 @@ export function handleGetFeatureContext(
   const requestedSymbols = featureConfig.reuse_symbols ?? [];
 
   for (const symName of requestedSymbols) {
-    const record = repo.findSymbolWithMembers(symName);
-    if (record) {
-      reuseSymbolsWithMeta.push({
-        name: record.symbol_name,
-        kind: record.kind,
-        signature: record.signature,
-        methods: record.methods.length > 0 ? record.methods : undefined,
-        properties: record.properties.length > 0 ? record.properties : undefined,
-        file_path: record.file_path,
-        domain: record.domain_name,
-      });
-    } else {
-      reuseSymbolsWithMeta.push({
-        name: symName,
-        kind: "unknown",
-        domain: featureConfig.domain,
-      });
+    const separator = symName.indexOf("#");
+    const filePath = separator >= 0 && /\.[a-z]+$/i.test(symName.slice(0, separator)) ? symName.slice(0, separator) : undefined;
+    const query = (filePath ? symName.slice(separator + 1) : symName).replace("@", "::");
+    const candidates = repo.findSymbolsByName(query, { filePath });
+    if (candidates.length !== 1) {
+      reuseSymbolsWithMeta.push({ name: symName, kind: "unknown", status: candidates.length ? "ambiguous" : "not_found", candidates: candidates.map(candidate => candidate.symbol_ref) });
+      continue;
     }
+    const record = candidates[0]!;
+    const members = repo.getSymbolsByFileId(record.file_id).filter(member => member.name.startsWith(`${record.name}::`));
+    let current = false;
+    try { current = computeContentHash(readSourceFile(path.resolve(workspaceRoot, record.file_path))) === record.indexed_content_hash; } catch {}
+    reuseSymbolsWithMeta.push({
+      name: record.name, kind: record.kind, signature: record.signature,
+      methods: members.filter(member => member.kind === "method").map(member => member.signature),
+      properties: members.filter(member => member.kind === "property").map(member => member.signature),
+      file_path: record.file_path, domain: record.domain_name,
+      symbol_ref: record.symbol_ref, status: current ? "resolved" : "stale",
+    });
   }
 
   const response: FeatureContextResponse = {
@@ -181,7 +184,7 @@ export function handleGetFeatureContext(
     output_contract: (featureConfig.output_contract as Record<string, unknown>) ?? {},
     governance_directives: [
       "DO NOT modify or edit any files outside allowed_touchpoints.",
-      "DO NOT create duplicate helpers/services; reuse the existing symbols and methods declared in reuse_symbols.",
+      "DO NOT create duplicate helpers/services; reuse only entries with status resolved; disambiguate candidates or refresh stale entries before reuse.",
       "DO NOT emit or expect phantom payload fields outside input_contract and output_contract.",
       "DO NOT import cross-domain modules without declared allowed_dependencies in Septum domain boundaries.",
     ],

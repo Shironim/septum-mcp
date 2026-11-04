@@ -2,6 +2,7 @@ import type { ValidatedSeptumConfig } from "../../core/config/schema.ts";
 import type { SeptumRepository } from "../../core/database/repository.ts";
 import { IngestionPipeline, type IngestionMetrics } from "../../core/ingestion/pipeline.ts";
 import { assertPathContained } from "../../core/resolver/path-resolver.ts";
+import { assertUniqueDomainRoots, domainNameKey, domainRootIdentity } from "../../core/config/domain-ownership.ts";
 import type { RegisterDomainArgs } from "../schemas.ts";
 
 export type { RegisterDomainArgs } from "../schemas.ts";
@@ -31,7 +32,12 @@ export async function handleRegisterDomain(
     archetypes: args.archetypes,
   };
 
-  const domainId = repo.domains.upsertDomain(domainName, domainConfig);
+  const proposed = domainRootIdentity(args.root, workspaceRoot);
+  const claims = Object.fromEntries(Object.entries(config.domains).filter(([name, claim]) =>
+    domainNameKey(name) !== domainNameKey(domainName) && domainRootIdentity(claim.root, workspaceRoot) === proposed));
+  assertUniqueDomainRoots({ ...claims, [domainName]: domainConfig }, workspaceRoot);
+
+  const domainId = repo.domains.upsertDomain(domainName, domainConfig, workspaceRoot);
   const stored = repo.domains.getDomainByName(domainName);
   const canonicalName = stored?.name || domainName;
   const finalConfig = {
@@ -64,6 +70,10 @@ export async function handleRegisterDomain(
             domain: canonicalName,
             name: canonicalName,
             config: finalConfig,
+            ...(repo.getMeta("sync_error_code") === "DOMAIN_ROOT_CONFLICT" ? {
+              index_status: { sync_state: "error", code: "DOMAIN_ROOT_CONFLICT" },
+              next: ["Resolve any remaining duplicate roots, then sync before using indexed facts. Registration success only records this policy change."],
+            } : {}),
             ...(ingestionMetrics ? { ingestion_metrics: ingestionMetrics } : {}),
           },
           null,

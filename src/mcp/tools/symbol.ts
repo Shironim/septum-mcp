@@ -6,6 +6,8 @@ import { handleLocateSymbol } from "./locate-symbol.ts";
 import { handleGetSymbol } from "./get-symbol.ts";
 import { handleGetSymbolImpact } from "./get-symbol-impact.ts";
 import { handleGetSymbolHotspots } from "./get-symbol-hotspots.ts";
+import { retrieveContext } from "../../core/retrieval/context.ts";
+import { symbolWorkspace } from "../../core/retrieval/symbol-evidence.ts";
 
 export type { SymbolToolArgs };
 
@@ -14,11 +16,15 @@ export async function handleSymbolTool(
   config: ValidatedSeptumConfig,
   args: SymbolToolArgs,
   pipeline?: IngestionPipeline,
-  workspaceRoot?: string
+  workspaceRoot?: string,
+  signal?: AbortSignal
 ) {
   const action = args.action || "locate";
 
   switch (action) {
+    case "context":
+      return retrieveContext(repo, config, args, symbolWorkspace(repo, workspaceRoot || args.workspace_path), signal);
+
     case "inspect": {
       const symbol = args.symbol || args.query || "";
       return handleGetSymbol(
