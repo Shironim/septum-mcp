@@ -1,45 +1,45 @@
 # Septum SSOT — Feature & Architecture Catalog
 
-Septum adalah engine kecerdasan struktural backend berbasis **Tree-Sitter AST (Abstract Syntax Tree)** dan database relasional tersemat **SQLite (`.septum/septum.db`)**. Septum dirancang secara khusus untuk AI Coding Agents agar dapat bernavigasi, memahami arsitektur, melacak alur eksekusi, serta memodifikasi kode backend multi-bahasa tanpa terjebak dalam pembacaan file mentah (*brute-force grep* & *token-heavy full-file reads*).
+Septum is a backend structural intelligence engine powered by **Tree-Sitter AST (Abstract Syntax Tree)** and an embedded **SQLite (`.septum/septum.db`)** database. Septum is purposefully designed for AI Coding Agents to navigate, comprehend architecture, trace execution flows, and refactor multi-language backend code without relying on brute-force text searches (*grep*) or token-heavy full-file reads.
 
 ---
 
-## 1. Filosofi & Masalah yang Diselesaikan
+## 1. Philosophy & Problems Solved
 
-Dalam pengembangan backend berskala menengah hingga besar:
-1. **Perbedaan Bahasa & Sintaks:** Backend modern menggunakan berbagai bahasa (TypeScript, PHP, Python, Go, Rust, Java, C#) dengan framework berbeda (NestJS, Laravel, FastAPI, Gin, Symfony, Express). AI agent konvensional sering salah memahami struktur karena mengandalkan pencarian regex teks mentah.
-2. **Token Bloat & Biaya Konteks:** Membaca ribuan baris file controller atau service hanya untuk mengetahui nama method atau kontrak DTO membuang 80–90% kuota context window AI agent.
-3. **Ketidaktahuan Blast Radius:** AI agent sering mengubah signature fungsi tanpa mengetahui service mana saja yang memanggilnya, menyebabkan regresi atau bug runtime.
-4. **Pelanggaran Arsitektur (*Architectural Drift*):** AI agent sering membuat import silang terlarang (misal domain billing langsung mengimpor domain order) atau menciptakan *circular dependency*.
+In medium-to-large-scale backend engineering:
+1. **Language & Framework Divergence:** Modern backends span multiple languages (TypeScript, PHP, Python, Go, Rust, Java, C#) across various frameworks (NestJS, Laravel, FastAPI, Gin, Symfony, Express). Conventional AI agents often misinterpret architecture because they rely on raw text regex search.
+2. **Token Bloat & Context Costs:** Reading thousands of lines in controller or service files simply to inspect a method signature or DTO contract consumes 80–90% of an AI agent's context window.
+3. **Blast Radius Blindness:** AI agents frequently alter function signatures without knowing which services invoke them across the codebase, triggering regressions and runtime bugs.
+4. **Architectural Drift:** AI agents frequently introduce forbidden cross-domain imports (e.g., billing directly importing ordering) or introduce circular dependencies.
 
-Septum menyelesaikan masalah di atas dengan membangun **Single Source of Truth (SSOT)** graf dependensi, tabel symbol, topologi domain, dan rantai eksekusi vertikal (*vertical slice*) secara real-time.
+Septum resolves these issues by building a real-time **Single Source of Truth (SSOT)** for dependency graphs, symbol tables, domain topologies, and vertical execution slices.
 
 ---
 
-## 2. Peta Dokumen Fitur (Feature SSOT Directory)
+## 2. Feature SSOT Directory
 
-Setiap dokumen di dalam direktori `docs/feature/` ini merupakan **Single Source of Truth (SSOT)** definitif untuk setiap kapabilitas Septum:
+Every document in this `docs/feature/` directory represents a definitive **Single Source of Truth (SSOT)** for a core Septum capability:
 
-| Dokumen SSOT | Fitur / Komponen | Fokus & Cakupan Utama |
+| SSOT Document | Feature / Component | Primary Scope & Focus |
 |---|---|---|
-| [septum-slice.md](./septum-slice.md) | `septum_slice` | **Vertical Execution Chain Tracer:** Melacak alur eksekusi vertikal dari Route Ingress, Middleware, Validation DTO, Controller, Service, hingga Database/Entity di 12 framework backend + fallback generic call-graph. Mendukung pemicu HTTP, CLI Command, Queue Job, dan Domain Event. |
-| [septum-symbol.md](./septum-symbol.md) | `septum_symbol` | **AST Symbol Intelligence:** Sub-operasi `locate` (pencarian fuzzy Damerau-Levenshtein, parser error log/stack-trace), `context` (bounded AST slice 16 KB, anti-hollow slicing via 1-hop delegator expansion, ekstraksi DTO), dan `impact` (blast radius & analisis pemanggil ke belakang). |
-| [septum-map.md](./septum-map.md) | `septum_map` | **Macro Architecture & Domain Catalog:** Peta makro proyek (*Telescope View*), katalog domain granular, registrasi domain dinamis (`register`), dan mekanisme deteksi topologi otomatis (*TopologyDetector*) untuk bahasa dan framework backend. |
-| [septum-boundary.md](./septum-boundary.md) | `septum_boundary` | **Architectural Boundary Guard:** Penegakan aturan batas bounded-context (`forbidden_dependency`, `disallowed_dependency`, `circular_dependency`, `unmapped_domain`), smart type-only import erasure, simulasi pre-flight proposal, dan audit git-staged. |
-| [septum-hooks.md](./septum-hooks.md) | Sistem Hooks Septum | **Real-Time Guard & Auto-Sync:** Pre-Write Hook (`PreToolUse`) untuk intersepsi dan pemblokiran mutasi file terlarang secara in-memory sebelum menyentuh disk, serta Post-Write Hook (`PostToolUse`) untuk sinkronisasi latar belakang non-blocking. |
-| [workspace-lifecycle.md](./workspace-lifecycle.md) | Lifecycle & Invalidation | **Database SSOT & Hashing Engine:** Skema SQLite internal, penanganan perubahan file tipe (`types.ts`) & barrel files (`index.ts`) melalui *Transitive Invalidation*, serta proteksi revisi konfigurasi global (*Config Fingerprint*). |
-| [symbol-context-contract.md](./symbol-context-contract.md) | Context Contract Host | **In-Memory TypeScript Compiler Host:** Spesifikasi teknis pemuatan AST dan proyeksi kontrak antarmuka DTO publik tanpa overhead memori `node_modules`. |
+| [septum-slice.md](./septum-slice.md) | `septum_slice` | **Vertical Execution Chain Tracer:** Traces end-to-end execution flow from Route Ingress, Middleware, Validation DTO, Controller, Service, down to Database/Entity across 12 backend frameworks plus a generic call-graph fallback. Supports HTTP endpoints, CLI Commands, Queue Jobs, and Domain Events. |
+| [septum-symbol.md](./septum-symbol.md) | `septum_symbol` | **AST Symbol Intelligence:** Sub-actions `locate` (fuzzy Damerau-Levenshtein search, error log / stack-trace parser), `context` (bounded 16 KB AST slice, anti-hollow slicing via 1-hop delegator expansion, DTO extraction), and `impact` (blast radius & backward inbound callers). |
+| [septum-map.md](./septum-map.md) | `septum_map` | **Macro Architecture & Domain Catalog:** High-level project architecture (*Telescope View*), granular domain catalogs, dynamic domain registration (`register`), and automatic topology discovery (*TopologyDetector*) across languages and frameworks. |
+| [septum-boundary.md](./septum-boundary.md) | `septum_boundary` | **Architectural Boundary Guard:** Enforces bounded-context rules (`forbidden_dependency`, `disallowed_dependency`, `circular_dependency`, `unmapped_domain`), smart type-only import erasure, pre-flight import proposal simulations, and git-staged audits. |
+| [septum-hooks.md](./septum-hooks.md) | Septum Hooks System | **Real-Time Guard & Auto-Sync:** Pre-Write Hook (`PreToolUse`) for in-memory interception and blocking of illegal mutations before touching disk, and Post-Write Hook (`PostToolUse`) for non-blocking background incremental synchronization. |
+| [workspace-lifecycle.md](./workspace-lifecycle.md) | Lifecycle & Invalidation | **Database SSOT & Hashing Engine:** Internal SQLite schema, transitive invalidation for type files (`types.ts`) and barrel files (`index.ts`), and global configuration revision tracking (*Config Fingerprint*). |
+| [symbol-context-contract.md](./symbol-context-contract.md) | Context Contract Host | **In-Memory TypeScript Compiler Host:** Technical specifications for AST loading and public DTO interface contract projection without `node_modules` overhead. |
 
 ---
 
-## 3. Matriks Routing Tool MCP untuk AI Agent
+## 3. MCP Tool Routing Matrix for AI Agents
 
-| Skenario Kebutuhan AI Agent | Panggil Tool MCP Ini | Keuntungan vs Pendekatan Konvensional |
+| AI Agent Scenario | MCP Tool Call | Advantage vs Conventional Approach |
 |---|---|---|
-| Memahami struktur proyek, batas domain, dan inventory file | `septum_map({ action: "catalog" })` | Mendapatkan peta makro instan tanpa menjalankan `ls` atau `find` berulang kali. |
-| Melacak alur endpoint API, request DTO, dan tabel database yang dimutasi | `septum_slice({ query: "POST /path" })` | Langsung mendapatkan rantai eksekusi Route $\to$ DTO $\to$ Controller $\to$ Service $\to$ DB dalam 1 tool call. |
-| Mengetahui koordinat file dan baris suatu fungsi/class (bahkan dari error log) | `septum_symbol({ action: "locate", query: "..." })` | Menemukan koordinat presisi via fuzzy Damerau-Levenshtein tanpa membaca file. |
-| Memeriksa implementasi logika, parameter, atau return type | `septum_symbol({ action: "context", query: "..." })` | Menghasilkan potongan kode terikat (bounded slice) dan DTO tanpa membanjiri token window. |
-| Mengetahui service mana saja yang memanggil fungsi A sebelum refactoring | `septum_symbol({ action: "impact", query: "..." })` | Menampilkan seluruh pemanggil ke belakang (*inbound callers*) dan estimasi level risiko regresi. |
-| Memvalidasi apakah import baru melanggar aturan modul | `septum_boundary({ file_path: "...", proposed_imports: [...] })` | Mensimulasikan arsitektur secara pre-flight sebelum menulis ke disk. |
-| Audit kepatuhan arsitektur sebelum commit | `septum_boundary({ scope: "staged" })` | Memastikan file yang di-stage bebas dari circular dependencies dan forbidden imports. |
+| Understand project structure, domain boundaries, and file inventory | `septum_map({ action: "catalog" })` | Delivers an instant macro architectural map without repeated `ls` or `find` calls. |
+| Trace an API endpoint, request DTO, and mutated database tables | `septum_slice({ query: "POST /path" })` | Yields the complete execution chain: Route $\to$ DTO $\to$ Controller $\to$ Service $\to$ DB in a single tool call. |
+| Locate exact file coordinates and line numbers of a function/class | `septum_symbol({ action: "locate", query: "..." })` | Pinpoints precise coordinates via Damerau-Levenshtein fuzzy matching without reading entire files. |
+| Inspect implementation logic, parameters, or return types | `septum_symbol({ action: "context", query: "..." })` | Returns a bounded AST slice and DTOs without overwhelming the context window. |
+| Identify callers of function A before refactoring | `septum_symbol({ action: "impact", query: "..." })` | Identifies all backward callers (*inbound callers*) and evaluates regression risk levels. |
+| Validate whether a new import violates architectural rules | `septum_boundary({ file_path: "...", proposed_imports: [...] })` | Simulates architectural compliance in pre-flight mode before saving changes to disk. |
+| Audit architectural compliance before committing | `septum_boundary({ scope: "staged" })` | Ensures staged git files are free of circular dependencies and forbidden imports. |

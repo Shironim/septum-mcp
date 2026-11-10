@@ -1,91 +1,91 @@
-# Feature SSOT: Sistem Hooks Septum (Real-Time Pre-Write & Post-Write Interception)
+# Feature SSOT: Septum Hooks System (Real-Time Pre-Write & Post-Write Interception)
 
-## 1. Latar Belakang & Kebutuhan Bisnis (Business Requirements)
+## 1. Background & Business Requirements
 
-AI Coding Agent (seperti Antigravity, Claude Code, Cursor, Codex) beroperasi secara otonom dengan mengeksekusi tool manipulasi berkas (`write_to_file`, `edit_file`, `replace_file_content`). Masalah mendasar dalam alur otonom ini adalah:
+AI Coding Agents (such as Antigravity, Claude Code, Cursor, Codex) operate autonomously by executing file manipulation tools (`write_to_file`, `edit_file`, `replace_file_content`). Fundamental challenges in this autonomous workflow include:
 
-1. **Kelalaian Agent (*Agent Carelessness*):** Agent sering kali tidak memanggil tool pengecekan arsitektur (`septum_boundary`) sebelum menulis kode. Akibatnya, import terlarang atau siklus dependensi langsung masuk ke disk.
-2. **Keterlambatan Deteksi (*Late Detection*):** Jika verifikasi arsitektur baru dilakukan saat CI/CD atau saat git commit, developer manusia harus turun tangan meminta agent merevisi kode yang sudah telanjur ditulis.
-3. **Latensi Sinkronisasi (*Stale AST Latency*):** Setiap kali agent memodifikasi kode di disk, indeks database AST harus segera dimutakhirkan tanpa membuat agent menunggu lama (*blocking latency*).
+1. **Agent Carelessness:** Agents frequently fail to call architectural validation tools (`septum_boundary`) prior to mutating code. As a result, forbidden imports and cyclic dependencies are committed directly to disk.
+2. **Late Detection:** If architectural checks are deferred until CI/CD or git commit hooks fire, human developers must intervene to prompt the agent to rewrite already modified files.
+3. **Stale AST Latency:** Whenever an agent modifies code on disk, the AST index in SQLite must be updated immediately without imposing blocking latency on agent execution.
 
-**Solusi Sistem Hooks Septum:**
-Septum menyediakan **Sistem Hooks 2 Arah (Pre-Write & Post-Write)** yang terintegrasi langsung dengan harness agent dan sistem operasi:
-* **Pre-Write Hook:** Bertindak sebagai *Circuit Breaker* aktif yang mencegat isi kode pengganti secara in-memory dan membatalkan mutasi disk jika terbukti melanggar arsitektur.
-* **Post-Write Hook:** Bertindak sebagai *Background Synchronizer* non-blocking yang langsung memicu sinkronisasi inkremental begitu berkas berhasil ditulis.
+**The Septum Hooks Solution:**
+Septum provides a **Bidirectional Hooks System (Pre-Write & Post-Write)** integrated directly into agent harnesses and the host operating system:
+* **Pre-Write Hook:** Functions as an active in-memory *Circuit Breaker* that intercepts proposed replacement code and aborts the disk mutation if an architectural violation is detected.
+* **Post-Write Hook:** Functions as a non-blocking *Background Synchronizer* that immediately kicks off incremental AST indexing as soon as a file is written to disk.
 
 ---
 
-## 2. Diagram Alur Kerja Hooks Septum
+## 2. Septum Hooks Workflow Diagram
 
 ```
            AI Coding Agent (Antigravity / Claude Code / Cursor / Codex)
                                       │
                                       ▼
-                        Memanggil Tool Mutasi Berkas:
-            [write_to_file / replace_file_content / edit_file]
+                         Invokes File Mutation Tool:
+             [write_to_file / replace_file_content / edit_file]
                                       │
                                       ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ 1. PRE-WRITE HOOK (`septum hook pre-write`)                                │
 │                                                                            │
-│    a. Mencegat payload tool call melalui STDIN.                            │
-│    b. Mengambil nama file target dan string kode baru (`content`).         │
-│    c. Mem-parse string kode baru ke AST Tree-Sitter secara in-memory.      │
-│    d. Mengekstrak seluruh daftar import yang diajukan (`proposedImports`). │
-│    e. Menjalankan `BoundaryEvaluator.checkProposedChanges()`.              │
+│    a. Intercepts tool call payload via STDIN.                              │
+│    b. Extracts target file path and replacement code string (`content`).   │
+│    c. Parses replacement code into a Tree-Sitter AST in memory.            │
+│    d. Extracts all proposed import statements (`proposedImports`).         │
+│    e. Executes `BoundaryEvaluator.checkProposedChanges()`.                 │
 └─────────────────────────────────────┬──────────────────────────────────────┘
                                       │
                    ┌──────────────────┴──────────────────┐
                    ▼                                     ▼
-      Ada Pelanggaran Arsitektur?               Lolos Evaluasi?
+     Architectural Violation?                 Evaluation Passed?
                    │                                     │
-                   ▼ YA                                  ▼ TIDAK (Bersih)
+                   ▼ YES                                 ▼ NO (Clean)
 ┌──────────────────────────────────────┐  ┌──────────────────────────────────┐
-│ KEPUTUSAN: DENY (BLOCKED)            │  │ KEPUTUSAN: ALLOW                 │
+│ DECISION: DENY (BLOCKED)             │  │ DECISION: ALLOW                  │
 │                                      │  │                                  │
-│ • Cetak pesan error ke STDERR        │  │ • Emisi `{decision: "allow"}`    │
-│ • Emisi JSON `{decision: "deny"}`    │  │ • Exit Code: 0                   │
-│ • Exit Code: 1 (Unix) / 2 (Claude)   │  │ • Tool menulis kode ke disk      │
-│ • DISK TIDAK TERSENTUH SATU BYTE PUN!│  └──────────────────┬───────────────┘
-│ • Agent dipaksa merevisi solusinya   │                     │
+│ • Prints descriptive error to STDERR │  │ • Emits `{decision: "allow"}`    │
+│ • Emits JSON `{decision: "deny"}`    │  │ • Exit Code: 0                   │
+│ • Exit Code: 1 (Unix) / 2 (Claude)   │  │ • Tool writes changes to disk    │
+│ • ZERO BYTES MUTATED ON DISK!        │  └──────────────────┬───────────────┘
+│ • Forces agent to self-correct       │                     │
 └──────────────────────────────────────┘                     ▼
                                           ┌──────────────────────────────────┐
                                           │ 2. POST-WRITE HOOK               │
                                           │    (`septum hook post-write`)    │
                                           │                                  │
-                                          │ • Terpicu setelah file tersimpan │
-                                          │ • Menjalankan `septum sync &`    │
-                                          │   di background (asynchronous)   │
-                                          │ • Indeks SQLite langsung update  │
+                                          │ • Fires immediately after write  │
+                                          │ • Spawns background `septum sync`│
+                                          │   asynchronously                 │
+                                          │ • Updates SQLite SSOT instantly  │
                                           │ • Zero blocking latency!         │
                                           └──────────────────────────────────┘
 ```
 
 ---
 
-## 3. Detail Mekanisme Teknis
+## 3. Technical Implementation Details
 
 ### A. Pre-Write Hook (`runPreWriteHook`)
-Diimplementasikan dalam [hook.ts](../../src/cli/commands/hook.ts):
+Implemented in [hook.ts](../../src/cli/commands/hook.ts):
 
-1. **STDIN Sniffing & Normalisasi Payload:**
-   Hook menerima data JSON dari agent harness. Format input yang dinormalisasi mencakup:
-   * Target File: `toolInput.TargetFile`, `toolInput.file_path`, `toolInput.filePath`, atau `toolInput.path`.
-   * Konten Baru: `toolInput.ReplacementContent`, `toolInput.new_string`, `toolInput.content`, atau potongan `ReplacementChunks`.
-2. **In-Memory AST Parsing (Zero-Disk Impact):**
+1. **STDIN Sniffing & Payload Normalization:**
+   The hook receives raw JSON from the agent harness. Input normalization supports multiple casing styles:
+   * Target File: `toolInput.TargetFile`, `toolInput.file_path`, `toolInput.filePath`, `toolInput.Path`, or `toolInput.path`.
+   * Replacement Content: `toolInput.ReplacementContent`, `toolInput.new_string`, `toolInput.content`, `toolInput.Content`, `toolInput.Replacement`, or `ReplacementChunks`.
+2. **In-Memory AST Parsing (Zero Disk Impact):**
    ```typescript
    const astEngine = new ASTParserEngine();
    const parsed = await astEngine.parseFile(targetFile, content);
    const proposedImports = parsed.dependencies.map((d) => d.target);
    ```
-   Teks kode baru diurai menjadi AST sebelum menyentuh file system.
-3. **Pemeriksaan Batas Modul (*Boundary Check*):**
+   Replacement text is parsed into an AST in memory before any disk write occurs.
+3. **Module Boundary Check:**
    ```typescript
    const boundaryViolations = evaluator.checkProposedChanges(targetFile, proposedImports, config);
    ```
-4. **Eksekusi Pemblokiran (*Block Hook*):**
-   Jika ditemukan pelanggaran, proses dihentikan seketika melalui `blockHook()`:
-   * **STDERR:** Menampilkan pesan deskriptif yang mudah dibaca oleh agent/developer manusia:
+4. **Execution Blocking (`blockHook`):**
+   If violations are detected, execution halts immediately via `blockHook()`:
+   * **STDERR:** Emits human/agent-readable diagnostic messages:
      ```
      [SEPTUM BOUNDARY VIOLATION - Forbidden Cross-Domain Import]
      ✕ Operation blocked: Proposed code imports forbidden domain 'billing' from 'ordering'.
@@ -93,36 +93,36 @@ Diimplementasikan dalam [hook.ts](../../src/cli/commands/hook.ts):
      ▶ RULE: forbidden_dependency
      ▶ REQUIRED ACTION: Decouple this dependency. Use an authorized Interface, Event, or Shared Kernel.
      ```
-   * **STDOUT:** Mengirimkan kontrak IPC JSON:
+   * **STDOUT:** Emits the IPC JSON contract:
      ```json
      { "decision": "deny", "reason": "Proposed code imports forbidden domain 'billing' from 'ordering'." }
      ```
-   * **Exit Code:** Mengembalikan kode keluar `1` (standar Unix) atau `2` (standar Claude Code / Cursor hooks).
+   * **Exit Code:** Returns exit code `1` (Unix standard) or `2` (Claude Code / Cursor hook standard).
 
 ### B. Post-Write Hook (`runPostWriteHook`)
-Setelah tool call berhasil menulis kode yang sah ke disk:
-* Hook mengeksekusi:
+After a tool call successfully writes compliant code to disk:
+* The hook executes:
   ```sh
   septum sync >/dev/null 2>&1 &
   ```
-* Sinkronisasi berjalan di *background process* (non-blocking). Indeks AST pada `.septum/septum.db` langsung diperbarui secara inkremental tanpa membuat agent terdiam menunggu.
+* Synchronization runs as a detached background process (non-blocking). The AST index in `.septum/septum.db` updates incrementally without pausing agent execution.
 
 ---
 
-## 4. Kompatibilitas Lintas AI Harness & Git
+## 4. Cross-Harness & Git Compatibility
 
-Konfigurasi hooks Septum dibuat otomatis melalui template [hooks.ts](../../src/cli/templates/hooks.ts) untuk mendukung berbagai environment:
+Septum hook configurations are generated automatically via [hooks.ts](../../src/cli/templates/hooks.ts) across target environments:
 
-| Platform | Integrasi & Protokol |
+| Platform | Integration & Protocol |
 |---|---|
-| **Google Antigravity IDE / Gemini** | Menggunakan konfigurasi `PreToolUse` dan `PostToolUse` berbasis kontrak JSON IPC (`{ decision: "allow" | "deny" }`). |
-| **Claude Code & Cursor** | Menggunakan flag `--exit-code-2` atau `--claude` / `--cursor` agar harness agent menangkap kegagalan tool dan meminta LLM mengoreksi arsitektur secara mandiri. |
-| **Git Pre-Commit Hook** | Dapat dipasang di `.git/hooks/pre-commit` dengan mengeksekusi `septum check --staged` untuk memblokir `git commit` jika ada pelanggaran arsitektur manual oleh developer manusia. |
+| **Google Antigravity IDE / Gemini** | Uses `PreToolUse` and `PostToolUse` configurations based on JSON IPC contracts (`{ decision: "allow" | "deny" }`). |
+| **Claude Code & Cursor** | Uses `--exit-code-2` or `--claude` / `--cursor` flags so the agent harness captures tool failures and directs the LLM to resolve boundary violations autonomously. |
+| **Git Pre-Commit Hook** | Installed in `.git/hooks/pre-commit` or `.husky/pre-commit`, running `septum check --staged` to block `git commit` if violations were introduced manually by developers. |
 
 ---
 
-## 5. Ringkasan Nilai Bisnis Hooks
+## 5. Summary of Business Value
 
-1. **Jaminan Nol Pelanggaran di Disk (*Zero Contamination*):** Kode yang melanggar arsitektur tidak akan pernah tersimpan di disk.
-2. **Umpan Balik Instan (*Zero Latency Feedback*):** AI agent langsung menerima alasan mengapa kodenya ditolak dalam hitungan milidetik, lengkap dengan rekomendasi perbaikan (*Decouple dependency via Interface/Event*).
-3. **Indeks Selalu Segar (*Always-Fresh SSOT*):** Post-write hook menjamin database SQLite selalu selaras dengan kondisi file fisik terbaru.
+1. **Zero Disk Contamination:** Architecturally invalid code is rejected before writing a single byte to disk.
+2. **Zero-Latency Feedback:** AI agents receive immediate feedback explaining why an edit was blocked within milliseconds, along with actionable decoupling recommendations (*Decouple dependency via Interface/Event*).
+3. **Always-Fresh SSOT:** Post-write hooks ensure the SQLite index remains continuously synchronized with file system state.

@@ -1,35 +1,35 @@
 # Feature SSOT: `septum_symbol` (AST Symbol Intelligence & Blast Radius)
 
-## 1. Latar Belakang & Kebutuhan Bisnis (Business Requirements)
+## 1. Background & Business Requirements
 
-AI Coding Agent yang melakukan modifikasi kode sering kali mengalami 3 kendala utama:
-1. **Buta Koordinat:** Agent kesulitan menemukan letak persis fungsi atau class tanpa melakukan brute-force `grep`, terutama jika terdapat nama fungsi yang sama di berbagai file.
-2. **Konteks Berlebihan (*Token Bloat*) atau Kosong (*Hollow Slicing*):** Jika agent membaca seluruh file controller (500–1.000 baris), token window cepat habis. Namun jika agent hanya membaca 3 baris fungsi delegasi (`return this.service.handle()`), agent tidak memahami logika bisnisnya.
-3. **Risiko Regresi (*Blind Refactoring*):** Mengubah parameter fungsi publik tanpa mengetahui siapa saja pemanggil fungsi tersebut di seluruh proyek sering kali merusak modul lain.
+AI Coding Agents performing code modifications frequently struggle with 3 critical limitations:
+1. **Coordinate Blindness:** Agents struggle to pinpoint exact line numbers of functions or classes without brute-force `grep`, especially when identical method names exist across multiple files.
+2. **Token Bloat vs. Hollow Slicing:** Reading an entire 1,000-line controller file rapidly exhausts token budgets. Conversely, reading only a 3-line delegating wrapper method (`return this.service.handle()`) starves the agent of essential business logic.
+3. **Refactoring Blast Radius Blindness:** Altering public parameters or function contracts without discovering all upstream call sites across the codebase introduces regressions and breaks dependent modules.
 
-`septum_symbol` adalah antarmuka utama kecerdasan symbol AST yang menyediakan 3 sub-operasi (*actions*): `locate`, `context`, dan `impact`.
+`septum_symbol` serves as the primary AST symbol intelligence tool, offering 3 core sub-operations (*actions*): `locate`, `context`, and `impact`.
 
 ---
 
-## 2. Sub-Operasi 1: `action: "locate"` (Pencarian Koordinat Presisi)
+## 2. Sub-Operation 1: `action: "locate"` (Precision Coordinate Discovery)
 
-### Cara Kerja Internal & Algoritma
+### Internal Mechanics & Algorithms
 1. **Error Log & Stack-Trace Parser:**
-   AI agent dapat memasukkan string pesan error mentah dari terminal. Parser otomatis mengurai container class dan method ([symbol-locator.ts](../../src/core/resolver/symbol-locator.ts)):
+   AI agents can pass raw error messages directly from compiler or runtime output. The parser isolates the container class and target method ([symbol-locator.ts](../../src/core/resolver/symbol-locator.ts)):
    * `"Call to undefined method App\Http\Controllers\OrderController::calculateTotal()"` $\to$ Container: `OrderController`, Member: `calculateTotal`.
    * `"'OrderService' object has no attribute 'calculate_total'"` $\to$ Container: `OrderService`, Member: `calculate_total`.
-   * Sintaks bebas: `OrderController::store`, `OrderService->calculateTotal`, `OrderService.calculateTotal`, atau plain `calculateTotal`.
+   * Flexible syntax: `OrderController::store`, `OrderService->calculateTotal`, `OrderService.calculateTotal`, or bare `calculateTotal`.
 2. **Multi-Signal Similarity Engine (0.0 – 1.0):**
-   Jika terjadi salah ketik (*typo*), Septum menghitung skor kemiripan menggabungkan:
-   * **Damerau-Levenshtein Distance:** Menangani kesalahan ketik huruf dan transposisi karakter.
-   * **Token Jaccard Similarity:** Memecah identifier berdasarkan *CamelCase*, *snake_case*, *kebab-case*, dan namespace.
-   * **Prefix & Substring Bonus:** Memberikan bobot tinggi untuk pencarian parsial.
+   When typos occur, Septum calculates a combined similarity score:
+   * **Damerau-Levenshtein Distance:** Handles typos and character transpositions.
+   * **Token Jaccard Similarity:** Deconstructs identifiers across *CamelCase*, *snake_case*, *kebab-case*, and namespace segments.
+   * **Prefix & Substring Bonus:** Grants extra weight for partial name matches.
 3. **Sibling Methods & Suggestions:**
-   Jika symbol tidak ditemukan di class target, Septum mengembalikan daftar `sibling_methods` (method lain yang tersedia pada class tersebut).
+   If a symbol is absent from the target container, Septum returns `sibling_methods` (other methods defined in the same container).
 4. **Just-In-Time (JIT) Delta Sync:**
-   Jika file telah berubah di disk sejak indeks terakhir, Septum langsung mem-parse ulang file tersebut *on-the-fly* agar koordinat nomor baris (`start_line` dan `end_line`) tidak meleset.
+   If a file changed on disk since the previous sync, Septum reparses it on-the-fly so `start_line` and `end_line` coordinates remain accurate.
 
-### Skema Input & Output JSON
+### Input & Output Schema
 ```json
 // Request
 {
@@ -63,25 +63,25 @@ AI Coding Agent yang melakukan modifikasi kode sering kali mengalami 3 kendala u
 
 ---
 
-## 3. Sub-Operasi 2: `action: "context"` (Bounded Slicing & DTO Extraction)
+## 3. Sub-Operation 2: `action: "context"` (Bounded Slicing & DTO Extraction)
 
-### Cara Kerja Internal & Algoritma
+### Internal Mechanics & Algorithms
 1. **Bounded Source Slicing:**
-   Hanya mengekstrak baris kode fungsi yang diminta (default limit 120 baris, max 200 baris) dengan batas memori ketat (16 KB) guna menghemat kuota context window AI agent.
+   Extracts only the requested symbol lines (default limit: 120 lines, max: 200 lines) within a strict memory budget (16 KB) to conserve the agent's context window.
 2. **Anti-Hollow Slicing (1-Hop Transitive Delegator Expansion):**
-   Jika suatu method hanya berupa satu baris delegasi ke service yang di-inject via Dependency Injection:
+   If a method is merely a one-line delegate to an injected dependency:
    ```php
    public function calculate(OrderRequest $request) {
        return $this->orderService->calculateTotal($request->validated());
    }
    ```
-   Septum secara cerdas menganalisis parameter Constructor DI, melacak letak class `OrderService`, dan **otomatis menyertakan potongan implementasi method target** (`delegated_implementation`) dalam respons yang sama tanpa perlu tool call tambahan.
+   Septum inspects Constructor DI parameters, identifies `OrderService`, and **automatically embeds the target method's implementation** (`delegated_implementation`) in the same response without requiring a second tool call.
 3. **In-Memory TypeScript DTO / Contract Extraction:**
-   Pada proyek TypeScript, Septum menjalankan in-memory compiler AST untuk mengekstrak interface/type DTO yang dipakai pada signature fungsi.
-4. **Dependency & Outbound Resolution:**
-   Menyajikan daftar service yang di-inject (`dependencies_injected`) dan fungsi-fungsi lain yang dipanggil ke luar (`outbound_calls`).
+   In TypeScript projects, Septum runs an in-memory AST compiler host to project interface and type contracts referenced in the function signature.
+4. **Dependency & Outbound Call Resolution:**
+   Lists injected services (`dependencies_injected`) and external method invocations (`outbound_calls`).
 
-### Skema Input & Output JSON
+### Input & Output Schema
 ```json
 // Request
 {
@@ -119,7 +119,7 @@ AI Coding Agent yang melakukan modifikasi kode sering kali mengalami 3 kendala u
       "file_path": "app/Services/OrderService.php",
       "start_line": 80,
       "end_line": 105,
-      "text": "public function calculateTotal(array $payload): float {\n    // Implementasi logika kalkulasi riil di Service...\n}"
+      "text": "public function calculateTotal(array $payload): float {\n    // Concrete calculation implementation in Service...\n}"
     }
   }
 }
@@ -127,24 +127,24 @@ AI Coding Agent yang melakukan modifikasi kode sering kali mengalami 3 kendala u
 
 ---
 
-## 4. Sub-Operasi 3: `action: "impact"` (Blast Radius & Inbound Callers)
+## 4. Sub-Operation 3: `action: "impact"` (Blast Radius & Inbound Callers)
 
-### Cara Kerja Internal & Algoritma
+### Internal Mechanics & Algorithms
 1. **Inverse Dependency Traversal:**
-   Mencari seluruh file di repository yang mengimpor atau merujuk pada file pendefinisi symbol target.
+   Scans the repository for all files that import or reference the file declaring the target symbol.
 2. **Batch Enclosing Symbol Resolution (Zero N+1 Query):**
-   Septum memuat deklarasi seluruh symbol pada file-file pemanggil dalam 1 kali batch query SQLite, lalu memetakan posisi baris pemanggilan: *“Baris 115 ini berada di dalam method apa?”* Hasilnya adalah nama method pemanggil yang konkret, bukan hanya nomor baris.
+   Septum loads symbols from calling files in a single batch SQLite query to resolve callers: *“Which method encloses line 115?”* Output provides concrete caller method identifiers rather than plain line numbers.
 3. **Method-Level Invocation Verification:**
-   Membedakan antara file yang *hanya mengimpor class* dengan file yang *benar-benar mengeksekusi method tersebut* dengan memvalidasi sintaks pemanggilan:
+   Differentiates files that *merely import a class* from files that *actually invoke the specific method*, validating call syntax:
    * `->methodName(` (PHP)
    * `.methodName(` (TypeScript, JavaScript, Python, Go)
-   * `::methodName(` (Static call PHP, C++)
-4. **Kalkulasi Tingkat Risiko Regresi (*Risk Level*):**
-   * **`low`:** Dipanggil oleh < 2 file dan hanya dalam domain yang sama.
-   * **`medium`:** Dipanggil oleh 2–5 file atau melibatkan 2 domain berbeda.
-   * **`high`:** Dipanggil oleh > 5 file atau melintasi > 2 domain arsitektur.
+   * `::methodName(` (Static calls in PHP, C++)
+4. **Regression Risk Level Calculation:**
+   * **`low`:** Invoked by < 2 files within the same domain.
+   * **`medium`:** Invoked by 2–5 files or spans 2 domains.
+   * **`high`:** Invoked by > 5 files or spans > 2 architectural domains.
 
-### Skema Input & Output JSON
+### Input & Output Schema
 ```json
 // Request
 {
@@ -189,11 +189,11 @@ AI Coding Agent yang melakukan modifikasi kode sering kali mengalami 3 kendala u
 
 ---
 
-## 5. Dukungan Bahasa Pemrograman
+## 5. Programming Language Support
 
-`septum_symbol` mendukung penuh navigasi AST pada:
-* **TypeScript & JavaScript:** Class, method, arrow function, interface, type alias, enum.
-* **PHP (Laravel & Symfony):** Class, Trait, Interface, Enum, Constructor Property Promotion (PHP 8), Attributes.
-* **Python (FastAPI, Django, Flask):** Class, async/sync def, Pydantic models.
-* **Go (Golang):** Struct, Interface, standalone function, method receiver (`func (s *Service) Method()`).
-* **Rust, C#, Java, Ruby:** Mendukung pencarian deklarasi struct/class/method secara native via Tree-Sitter grammar WASM.
+`septum_symbol` provides full AST symbol navigation for:
+* **TypeScript & JavaScript:** Classes, methods, arrow functions, interfaces, type aliases, enums.
+* **PHP (Laravel & Symfony):** Classes, Traits, Interfaces, Enums, Constructor Property Promotion (PHP 8), Attributes.
+* **Python (FastAPI, Django, Flask):** Classes, async/sync defs, Pydantic models.
+* **Go (Golang):** Structs, Interfaces, standalone functions, method receivers (`func (s *Service) Method()`).
+* **Rust, C#, Java, Ruby:** Native declaration indexing for structs, classes, and methods via Tree-Sitter WASM grammars.

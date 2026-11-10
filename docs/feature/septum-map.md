@@ -1,23 +1,23 @@
 # Feature SSOT: `septum_map` (Macro Architecture & Domain Catalog)
 
-## 1. Latar Belakang & Kebutuhan Bisnis (Business Requirements)
+## 1. Background & Business Requirements
 
-Saat pertama kali bekerja pada repository backend yang besar, AI Coding Agent menghadapi masalah **"Cold Start"**:
-1. Agent tidak mengetahui pola arsitektur proyek (apakah *Clean Architecture*, *Modular DDD*, *Layered MVC*, atau *Monorepo*).
-2. Agent tidak mengetahui batas modul (*bounded context*) dan domain mana yang boleh mengimpor domain lain.
-3. Agent sering melakukan panggilan terminal acak (`ls`, `find`, `grep`) yang menghabiskan token dan lambat.
+When first working in a large backend repository, AI Coding Agents encounter the **"Cold Start"** dilemma:
+1. The agent lacks awareness of the project's architectural pattern (*Clean Architecture*, *Modular DDD*, *Layered MVC*, or *Monorepo*).
+2. The agent is unfamiliar with module boundaries (*bounded contexts*) and dependency permissions between domains.
+3. The agent frequently issues ad-hoc terminal commands (`ls`, `find`, `grep`) that burn tokens and waste latency.
 
-`septum_map` memecahkan masalah ini dengan menyediakan **peta makro arsitektural instan (*Telescope View*)** dan **katalog berkas terstruktur per domain** sebelum agent menyentuh kode sumber.
+`septum_map` eliminates this friction by delivering an **instant macro architectural map (*Telescope View*)** and **structured per-domain file catalogs** before an agent ever touches source code.
 
 ---
 
-## 2. Dua Mode Utama `action: "catalog"`
+## 2. Two Primary Modes for `action: "catalog"`
 
-### Mode A: Macro Bird's-Eye View (Saat `domain` dikosongkan)
-Memberikan gambaran arsitektur tingkat tinggi dari seluruh sistem:
-* **Telescope View:** Menyajikan tipe proyek (`project_type`), framework yang terdeteksi (`framework`), gaya arsitektur (`architecture_style`), dan jumlah total rute/slice eksekusi (`total_vertical_slices`).
-* **Daftar Bounded Domains:** Menampilkan domain terdaftar, folder root-nya, archetype yang dikandung, serta aturan ketergantungan (`allowed_dependencies` dan `forbidden_dependencies`).
-* **Scanned vs Ignored Folders:** Memberikan visibilitas folder mana saja yang diindeks dan folder mana yang sengaja diabaikan (misal `tests`, `public`, `assets`).
+### Mode A: Macro Bird's-Eye View (When `domain` is omitted)
+Provides a high-level architectural overview of the entire system:
+* **Telescope View:** Displays project classification (`project_type`), detected framework (`framework`), architectural style (`architecture_style`), and total execution slices (`total_vertical_slices`).
+* **Bounded Domain List:** Surfaces registered domains, root directories, detected archetypes, and declared dependency constraints (`allowed_dependencies` and `forbidden_dependencies`).
+* **Scanned vs Ignored Folders:** Distinguishes indexed source directories from deliberately excluded directories (e.g., `tests`, `public`, `dist`, `vendor`).
 
 ```json
 // Request
@@ -53,20 +53,19 @@ Memberikan gambaran arsitektur tingkat tinggi dari seluruh sistem:
 }
 ```
 
-### Mode B: Granular Domain Catalog (Saat `domain: "<name>"` diisi)
-Ketika agent ingin fokus pada satu domain tertentu:
-* **`detail_level: "compact"` (Default, Hemat Token):** Menampilkan daftar file dalam domain, archetype-nya (controller, service, model), jumlah baris, serta ringkasan symbol (`methods_count`, `properties_count`, line span).
-* **`detail_level: "full"`:** Menampilkan deklarasi symbol lengkap, signature method, serta graf relasi import antar file.
-* **Penyaringan Berdasarkan Archetype (`archetype_filter`):** Agent dapat menyaring file spesifik:
+### Mode B: Granular Domain Catalog (When `domain: "<name>"` is provided)
+When an agent zooms in on a specific bounded context:
+* **`detail_level: "compact"` (Default, Token-Efficient):** Lists files in the target domain, their archetype (controller, service, model), line counts, and symbol summaries (`methods_count`, `properties_count`, line span).
+* **`detail_level: "full"`:** Returns full symbol declarations, method signatures, and file import dependency edges.
+* **Archetype Filtering (`archetype_filter`):** Enables filtering by specific layer components:
   ```json
   { "action": "catalog", "domain": "ordering", "archetype_filter": "controller" }
   ```
 
 ---
 
-## 3. Sub-Operasi `action: "register"` (Registrasi Domain Dinamis)
-
-Jika developer atau AI agent membuat modul/bounded context baru, domain dapat didaftarkan secara dinamis tanpa perlu mengedit file konfigurasi manual:
+## 3. Sub-Operation `action: "register"` (Dynamic Domain Registration)
+When engineers or AI agents introduce a new module or bounded context, domains can be registered dynamically without manual configuration file edits:
 
 ```json
 // Request
@@ -79,49 +78,49 @@ Jika developer atau AI agent membuat modul/bounded context baru, domain dapat di
   "ingest_now": true
 }
 ```
-* **Validasi Kepemilikan Root:** Septum memverifikasi bahwa folder `root` tidak tumpang tindih (*root collision*) dengan domain yang sudah ada.
-* **Instant Persistence:** Konfigurasi langsung disimpan ke tabel `domains` di SQLite, dan jika `ingest_now: true`, file-file di dalamnya langsung diindeks.
+* **Root Collision Validation:** Septum verifies that `root` does not overlap or conflict with existing domain paths.
+* **Instant Persistence:** Configuration is saved directly to the SQLite `domains` table; if `ingest_now: true`, contained files are indexed immediately.
 
 ---
 
-## 4. Mekanisme Deteksi Topologi Otomatis (`TopologyDetector`)
+## 4. Automatic Topology Discovery (`TopologyDetector`)
 
-Saat Septum dijalankan di sebuah workspace, engine **`TopologyDetector`** ([topology-detector.ts](../../src/core/discovery/topology-detector.ts)) mendeteksi bahasa, framework, dan pola arsitektur secara otomatis tanpa konfigurasi awal:
+When initialized in a workspace, the **`TopologyDetector`** engine ([topology-detector.ts](../../src/core/discovery/topology-detector.ts)) automatically discovers languages, frameworks, and architectural styles without prior configuration:
 
 ```
                             Project Root
                                  │
          ┌───────────────────────┴───────────────────────┐
          ▼                                               ▼
-1. Deteksi Bahasa                               2. Deteksi Framework
+1. Language Detection                           2. Framework Detection
    • PHP: composer.json, artisan                   • Laravel: artisan
    • Go: go.mod                                    • Symfony: bin/console, symfony.lock
-   • Python: pyproject.toml, requirements.txt      • NestJS: @nestjs/core di package.json
+   • Python: pyproject.toml, requirements.txt      • NestJS: @nestjs/core in package.json
    • TS/JS: tsconfig.json, package.json            • Express, Fastify, Hono, Elysia
                                                    • FastAPI, Django, Flask (Python)
                                                    • Gin, Echo, Chi, Fiber (Go)
                                  │
          ┌───────────────────────┴───────────────────────┐
          ▼                                               ▼
-3. Klasifikasi Tipe Proyek                      4. Pemetaan Gaya Arsitektur
+3. Project Type Classification                  4. Architectural Style Mapping
    • monorepo (pnpm, turbo, lerna, nx)             • monorepo-workspaces (apps/*, packages/*)
-   • backend (API framework murni)                 • modular-ddd (domains/*, modules/*)
-   • fullstack (Next.js, Nuxt, Laravel Blade)      • layered-monolith (app/Http/Controllers, dll.)
+   • backend (standalone API framework)            • modular-ddd (domains/*, modules/*)
+   • fullstack (Next.js, Nuxt, Laravel Blade)      • layered-monolith (app/Http/Controllers, etc.)
    • cli-mcp (MCP server SDK, CLI)                 • clean-architecture (Go cmd/*, internal/*)
 ```
 
-### Aturan Partisi Domain Otomatis
-* **Monorepo Workspaces:** Setiap subfolder di `apps/*` dan `packages/*` dipetakan menjadi domain independen. Aturan ketergantungan otomatis dibuat: `apps` boleh mengimpor `packages`, tetapi `packages` dilarang mengimpor `apps`.
-* **Modular DDD:** Struktur folder seperti `src/domains/*`, `src/modules/*`, `app/Domain/*`, atau `features/*` otomatis diisolasi menjadi domain terpisah dengan dependensi hanya ke `shared` atau `common`.
-* **Go Clean Architecture:** Folder `cmd/` dipetakan sebagai entrypoint, `internal/` sebagai domain privat, dan `pkg/` sebagai shared library publik. Aturan diset: `internal` tidak boleh diimpor dari luar, dan `pkg` dilarang mengimpor `cmd`.
-* **Layered Monolith (Laravel MVC / NestJS Layered):** Folder dipetakan berdasarkan layer arsitektur (`app/Http/Controllers`, `app/Services`, `app/Models`, dll.).
+### Automatic Domain Partition Rules
+* **Monorepo Workspaces:** Every package under `apps/*` and `packages/*` is mapped as an independent domain. Default dependency rules permit `apps` to import `packages`, while prohibiting `packages` from importing `apps`.
+* **Modular DDD:** Directory structures such as `src/domains/*`, `src/modules/*`, `app/Domain/*`, or `features/*` are isolated into bounded domains with dependencies restricted to `shared` or `common`.
+* **Go Clean Architecture:** `cmd/` is designated as the entrypoint domain, `internal/` as private domain logic, and `pkg/` as public shared libraries. Rules enforce that `internal` is never imported externally, and `pkg` cannot depend on `cmd`.
+* **Layered Monolith (Laravel MVC / NestJS Layered):** Mapped into domain layers (`app/Http/Controllers`, `app/Services`, `app/Models`, etc.).
 
 ---
 
-## 5. Ringkasan Nilai SSOT di Database SQLite (`repo_meta`)
+## 5. SSOT Metadata Summary in SQLite (`repo_meta`)
 
-Seluruh kesimpulan topologi disimpan secara permanen di database internal:
-* `repo_meta.framework`: Menyimpan nama framework (misal `"laravel"`, `"nestjs"`, `"fastapi"`, `"gin"`).
-* `repo_meta.language`: Menyimpan bahasa utama (`"typescript"`, `"php"`, `"python"`, `"go"`).
-* `repo_meta.architecture_style`: Menyimpan pola arsitektur (`"modular-ddd"`, `"clean-architecture"`, dll.).
-* `repo_meta.project_type`: Menyimpan tipe proyek (`"backend"`, `"monorepo"`, `"fullstack"`).
+All discovered topological facts are persisted in the embedded database:
+* `repo_meta.framework`: Framework name (e.g., `"laravel"`, `"nestjs"`, `"fastapi"`, `"gin"`).
+* `repo_meta.language`: Primary language (`"typescript"`, `"php"`, `"python"`, `"go"`).
+* `repo_meta.architecture_style`: Architectural style (`"modular-ddd"`, `"clean-architecture"`, etc.).
+* `repo_meta.project_type`: Project classification (`"backend"`, `"monorepo"`, `"fullstack"`).

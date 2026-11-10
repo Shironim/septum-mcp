@@ -1,90 +1,90 @@
 # Feature SSOT: `septum_slice` (Vertical Execution Chain Tracer)
 
-## 1. Latar Belakang & Kebutuhan Bisnis (Business Requirements)
+## 1. Background & Business Requirements
 
-Dalam arsitektur backend modern, sebuah permintaan tidak pernah berhenti di layer controller. Permintaan pengguna mengalir secara vertikal:
+In modern backend architectures, a client request never stops at the controller layer. Execution flows vertically through multiple layers:
 $$\text{Ingress (Route / HTTP / CLI / Job)} \longrightarrow \text{Guard / Middleware} \longrightarrow \text{Validation DTO} \longrightarrow \text{Controller} \longrightarrow \text{Service / Use Case} \longrightarrow \text{Repository / ORM} \longrightarrow \text{Database Table}$$
 
-**Masalah Konvensional:**
-AI agent yang ingin memahami endpoint `POST /orders` biasanya harus:
-1. Menjalankan pencarian teks untuk file router.
-2. Membaca router untuk menemukan controller handler.
-3. Membaca controller untuk menemukan FormRequest / DTO dan method service yang dipanggil.
-4. Membaca service untuk mengetahui query atau tabel database yang dimutasi.
-Ini menghabiskan 5–8 tool calls terpisah dan ribuan token context window.
+**The Conventional Problem:**
+When an AI agent needs to understand an endpoint such as `POST /orders`, it conventionally has to:
+1. Search across source files for routing definitions.
+2. Read the router file to find the controller handler.
+3. Read the controller to identify the FormRequest / DTO and invoked service methods.
+4. Read the service file to uncover mutated database tables or queries.
+This consumes 5–8 separate tool calls and burns thousands of tokens from the agent's context window.
 
-**Solusi `septum_slice`:**
-`septum_slice` menyediakan **pelacak eksekusi vertikal end-to-end dalam satu tool call**. Engine memetakan seluruh relasi dari titik masuk (*entrypoint*) hingga lapisan persistensi data paling dalam secara deterministik.
+**The `septum_slice` Solution:**
+`septum_slice` provides **end-to-end vertical execution tracing in a single tool call**. The engine traces connections deterministically from the external entrypoint down to data persistence layers.
 
 ---
 
-## 2. Cakupan Pemicu Eksekusi (*Omni-Trigger Support*)
+## 2. Omni-Trigger Support
 
-`septum_slice` bukan hanya pelacak HTTP route, melainkan mendukung 4 jenis pemicu sistem backend:
+`septum_slice` is not limited to HTTP endpoints; it natively supports 4 types of backend triggers:
 
 1. **HTTP Endpoints & REST Routes:**
    * Method + URI: `POST /api/v1/orders`, `DELETE /users/{id}`
-   * URI Path: `/orders/{id}/status`, `orders` (otomatis mencocokkan parameter dinamis `{id}`, `:id`, atau `<int:id>`)
-   * Named Route: `orders.store`, `admin.users.index`, `api.checkout`
+   * URI Path: `/orders/{id}/status`, `orders` (automatically matches route parameter placeholders `{id}`, `:id`, or `<int:id>`)
+   * Named Routes: `orders.store`, `admin.users.index`, `api.checkout`
 2. **Background Jobs / Queue Workers:**
-   * Query: `JOB ProcessOrderJob` atau `job:ProcessOrderJob`
-   * Melacak: Job dispatch $\to$ Job Handler $\to$ Service $\to$ DB Transaction.
+   * Query: `JOB ProcessOrderJob` or `job:ProcessOrderJob`
+   * Traces: Job dispatch $\to$ Job Handler $\to$ Service $\to$ DB Transaction.
 3. **CLI Commands / Console Tasks:**
-   * Query: `CLI order:cleanup` atau `cli:order:cleanup`
-   * Melacak: Artisan / NestJS Commander / Click CLI command $\to$ handler $\to$ business logic.
+   * Query: `CLI order:cleanup` or `cli:order:cleanup`
+   * Traces: Artisan / NestJS Commander / Click CLI command $\to$ Handler $\to$ Business Logic.
 4. **Domain Events & Listeners:**
-   * Query: `EVENT OrderPlacedListener` atau `event:OrderPlacedListener`
-   * Melacak: Event trigger $\to$ subscriber/listener $\to$ side effect (misal: notifikasi).
+   * Query: `EVENT OrderPlacedListener` or `event:OrderPlacedListener`
+   * Traces: Event trigger $\to$ Subscriber / Listener $\to$ Side effects (e.g., notifications).
 5. **Controller & Action Method:**
-   * Query: `OrderController@store`, `OrderController::updateStatus`, atau `OrderController`.
+   * Query: `OrderController@store`, `OrderController::updateStatus`, or `OrderController`.
 6. **Task Intent / Natural Language:**
-   * Query: `"Ubah status order di dashboard"` atau `"checkout shopping cart"`. Engine melakukan tokenisasi dan pembobotan skor kemiripan pada rute dan rantai eksekusi (`confidence: "inferred"`).
+   * Query: `"Update order status in dashboard"` or `"checkout shopping cart"`. The engine tokenizes and scores similarity against known routes and execution graphs (`confidence: "inferred"`).
 
 ---
 
-## 3. Arsitektur 2-Lapis (*Two-Tier Slicing Architecture*)
+## 3. Two-Tier Slicing Architecture
 
 ```
                        septum_slice(query)
                                 │
                                 ▼
          ┌──────────────────────────────────────────────┐
-         │ Lapis 1: Dedicated Framework Semantic        │
-         │          Extractor (Laravel, NestJS, dll.)   │
+         │ Tier 1: Dedicated Framework Semantic         │
+         │         Extractor (Laravel, NestJS, etc.)    │
          └──────────────────────┬───────────────────────┘
                                 │
-                      Ada Adapter Cocok?
-                       ├── Ya ──> Ekstrak Ingress, DTO props, Controller, Service, DB Table
-                       └── Tidak
+                      Matching Adapter Found?
+                       ├── YES ──> Extracts Ingress, DTO props, Controller, Service, DB Table
+                       └── NO
                                 │
                                 ▼
          ┌──────────────────────────────────────────────┐
-         │ Lapis 2: Generic Tree-Sitter Call-Graph      │
-         │          Tracer (Fallback Universal AST)     │
+         │ Tier 2: Generic Tree-Sitter Call-Graph       │
+         │         Tracer (Universal AST Fallback)      │
          └──────────────────────────────────────────────┘
 ```
 
-### Lapis 1: 12 Dedicated Framework Extractors
-Septum memiliki adapter semantik khusus yang memahami decorator, framework routing, FormRequest, dan ORM:
+### Tier 1: 12 Dedicated Framework Extractors
+Septum includes semantic adapters tailored to framework decorators, routing constructs, validation contracts, and ORMs:
 * **PHP:**
-  * **Laravel:** `routes/web.php`, `routes/api.php`, FormRequest validation rules (`payload_props`), Controller, Service, Eloquent Model, dan migrasi skema tabel DB.
-  * **Symfony:** PHP 8 Attributes (`#[Route]`), Controller actions, dan Doctrine Entity.
+  * **Laravel:** `routes/web.php`, `routes/api.php`, FormRequest validation rules (`payload_props`), Controllers, Services, Eloquent Models, and database migration schemas.
+  * **Symfony:** PHP 8 Attributes (`#[Route]`), Controller actions, and Doctrine Entities.
 * **TypeScript / JavaScript:**
-  * **NestJS:** Decorator `@Controller()`, `@Get()`, `@Post()`, `@Body() dto: CreateDto`, `@Injectable()` Services, dan TypeORM/Prisma Repositories.
-  * **Express.js:** `router.post()`, middleware chaining, controller handler, dan service layer.
-  * **Fastify:** Route schema (`schema.body`, `schema.params`), handler function, dan plugin encapsulations.
-  * **Hono & Elysia:** Framework modern TypeScript/Bun, mendukung Zod `zValidator` dan TypeBox schemas.
-  * **MCP / CLI:** Menelusuri endpoint tool MCP (`server.setRequestHandler`) dan CLI handlers.
+  * **NestJS:** Decorators `@Controller()`, `@Get()`, `@Post()`, `@Body() dto: CreateDto`, `@Injectable()` Services, and TypeORM / Prisma Repositories.
+  * **Express.js:** `router.post()`, middleware chains, controller handlers, and service layers.
+  * **Fastify:** Route schemas (`schema.body`, `schema.params`), handler functions, and encapsulated plugins.
+  * **Hono & Elysia:** Modern TypeScript/Bun frameworks with support for Zod `zValidator` and TypeBox schemas.
+  * **MCP / CLI:** Traces MCP server endpoints (`server.setRequestHandler`) and CLI command handlers.
 * **Python:**
-  * **FastAPI:** `@app.post()`, `@router.get()`, Pydantic `BaseModel` DTO payload, `Depends()` injection, SQLAlchemy session queries.
-  * **Django:** `urls.py`, Class-based Views (`APIView`, `ModelViewSet`), DRF Serializers, dan Django ORM.
-  * **Flask:** `@app.route()`, Blueprints, Marshmallow schemas, dan views.
+  * **FastAPI:** `@app.post()`, `@router.get()`, Pydantic `BaseModel` DTOs, `Depends()` injection, SQLAlchemy session queries.
+  * **Django:** `urls.py`, Class-based Views (`APIView`, `ModelViewSet`), DRF Serializers, and Django ORM.
+  * **Flask:** `@app.route()`, Blueprints, Marshmallow schemas, and views.
 * **Go (Golang):**
-  * Mendukung 5 pola web framework Go: **Standard `net/http`**, **Gin**, **Echo**, **Chi**, dan **Fiber**.
-  * Mengekstrak request struct binding (`c.ShouldBindJSON(&req)`), handler functions, service structs, dan query DB (GORM / sqlx).
+  * Supports 5 Go web framework paradigms: **Standard `net/http`**, **Gin**, **Echo**, **Chi**, and **Fiber**.
+  * Extracts request struct bindings (`c.ShouldBindJSON(&req)`), handler functions, service structs, and DB queries (GORM / sqlx).
 
-### Lapis 2: Generic Call-Graph Fallback
-Jika framework tidak memiliki adapter semantik khusus atau proyek menggunakan arsitektur in-house kustom, Septum mengeksekusi `CallGraphTracer` menggunakan parser AST Tree-Sitter WASM yang mencakup:
+### Tier 2: Generic Call-Graph Fallback
+For custom frameworks or proprietary architectures, Septum executes `CallGraphTracer` using Tree-Sitter WASM parsers covering:
 * **Rust** (`.rs`)
 * **Java** (`.java`)
 * **C# / .NET** (`.cs`)
@@ -92,37 +92,37 @@ Jika framework tidak memiliki adapter semantik khusus atau proyek menggunakan ar
 
 ---
 
-## 4. Anatomi Node Rantai Eksekusi (*Execution Chain Stages*)
+## 4. Execution Chain Stage Anatomy
 
-Setiap node di dalam array `chain` hasil ekstraksi memiliki tipe tahapan (*stage*) yang jelas:
+Each item within the output `chain` represents an explicit architectural execution stage:
 
-| Stage | Keterangan & Properti yang Dihasilkan |
+| Stage | Description & Extracted Properties |
 |---|---|
-| **`ingress`** | Titik masuk (HTTP Method, Route URI, nama Command CLI, atau nama Event). |
-| **`guard`** | Middleware autentikasi, RBAC permissions, atau guard decorator (misal `@UseGuards(AuthGuard)`). |
-| **`validation`** | Class DTO / FormRequest / Pydantic schema beserta daftar field payload-nya (`payload_props: ["customer_id", "items", "amount"]`). |
-| **`controller` / `action`** | Class controller dan nama fungsi handler beserta nomor baris spesifik. |
-| **`orchestrator` / `use_case`** | CQRS handler atau orchestrator class (pada arsitektur Clean/DDD). |
-| **`service`** | Business logic service yang dipanggil oleh controller. |
-| **`repository` / `entity`** | Data access layer (Repository, DAO, Prisma Client, Eloquent Model). |
-| **`table`** | Nama tabel database riil dan skema migrasi tabel tersebut. |
-| **`side_effect` / `event`** | Event yang di-*emit*, job yang di-*dispatch*, atau informasi transaksi database (`transactions: true`). |
+| **`ingress`** | Entrypoint trigger (HTTP Method, Route URI, CLI Command name, or Event name). |
+| **`guard`** | Authentication middleware, RBAC checks, or guard decorators (e.g., `@UseGuards(AuthGuard)`). |
+| **`validation`** | DTO class / FormRequest / Pydantic schema along with payload property fields (`payload_props: ["customer_id", "items", "amount"]`). |
+| **`controller` / `action`** | Controller class, handler method name, and precise source line coordinates. |
+| **`orchestrator` / `use_case`** | CQRS handler or application orchestrator class (in Clean / DDD architectures). |
+| **`service`** | Domain business service invoked by the controller. |
+| **`repository` / `entity`** | Data persistence layer (Repository, DAO, Prisma Client, Eloquent Model). |
+| **`table`** | Concrete database table name and its schema migration definition file. |
+| **`side_effect` / `event`** | Emitted domain events, dispatched background jobs, or transaction markers (`transactions: true`). |
 
 ---
 
-## 5. Spesifikasi Kontrak Input & Output JSON
+## 5. JSON Input & Output Contracts
 
 ### Input Schema
 ```json
 {
-  "query": "POST /api/v1/orders",    // Wajib: route URI, method+URI, Controller@action, atau task intent
-  "max_depth": 5,                     // Opsional: kedalaman penelusuran (1–8, default: 5)
-  "controller_file": "src/orders/order.controller.ts", // Opsional: penyaring kandidat jika terjadi ambiguitas
-  "workspace_path": "/path/to/project" // Opsional: target workspace
+  "query": "POST /api/v1/orders",    // Required: Route URI, Method + URI, Controller@action, or task intent
+  "max_depth": 5,                     // Optional: Traversal depth (1–8, default: 5)
+  "controller_file": "src/orders/order.controller.ts", // Optional: Filter candidate matches in case of ambiguity
+  "workspace_path": "/path/to/project" // Optional: Workspace target path
 }
 ```
 
-### Output Schema (Sukses)
+### Output Schema (Success)
 ```json
 {
   "status": "success",
@@ -179,8 +179,8 @@ Setiap node di dalam array `chain` hasil ekstraksi memiliki tipe tahapan (*stage
 }
 ```
 
-### Penanganan Ambiguitas (*Ambiguity Recovery*)
-Jika sebuah URI dimiliki oleh lebih dari satu handler atau controller (misalnya versi API berbeda), Septum tidak menebak sembarangan, melainkan mengembalikan `status: "ambiguous"` beserta daftar `alternatives`:
+### Ambiguity Recovery
+When multiple route handlers match a query (e.g., across API versions), Septum does not guess arbitrarily. Instead, it returns `status: "ambiguous"` with candidate options in `alternatives`:
 ```json
 {
   "status": "ambiguous",
@@ -194,4 +194,4 @@ Jika sebuah URI dimiliki oleh lebih dari satu handler atau controller (misalnya 
   "message": "Multiple route handlers match query 'POST /orders'. Narrow your query using 'controller_file'."
 }
 ```
-AI agent cukup mengulangi panggilan dengan menyertakan parameter `controller_file` untuk mengunci target yang dimaksud.
+The AI agent simply re-executes the tool call providing `controller_file` to target the intended controller.
