@@ -20,10 +20,13 @@ export interface ToolPayload {
     file_path?: string;
     filePath?: string;
     path?: string;
+    Path?: string;
     ReplacementContent?: string;
     CodeContent?: string;
     new_string?: string;
     content?: string;
+    Content?: string;
+    Replacement?: string;
     ReplacementChunks?: Array<{ ReplacementContent?: string }>;
   };
   arguments?: Record<string, unknown>;
@@ -31,8 +34,11 @@ export interface ToolPayload {
   file_path?: string;
   filePath?: string;
   path?: string;
+  Path?: string;
   ReplacementContent?: string;
   CodeContent?: string;
+  Content?: string;
+  Replacement?: string;
 }
 
 let configuredExitCode = 1;
@@ -108,7 +114,16 @@ async function runPreWriteHook(): Promise<void> {
     (payload as Record<string, any>) ||
     {};
   const payloadTarget: string | undefined =
-    toolInput.TargetFile || toolInput.file_path || toolInput.filePath || toolInput.path;
+    toolInput.TargetFile ||
+    toolInput.file_path ||
+    toolInput.filePath ||
+    toolInput.path ||
+    toolInput.Path ||
+    payload.TargetFile ||
+    payload.file_path ||
+    payload.filePath ||
+    payload.path ||
+    payload.Path;
   const targetFile = payloadTarget ? path.relative(workspaceRoot, path.resolve(callerRoot, payloadTarget)).replace(/\\/g, "/") : undefined;
   const chunkContent = Array.isArray(toolInput.ReplacementChunks)
     ? toolInput.ReplacementChunks.map((c: any) => c?.ReplacementContent || "").join("\n")
@@ -118,6 +133,14 @@ async function runPreWriteHook(): Promise<void> {
     toolInput.CodeContent ||
     toolInput.new_string ||
     toolInput.content ||
+    toolInput.Content ||
+    toolInput.Replacement ||
+    payload.ReplacementContent ||
+    payload.CodeContent ||
+    payload.new_string ||
+    payload.content ||
+    payload.Content ||
+    payload.Replacement ||
     chunkContent ||
     "";
 

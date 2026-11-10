@@ -2,7 +2,7 @@ export const SEPTUM_HOOKS_CONFIG = {
   "septum-boundary-guard": {
     "PreToolUse": [
       {
-        "matcher": "write_to_file|replace_file_content|multi_replace_file_content|Write|Edit|MultiEdit",
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
@@ -14,7 +14,7 @@ export const SEPTUM_HOOKS_CONFIG = {
     ],
     "PostToolUse": [
       {
-        "matcher": "write_to_file|replace_file_content|multi_replace_file_content|Write|Edit|MultiEdit",
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",

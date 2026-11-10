@@ -15,7 +15,7 @@ An embedded database (\`.septum/septum.db\`) maintains the Single Source of Trut
 | Backend Scenario | Septum MCP Tool | Advantage vs Raw File Reading |
 |---|---|---|
 | Exploring domains, layers, or file inventories | \`septum_map({ action: "catalog", detail_level: "compact" })\` | Instant macro architecture overview without dumping thousands of lines of source code. |
-| Tracing route execution, controller actions, or jobs | \`septum_slice({ query: "<route|controller@action>", max_depth: 5 })\` | Extracts pure vertical execution chain (Ingress -> Controller -> Service -> DB) without reading 20 controller files. Scale up to \`max_depth: 8\` for deep event/queue traces. |
+| Tracing route execution, controller actions, or jobs | \`septum_slice({ query: "<route|controller@action|JOB <Name>|CLI <Cmd>|EVENT <Listener>>", max_depth: 5 })\` | Extracts pure vertical execution chain (Ingress -> Controller -> Service -> DB) or Job/CLI/Event trace without reading 20 controller files. Scale up to \`max_depth: 8\` for deep event/queue traces. |
 | Locating function, class, or struct declarations | \`septum_symbol({ action: "locate", query: "<name>" })\` | Pinpoints exact file path and line coordinates in milliseconds via Damerau-Levenshtein fuzzy matching. |
 | Inspecting implementation logic & type contracts | \`septum_symbol({ action: "context", query: "<SymbolName>", file_path: "<path>" })\` | Delivers focused AST slice bounded to 16 KB closure; use \`include_source: false\` for signatures and dependencies only. |
 | Assessing refactoring blast radius before editing | \`septum_symbol({ action: "impact", query: "<SymbolName>" })\` | Discovers all direct callers (\`inbound_callers\`) and dependent modules before altering public signatures. |
