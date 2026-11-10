@@ -58,6 +58,22 @@ describe("Domain Detection & Ignore Standardization", () => {
         ".cache",
         "tmp",
         "temp",
+        "deps",
+        "_build",
+        "packages",
+        ".bundle",
+        ".cargo",
+        ".gradle",
+        ".m2",
+        ".mvn",
+        ".nuget",
+        ".dart_tool",
+        ".pub-cache",
+        ".pub",
+        "zig-out",
+        ".zig-cache",
+        ".nox",
+        ".eggs",
       ];
 
       for (const dir of ignoredSamples) {

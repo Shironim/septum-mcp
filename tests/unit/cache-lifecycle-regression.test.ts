@@ -8,6 +8,8 @@ import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 import { handleRegisterDomain } from "../../src/mcp/tools/register-domain.ts";
 import { handleGetDomainCatalog } from "../../src/mcp/tools/get-domain-catalog.ts";
+import { PARSER_FINGERPRINT } from "../../src/core/parser/language-capabilities.ts";
+import { SEMANTIC_FINGERPRINT } from "../../src/core/parser/semantic-revision.ts";
 
 describe("index cache lifecycle", () => {
   let root: string, db: SeptumDatabase, repo: SeptumRepository, pipeline: IngestionPipeline;
@@ -19,6 +21,31 @@ describe("index cache lifecycle", () => {
     pipeline = new IngestionPipeline(repo, root);
   });
   afterEach(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+
+  it("rebuilds older parser and semantic facts even when source bytes are unchanged", async () => {
+    const config = ConfigLoader.getDefaultConfig();
+    config.domains = { app: { root: "src", archetypes: {}, allowed_dependencies: [], forbidden_dependencies: [] } };
+    writeFileSync(join(root, "requirements.txt"), "fastapi\n");
+    writeFileSync(join(root, "src/orders.ts"), "export namespace Billing { export class Order { save() {} } }");
+    writeFileSync(join(root, "src/api.py"), 'app = FastAPI()\n@app.get("/static")\ndef handler(): pass\n');
+    await pipeline.run(config);
+    const file = repo.getFileByPath("src/orders.ts")!;
+    repo.replaceFileSymbols(file.id, []);
+    repo.upsertVerticalSlice({
+      domain_id: file.domain_id, feature_key: null, http_method: "GET", route_uri: "/poison",
+      route_name: null, controller_class: "api", action_name: "handler",
+      controller_file: "src/api.py", controller_line: 3, architecture_style: "fastapi",
+      entry_kind: "http_route", execution_chain_json: "[]",
+    });
+    repo.setMeta("parser_revision", "5");
+    repo.setMeta("semantic_extractor_revision", "7-inputs-previous");
+    await pipeline.run(config);
+    expect(repo.getMeta("parser_revision")).toBe(PARSER_FINGERPRINT);
+    expect(repo.getMeta("semantic_extractor_revision")).toBe(SEMANTIC_FINGERPRINT);
+    expect(repo.getSymbolsByFileId(file.id).map(s => s.name)).toContain("Billing::Order::save");
+    expect(repo.getAllVerticalSlices().map(s => s.route_uri)).toEqual(["/static"]);
+    expect((await pipeline.run(config)).files_updated).toBe(0);
+  });
 
   it("refreshes symbols and imports when content changes with identical size and mtime", async () => {
     const config = ConfigLoader.getDefaultConfig();

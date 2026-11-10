@@ -81,4 +81,50 @@ describe("SeptumTelemetry Engine", () => {
     expect(existsSync(rotatedFile)).toBe(true);
     expect(existsSync(logFile)).toBe(true);
   });
+
+  it("records output_digest, estimated_tokens, and bloat alerts for output inspection", () => {
+    const rawOutput = "export interface OrderDTO { id: string; amount: number; }\n".repeat(400); // ~24KB
+    const digest = SeptumTelemetry.createOutputDigest(rawOutput);
+
+    SeptumTelemetry.recordToolCall(
+      {
+        event: "tool_call_completed",
+        tool: "septum_symbol",
+        action: "context",
+        duration_ms: 35,
+        input: { query: "OrderDTO", file_path: "src/orders/dto.ts" },
+        metrics: {
+          bytes_out: Buffer.byteLength(rawOutput, "utf8"),
+          lines_out: 400,
+          estimated_tokens: Math.round(Buffer.byteLength(rawOutput, "utf8") / 4),
+        },
+        bloat_alert: Buffer.byteLength(rawOutput, "utf8") >= SeptumTelemetry.BLOAT_BYTE_THRESHOLD,
+        output_digest: digest,
+        status: "success",
+      },
+      testDir
+    );
+
+    const lines = readFileSync(logFile, "utf8").trim().split("\n");
+    const last = JSON.parse(lines[lines.length - 1]);
+
+    expect(last.action).toBe("context");
+    expect(last.metrics.bytes_out).toBeGreaterThan(16384);
+    expect(last.metrics.estimated_tokens).toBeGreaterThan(4000);
+    expect(last.bloat_alert).toBe(true);
+    expect(last.output_digest.sample_preview).toBeDefined();
+    expect(last.output_digest.sample_preview).toContain("OrderDTO");
+  });
+
+  it("createOutputDigest creates concise bounded summaries for empty or long texts", () => {
+    const empty = SeptumTelemetry.createOutputDigest("");
+    expect(empty.summary).toBe("empty_output");
+
+    const short = SeptumTelemetry.createOutputDigest("Hello World");
+    expect(short.sample_preview).toBe("Hello World");
+
+    const long = SeptumTelemetry.createOutputDigest("A".repeat(500));
+    expect(long.sample_preview?.length).toBeLessThan(400);
+    expect(long.sample_preview).toContain("chars omitted");
+  });
 });

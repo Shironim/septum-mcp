@@ -83,7 +83,7 @@ describe("single domain owner per physical root", () => {
       env: { ...process.env, OWNER_TEST_DB: file, OWNER_TEST_NAME: name }, stdout: "pipe", stderr: "pipe",
     }));
     const outcomes = await Promise.all(children.map(async child => ({ code: await child.exited, stderr: await new Response(child.stderr).text() })));
-    expect(outcomes.map(result => result.code).sort()).toEqual([0, 2]);
+    expect(outcomes.map(result => result.code).sort(), JSON.stringify(outcomes)).toEqual([0, 2]);
     expect(outcomes.every(result => result.stderr === "")).toBe(true);
     const reopened = new SeptumDatabase(file);
     try { expect(new SeptumRepository(reopened.raw).getAllDomains()).toHaveLength(1); }

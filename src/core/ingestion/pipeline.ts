@@ -1,4 +1,4 @@
-import { SEMANTIC_EXTRACTOR_REVISION } from "../parser/semantic-revision.ts";
+import { SEMANTIC_FINGERPRINT } from "../parser/semantic-revision.ts";
 import { RESOLVER_REVISION } from "../resolver/import-resolver.ts";
 import { SOURCE_READ_REVISION, sourceObservationsCurrent } from "../resources/source-files.ts";
 import { shouldIgnoreSourcePath } from "../resources/ignore.ts";
@@ -13,7 +13,7 @@ import type { SeptumRepository } from "../database/repository.ts";
 import { detectArchetype } from "../parser/extractors/base.ts";
 import { SemanticSliceExtractorRegistry } from "../parser/extractors/registry.ts";
 import { TopologyDetector } from "../discovery/topology-detector.ts";
-import { PARSER_REVISION } from "../parser/language-capabilities.ts";
+import { PARSER_FINGERPRINT } from "../parser/language-capabilities.ts";
 import { ASTParserEngine } from "../parser/tree-sitter.ts";
 import { CallGraphTracer } from "../resolver/call-graph-tracer.ts";
 import { ModuleResolver } from "../resolver/module-resolver.ts";
@@ -34,6 +34,9 @@ export interface IngestionMetrics {
 }
 
 export class IngestionPipeline {
+  // Only trust metadata already content-verified by this pipeline instance.
+  // ctime catches edits which deliberately preserve size and mtime.
+  private verifiedFiles = new Map<string, { ctime: number; hash: string }>();
   private repo: SeptumRepository;
   private parserEngine: ASTParserEngine;
   private customWorkspaceRoot?: string;
@@ -46,8 +49,9 @@ export class IngestionPipeline {
     }
   }
 
-  public async run(config: ValidatedSeptumConfig, options: { verifyContent?: boolean; signal?: AbortSignal } = {}): Promise<IngestionMetrics> {
+  public async run(config: ValidatedSeptumConfig, options: { verifyContent?: boolean; rebuild?: boolean; signal?: AbortSignal } = {}): Promise<IngestionMetrics> {
     this.repo.setMeta("workspace_root", this.resolveWorkspaceRoot(config, Object.values(config.domains)[0]?.root ?? "."));
+    this.repo.setMeta("settings_json", JSON.stringify(config.settings));
     this.repo.setMeta("resolver_revision", RESOLVER_REVISION);
     this.repo.setMeta("sync_state", "running");
     const work = { parserInvocations: 0 };
@@ -70,7 +74,7 @@ export class IngestionPipeline {
     }
   }
 
-  private async runSync(config: ValidatedSeptumConfig, options: { verifyContent?: boolean; signal?: AbortSignal }, work: { parserInvocations: number }): Promise<IngestionMetrics> {
+  private async runSync(config: ValidatedSeptumConfig, options: { verifyContent?: boolean; rebuild?: boolean; signal?: AbortSignal }, work: { parserInvocations: number }): Promise<IngestionMetrics> {
     const startTime = performance.now();
     let filesScanned = 0;
     let filesUpdated = 0;
@@ -100,7 +104,7 @@ export class IngestionPipeline {
       domainNames = Object.keys(config.domains);
     }
     this.assertDomainOwnership(config, projectRoot);
-    this.ensureParserRevision();
+    this.ensureParserFingerprint(options.rebuild);
     const inventory = this.sourceInventory(projectRoot, config.settings.ignore_patterns, options.signal);
 
     const existingFilesMap = new Map<string, import("../../types/index.ts").FileRecord>();
@@ -234,12 +238,21 @@ export class IngestionPipeline {
         const sizeBytes = stat.size;
         const existingFile = existingFilesMap.get(relPath);
 
-        // Reuse indexed content only after verifying its hash.
+        const archetype = detectArchetype(relPath, domainCfg.archetypes ?? {});
         if (sizeBytes > RESOURCE_LIMITS.sourceBytes) {
           skippedFiles.push({path: relPath, reason: "file_too_large"});
           if (existingFile) removedFiles++;
           this.repo.deleteFileByPath(relPath);
           this.repo.setMeta("slices_dirty", "1");
+          continue;
+        }
+        // Fast sync trusts metadata; explicit verification and rebuilds read bytes.
+        if (!options.verifyContent && !options.rebuild && existingFile &&
+            existingFile.domain_id === domainId && existingFile.mtime_ms === mtimeMs &&
+            existingFile.size_bytes === sizeBytes && existingFile.archetype === archetype &&
+            this.verifiedFiles.get(relPath)?.ctime === stat.ctimeMs &&
+            this.verifiedFiles.get(relPath)?.hash === existingFile.content_hash) {
+          filesSkipped++;
           continue;
         }
         if (pendingUpdates.length >= RESOURCE_LIMITS.batchFiles || (batchBytes + sizeBytes > RESOURCE_LIMITS.batchBytes && pendingUpdates.length > 0)) { commitBatch(); await new Promise<void>(done => setTimeout(done, 0)); options.signal?.throwIfAborted(); }
@@ -254,6 +267,7 @@ export class IngestionPipeline {
           continue;
         }
         const currentHash = computeContentHash(content);
+        this.verifiedFiles.set(relPath, { ctime: stat.ctimeMs, hash: currentHash });
 
         if (
           existingFile &&
@@ -261,13 +275,14 @@ export class IngestionPipeline {
           existingFile.content_hash === currentHash
         ) {
           // Content identical despite mtime bump (e.g. touch) - queue metadata update for batch transaction
-          pendingMetadataUpdates.push({ id: existingFile.id, mtimeMs, sizeBytes, file: existingFile, archetype: detectArchetype(relPath, domainCfg.archetypes ?? {}) });
+          if (existingFile.mtime_ms !== mtimeMs || existingFile.size_bytes !== sizeBytes || existingFile.archetype !== archetype) {
+            pendingMetadataUpdates.push({ id: existingFile.id, mtimeMs, sizeBytes, file: existingFile, archetype });
+          }
           filesSkipped++;
           continue;
         }
 
         const lineCount = content.split("\n").length;
-        const archetype = detectArchetype(relPath, domainCfg.archetypes ?? {});
         work.parserInvocations++;
         const ast = await this.parserEngine.parseFile(fullPath, content);
         if (ast.status === "unsupported") {
@@ -326,7 +341,7 @@ export class IngestionPipeline {
       catch (error) { if (error instanceof SourceFileLimitError) semanticInputChanged = input.hash !== "file_too_large"; else throw error; }
       if (semanticInputChanged) break;
     }
-    const extractorRevision = SEMANTIC_EXTRACTOR_REVISION;
+    const extractorRevision = SEMANTIC_FINGERPRINT;
     if (this.repo.getMeta("semantic_extractor_revision") !== extractorRevision || this.repo.getMeta("semantic_inventory") !== inventoryRevision || semanticInputChanged || filesUpdated > 0 || removedFiles > 0 || this.repo.getMeta("slices_dirty") === "1" || this.repo.getMeta("semantic_revision") !== semanticRevision) {
       const extracted = await collectSourceSkips(projectRoot, async () => {
         const detectedTopology = TopologyDetector.detect(projectRoot);
@@ -362,6 +377,7 @@ export class IngestionPipeline {
 
     // Identify uncovered eligible source files outside registered domains
     const indexedPaths = new Set(this.repo.getAllFiles().map((file) => file.path));
+    for (const path of this.verifiedFiles.keys()) if (!indexedPaths.has(path)) this.verifiedFiles.delete(path);
     const allWorkspaceFiles = this.collectFiles(projectRoot, projectRoot, config.settings.ignore_patterns, [], options.signal);
     const unsupportedSet = new Set(unsupportedFiles);
     const skippedSet = new Set(skippedFiles.map((file) => file.path));
@@ -403,13 +419,9 @@ export class IngestionPipeline {
   private sourceInventory(root: string, ignorePatterns: string[], signal?: AbortSignal): string[] {
     return this.collectFiles(root, root, ignorePatterns, [], signal).map(({fullPath, relPath}) => {
       const stat = statSync(fullPath);
-      let hash: string;
-      try { hash = computeContentHash(readSourceFile(fullPath)); }
-      catch (error) {
-        if (!(error instanceof SourceFileLimitError)) throw error;
-        hash = `file_too_large:${stat.size}:${stat.mtimeMs}`;
-      }
-      return `${relPath}:${hash}`;
+      // Guard membership and concurrent writes without rereading every source.
+      // Content checks belong to indexed files and semantic-input verification.
+      return `${relPath}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
     }).sort();
   }
 
@@ -441,8 +453,8 @@ export class IngestionPipeline {
       try {
         entries = readdirSync(currentDir);
       } catch (err: any) {
-        // SV-01: Do not swallow permission/IO errors; propagate so pipeline reports incomplete/error
-        if (err?.code === "ENOENT") {
+        // SV-01: Gracefully skip non-existent or permission-restricted directories
+        if (err?.code === "ENOENT" || err?.code === "EACCES" || err?.code === "EPERM") {
           return;
         }
         throw new Error(`Failed to read directory '${currentDir}': ${err.message || err}`);
@@ -487,7 +499,7 @@ export class IngestionPipeline {
             results.push({ fullPath, relPath });
           }
         } catch (err: any) {
-          if (err?.code === "ENOENT") {
+          if (err?.code === "ENOENT" || err?.code === "EACCES" || err?.code === "EPERM") {
             continue;
           }
           throw new Error(`Failed to stat path '${fullPath}': ${err.message || err}`);
@@ -523,7 +535,7 @@ export class IngestionPipeline {
     return ASTParserEngine.isSourceFile(path);
   }
 
-  private assertDomainOwnership(config: ValidatedSeptumConfig, projectRoot: string): void {
+  public assertDomainOwnership(config: ValidatedSeptumConfig, projectRoot: string): void {
     const proposedNames = new Set(Object.keys(config.domains).map(domainNameKey));
     const retained = Object.fromEntries(this.repo.getAllDomains()
       .filter(domain => !proposedNames.has(domainNameKey(domain.name)))
@@ -537,14 +549,15 @@ export class IngestionPipeline {
     this.repo.setMeta("sync_error_code", error instanceof DomainRootConflictError ? error.code : "");
   }
 
-  private ensureParserRevision(): void {
-    const revision = PARSER_REVISION;
-    if (this.repo.getMeta("parser_revision") === revision) return;
+  private ensureParserFingerprint(rebuild = false): void {
+    const revision = PARSER_FINGERPRINT;
+    if (!rebuild && this.repo.getMeta("parser_revision") === revision) return;
     this.repo.runInTransaction(() => {
       for (const file of this.repo.getAllFiles()) {
         this.repo.upsertFile(file.domain_id, file.path, file.archetype, "", file.line_count, -1, -1);
       }
       this.repo.clearVerticalSlices();
+      this.repo.setMeta("slices_dirty", "1");
       this.repo.setMeta("parser_revision", revision);
     });
   }
@@ -556,7 +569,7 @@ export class IngestionPipeline {
   public async ingestFile(targetFilePath: string, config: ValidatedSeptumConfig): Promise<boolean> {
     try { this.assertDomainOwnership(config, this.customWorkspaceRoot || resolveWorkspaceRoot()); }
     catch (error) { this.recordSyncFailure(error); throw error; }
-    this.ensureParserRevision();
+    this.ensureParserFingerprint();
     const fullPath = resolve(targetFilePath);
     if (!existsSync(fullPath)) return false;
 
@@ -611,7 +624,9 @@ export class IngestionPipeline {
           this.repo.upsertFile(domainId, relPath, archetype, currentHash, existingFile.line_count, mtimeMs, sizeBytes);
           this.repo.setMeta("slices_dirty", "1");
         });
-      } else this.repo.updateFileMetadataOnly(existingFile.id, mtimeMs, sizeBytes);
+      } else if (existingFile.mtime_ms !== mtimeMs || existingFile.size_bytes !== sizeBytes) {
+        this.repo.updateFileMetadataOnly(existingFile.id, mtimeMs, sizeBytes);
+      }
       return false;
     }
 

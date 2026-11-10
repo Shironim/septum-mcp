@@ -1,7 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Database } from "bun:sqlite";
-import type { ValidatedSeptumConfig } from "./schema.ts";
+import { SeptumConfigSchema, type ValidatedSeptumConfig } from "./schema.ts";
 import { TopologyDetector } from "../discovery/topology-detector.ts";
 import { SeptumDatabase } from "../database/client.ts";
 import { SeptumRepository } from "../database/repository.ts";
@@ -21,6 +21,16 @@ export class ConfigLoader {
       ? (isAbsolute(dbPath) ? dbPath : join(root, dbPath))
       : join(root, ".septum", "septum.db");
 
+    // 0. Prioritize physical configuration file if present on disk
+    const configFilePath = join(root, "septum.config.json");
+    if (existsSync(configFilePath)) {
+      const diskConfig = ConfigLoader.loadFromDisk(configFilePath);
+      if (existsSync(resolvedDbPath)) {
+        ConfigLoader.syncDiskConfigToDatabase(resolvedDbPath, diskConfig, root);
+      }
+      return diskConfig;
+    }
+
     // 1. If database exists and has registered domains, load directly from SQLite SSOT
     if (existsSync(resolvedDbPath)) {
       const dbConfig = ConfigLoader.loadFromDatabaseOrDefaults(resolvedDbPath);
@@ -39,6 +49,50 @@ export class ConfigLoader {
     }
 
     return ConfigLoader.loadFromDatabaseOrDefaults(resolvedDbPath);
+  }
+
+  public static loadFromDisk(filePath: string): ValidatedSeptumConfig {
+    try {
+      const raw = readFileSync(filePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      const defaults = ConfigLoader.getDefaultConfig();
+      const merged = {
+        ...defaults,
+        ...parsed,
+        settings: {
+          ...defaults.settings,
+          ...(parsed.settings || {}),
+        },
+        domains: parsed.domains || {},
+      };
+      return SeptumConfigSchema.parse(merged);
+    } catch (err: any) {
+      throw new Error(`Failed to load configuration from '${filePath}': ${err.message || err}`);
+    }
+  }
+
+  public static syncDiskConfigToDatabase(
+    dbPath: string,
+    diskConfig: ValidatedSeptumConfig,
+    workspaceRoot?: string
+  ): void {
+    if (!existsSync(dbPath)) return;
+    try {
+      const septumDb = new SeptumDatabase(dbPath);
+      const repo = new SeptumRepository(septumDb.raw);
+      try {
+        repo.setMeta("settings_json", JSON.stringify(diskConfig.settings));
+        if (diskConfig.domains && Object.keys(diskConfig.domains).length > 0) {
+          for (const [name, domain] of Object.entries(diskConfig.domains)) {
+            repo.upsertDomain(name, domain, workspaceRoot);
+          }
+        }
+      } finally {
+        septumDb.close();
+      }
+    } catch {
+      // Non-fatal if database sync fails during config load
+    }
   }
 
   public static getDefaultConfig(): ValidatedSeptumConfig {

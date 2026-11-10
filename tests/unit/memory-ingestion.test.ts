@@ -6,7 +6,7 @@ import { SeptumDatabase } from '../../src/core/database/client.ts';
 import { SeptumRepository } from '../../src/core/database/repository.ts';
 import { ConfigLoader } from '../../src/core/config/loader.ts';
 import { IngestionPipeline } from '../../src/core/ingestion/pipeline.ts';
-import { PARSER_REVISION } from '../../src/core/parser/language-capabilities.ts';
+import { PARSER_FINGERPRINT } from '../../src/core/parser/language-capabilities.ts';
 import { BoundaryEvaluator } from '../../src/core/boundary/evaluator.ts';
 import { ModuleResolver } from '../../src/core/resolver/module-resolver.ts';
 import { handleCheckBoundary } from '../../src/mcp/tools/check-boundary.ts';
@@ -56,7 +56,7 @@ describe('bounded ingestion and incomplete index safety', () => {
   const result=await pipeline.run(config());
   expect(result.files_updated).toBe(1);
   expect(repo.getSymbolsByFileId(indexed.id).some(s=>s.name==='billing::Invoice')).toBe(true);
-  expect(repo.getMeta('parser_revision')).toBe(PARSER_REVISION);
+  expect(repo.getMeta('parser_revision')).toBe(PARSER_FINGERPRINT);
  });
  it('marks completion and does not replace slices on unchanged sync',async()=>{
   writeFileSync(join(root,'src/a.ts'),'export function example() {}'); await pipeline.run(config());

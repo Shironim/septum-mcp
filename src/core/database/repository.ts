@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import type {
   ArchetypeKind,
   DomainCatalogResponse,
@@ -42,6 +43,7 @@ import { SymbolRepository } from "./repositories/symbol.repository.ts";
 export type DatabaseRepository = SeptumRepository;
 
 export class SeptumRepository {
+  private indexIdentityCache?: { stamp: string; digest: string };
   public readonly domains: DomainRepository;
   public readonly files: FileRepository;
   public readonly symbols: SymbolRepository;
@@ -69,9 +71,45 @@ export class SeptumRepository {
     }
   }
 
+  /** Stable content identity without materializing/sorting the index in JS.
+   * SQLite counters invalidate the cache for local writes and other connections;
+   * the digest excludes insertion IDs and operational timestamps.
+   */
+  public getIndexIdentity(): string {
+    // total_changes does not rewind on rollback. Never publish a digest of
+    // uncommitted facts into the connection cache.
+    const cacheable = !this.db.inTransaction;
+    return this.runInTransaction(() => {
+      const stamp = JSON.stringify([
+        this.db.query("PRAGMA data_version").get(),
+        this.db.query("SELECT total_changes() AS changes").get(),
+        this.db.query("PRAGMA schema_version").get(),
+      ]);
+      if (cacheable && this.indexIdentityCache?.stamp === stamp) return this.indexIdentityCache.digest;
+      const hash = createHash("sha256");
+      for (const sql of [
+        `SELECT json_array(name, root_path, allowed_deps_json, forbidden_deps_json, archetypes_json) AS fact
+         FROM domains ORDER BY fact`,
+        `SELECT json_array(f.path, f.content_hash, d.name) AS fact
+         FROM files f JOIN domains d ON d.id = f.domain_id ORDER BY fact`,
+        `SELECT json_array(f.path, s.name, s.kind, s.signature, s.visibility, s.line_start, s.line_end, s.line_count, s.nesting_depth) AS fact
+         FROM symbols s JOIN files f ON f.id = s.file_id ORDER BY fact`,
+        `SELECT json_array(f.path, d.name, dep.target_symbol_or_path, dep.import_statement, dep.line_number, dep.is_external) AS fact
+         FROM dependencies dep JOIN files f ON f.id = dep.source_file_id JOIN domains d ON d.id = f.domain_id ORDER BY fact`,
+        `SELECT json_array(key, value) AS fact FROM repo_meta WHERE key IN ('sync_state', 'parser_revision') ORDER BY key`,
+      ]) {
+        hash.update("\0");
+        for (const { fact } of this.db.query<{ fact: string }, []>(sql).iterate()) hash.update(fact + "\n");
+      }
+      const digest = hash.digest("hex");
+      if (cacheable) this.indexIdentityCache = { stamp, digest };
+      return digest;
+    });
+  }
+
   // --- Domain Methods ---
-  public upsertDomain(name: string, config: DomainConfig): number {
-    return this.domains.upsertDomain(name, config);
+  public upsertDomain(name: string, config: DomainConfig, workspaceRoot?: string): number {
+    return this.domains.upsertDomain(name, config, workspaceRoot);
   }
 
   public getDomainByName(name: string): DomainRecord | null {
@@ -144,6 +182,13 @@ export class SeptumRepository {
   }
 
   // --- Symbol Methods ---
+  public getDependenciesByFileId(fileId: number): ExtractedDependency[] {
+    return this.db.query<ExtractedDependency, [number]>(`
+      SELECT target_symbol_or_path AS target, import_statement AS statement,
+             line_number, is_external FROM dependencies WHERE source_file_id = ? ORDER BY id
+    `).all(fileId);
+  }
+
   public replaceFileSymbols(fileId: number, symbols: ExtractedSymbol[]): void {
     this.symbols.replaceFileSymbols(fileId, symbols);
   }
@@ -196,8 +241,8 @@ export class SeptumRepository {
     this.dependencies.clearVerticalSlices(domainId);
   }
 
-  public getImportRelationships(workspaceRoot?: string) {
-    return this.dependencies.getImportRelationships(workspaceRoot);
+  public getImportRelationships(workspaceRoot?: string, sourceFile?: string) {
+    return this.dependencies.getImportRelationships(workspaceRoot, sourceFile);
   }
 
   public getDomainFileConnections(domainId?: number, workspaceRoot?: string) {

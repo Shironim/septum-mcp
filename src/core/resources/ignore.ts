@@ -4,10 +4,22 @@ export const DEFAULT_IGNORED_DIRECTORIES: ReadonlySet<string> = new Set([
   "vendor",
   "bower_components",
   "jspm_packages",
+  "deps",
+  "packages",
+  ".bundle",
+  ".cargo",
+  ".gradle",
+  ".m2",
+  ".mvn",
+  ".nuget",
+  ".dart_tool",
+  ".pub-cache",
+  ".pub",
 
   // Build, bundle & compilation outputs (visible & hidden)
   "dist",
   "build",
+  "_build",
   "out",
   "output",
   ".output",
@@ -15,6 +27,8 @@ export const DEFAULT_IGNORED_DIRECTORIES: ReadonlySet<string> = new Set([
   "obj",
   "bin",
   "scripts",
+  "zig-out",
+  ".zig-cache",
   ".next",
   ".nuxt",
   ".turbo",
@@ -23,7 +37,7 @@ export const DEFAULT_IGNORED_DIRECTORIES: ReadonlySet<string> = new Set([
   ".astro",
   ".docusaurus",
 
-  // Python virtual environments and bytecode caches
+  // Python virtual environments, packaging and bytecode caches
   ".venv",
   "venv",
   "env",
@@ -34,6 +48,8 @@ export const DEFAULT_IGNORED_DIRECTORIES: ReadonlySet<string> = new Set([
   ".mypy_cache",
   ".ruff_cache",
   ".tox",
+  ".nox",
+  ".eggs",
 
   // Test coverage
   "coverage",
@@ -64,10 +80,15 @@ export const DEFAULT_IGNORED_DIRECTORIES: ReadonlySet<string> = new Set([
   ".antigravity",
   ".cline",
   ".roo",
+  ".toolbench",
   ".windsurf",
   ".continue",
   ".copilot",
   ".chat",
+
+  // Framework storage & uploads
+  "storage",
+  "public/storage",
 
   // Cache & Temp
   ".cache",

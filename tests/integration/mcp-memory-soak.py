@@ -23,7 +23,7 @@ class Server:
   if not self.sel.select(30):raise AssertionError(f'{self.name} request timeout')
   result=json.loads(self.p.stdout.readline());assert 'error' not in result and not result.get('result',{}).get('isError'),result
   return result['result']
- def catalog(self,root):return self.request('tools/call',dict(name='septum_domain',arguments=dict(action='catalog',workspace_path=str(root))))
+ def catalog(self,root):return self.request('tools/call',dict(name='septum_map',arguments=dict(action='catalog',workspace_path=str(root))))
  def sample(self,elapsed):
   status=pathlib.Path(f'/proc/{self.p.pid}/status').read_text();rss=int(next(x.split()[1] for x in status.splitlines() if x.startswith('VmRSS:')))*1024
   fds=list(pathlib.Path(f'/proc/{self.p.pid}/fd').iterdir());watches=0

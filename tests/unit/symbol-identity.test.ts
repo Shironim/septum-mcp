@@ -25,9 +25,35 @@ describe("declaration identity and source selection", () => {
     repo.replaceFileSymbols(id, ast.symbols);
   }
   async function tool(args: Record<string, unknown>) {
-    return JSON.parse((await handleSymbolTool(repo, config, SymbolToolSchema.parse(args), undefined, root)).content[0].text);
+    return JSON.parse((await handleSymbolTool(repo, config, SymbolToolSchema.parse({
+      ...(args.action === "inspect" ? { include_source: true } : {}), ...args,
+    }), undefined, root)).content[0].text);
   }
   const java = "class Order {\n  public int save(int id) { return id; }\n  public String save(String id) { return id; }\n}";
+
+  it("keeps C# namespaces distinct through persistence and source-reference selection", async () => {
+    await index("Orders.cs", "namespace Sales { class Order { public void Save() {} } }\nnamespace Shipping { class Order { public void Save() {} } }");
+    const ambiguous = await tool({ action: "locate", query: "Order.Save" });
+    expect(ambiguous.status).toBe("ambiguous");
+    expect(ambiguous.candidates.map((c: any) => c.symbol_ref.container)).toEqual(["Sales.Order", "Shipping.Order"]);
+    const selected = await tool({ action: "inspect", query: "Sales.Order.Save", include_source: true });
+    expect(selected.symbol_ref.name).toBe("Sales.Order.Save");
+    expect(selected.source_slice.status).toBe("current");
+  });
+
+  it("round-trips TypeScript namespace and promoted PHP property references", async () => {
+    for (const [file, source, query] of [
+      ["orders.ts", "export namespace Billing { export class Order { save() {} } }", "Billing::Order::save"],
+      ["orders.php", "<?php class Order { public function __construct(private Service $svc) {} }", "Order::$svc"],
+    ]) {
+      await index(file, source);
+      const located = await tool({ action: "locate", query, file_path: file });
+      expect(located.found).toBe(true);
+      const selected = await tool({ action: "inspect", symbol_ref: located.symbol_ref, include_source: true });
+      expect(selected.symbol_ref).toEqual(located.symbol_ref);
+      expect(selected.source_slice.status).toBe("current");
+    }
+  });
 
   it("returns selectable overload candidates even without a source request", async () => {
     await index("Order.java", java);

@@ -35,14 +35,14 @@ def run(command, fixture, root):
         target = root / file
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source)
-    record = {'framework': fixture['framework'], 'requests': [], 'fixture': integrity.workflow.snapshot(root)}
+    record = {'framework': fixture['framework'], 'requests': [], 'fixture': integrity.snapshot(root)}
     with RecordedSession(command, root, record['requests']) as client:
-        client.tool('septum_domain', {'action': 'register', 'domain': 'root', 'root': '.',
+        client.tool('septum_map', {'action': 'register', 'domain': 'root', 'root': '.',
                     'forbidden_dependencies': ['blocked'], 'ingest_now': True})
         before = state(root)
-        rejected(client, 'septum_domain', {'action': 'register', 'domain': 'alias', 'root': './'})
+        rejected(client, 'septum_map', {'action': 'register', 'domain': 'alias', 'root': './'})
         assert state(root) == before
-        warm = client.tool('septum_domain', {'action': 'register', 'domain': 'ROOT', 'root': '.', 'ingest_now': True})
+        warm = client.tool('septum_map', {'action': 'register', 'domain': 'ROOT', 'root': '.', 'ingest_now': True})
         assert warm['domain'] == 'root' and warm['ingestion_metrics']['parser_invocations'] == 0, warm
         assert state(root) == before
         # Legacy rows bypass the new registration guard to test an existing database.
@@ -55,19 +55,19 @@ def run(command, fixture, root):
     # Restart while conflict persists: initialization must retain an explicit repair
     # route without allowing indexed reads or deleting either domain's policy.
     with RecordedSession(command, root, record['requests']) as client:
-        rejected(client, 'septum_domain', {'action': 'catalog'})
-        rejected(client, 'septum_domain', {'action': 'register', 'domain': 'another_alias', 'root': '.'})
+        rejected(client, 'septum_map', {'action': 'catalog'})
+        rejected(client, 'septum_map', {'action': 'register', 'domain': 'another_alias', 'root': '.'})
         assert state(root) == conflicted
         isolated = root / 'isolated'
         isolated.mkdir()
         (isolated / 'owner.ts').write_text('export const repairedOwner = 1;\n')
-        repaired = client.tool('septum_domain', {'action': 'register', 'domain': 'legacy', 'root': 'isolated', 'ingest_now': True})
+        repaired = client.tool('septum_map', {'action': 'register', 'domain': 'legacy', 'root': 'isolated', 'ingest_now': True})
         assert repaired['status'] == 'success', repaired
         recovered = state(root)
         assert next(row for row in recovered['domains'] if row[1] == 'root')[3] == '["blocked"]'
         owner = next(row[0] for row in recovered['domains'] if row[1] == 'legacy')
         assert next(row for row in recovered['files'] if row[1] == 'isolated/owner.ts')[2] == owner
-        stable = client.tool('septum_domain', {'action': 'register', 'domain': 'legacy', 'root': './isolated/', 'ingest_now': True})
+        stable = client.tool('septum_map', {'action': 'register', 'domain': 'legacy', 'root': './isolated/', 'ingest_now': True})
         assert stable['ingestion_metrics']['parser_invocations'] == 0, stable
         located = client.tool('septum_symbol', {'action': 'locate', 'query': 'repairedOwner'})
         assert located['found'], located

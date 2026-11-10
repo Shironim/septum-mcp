@@ -640,7 +640,7 @@ export class SymbolRepository {
       complexity_smell: complexitySmell,
       sibling_methods: siblingMethods.length > 0 ? siblingMethods : undefined,
       connected_files: connectedFiles,
-      ...(shouldIncludeDeps ? { relationships: new DependencyRepository(this.db).getImportRelationships(options.workspaceRoot).filter(edge => edge.source.file === row.file_path) } : {}),
+      ...(options.includeDependencies === true ? { relationships: new DependencyRepository(this.db).getImportRelationships(options.workspaceRoot).filter(edge => edge.source.file === row.file_path) } : {}),
     };
   }
 

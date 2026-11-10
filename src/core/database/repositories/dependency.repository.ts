@@ -132,7 +132,7 @@ export class DependencyRepository {
     }
   }
 
-  public getAllDependenciesWithDomains(): Array<{
+  public getAllDependenciesWithDomains(sourceFile?: string): Array<{
     source_file: string;
     source_domain: string;
     line_number: number;
@@ -151,20 +151,23 @@ export class DependencyRepository {
       FROM dependencies dep
       JOIN files f ON dep.source_file_id = f.id
       JOIN domains d ON f.domain_id = d.id
+      ${sourceFile === undefined ? "" : "WHERE f.path = ?"}
       ORDER BY d.name, f.path, dep.line_number
     `;
-    return this.db.query<any, []>(query).all();
+    return this.db.query<any, string[]>(query).all(...(sourceFile === undefined ? [] : [sourceFile]));
   }
 
-  public getImportRelationships(workspaceRoot?: string): ImportRelationship[] {
+  public getImportRelationships(workspaceRoot?: string, sourceFile?: string): ImportRelationship[] {
     const root = workspaceRoot ?? this.db.query<{ value: string }, [string]>("SELECT value FROM repo_meta WHERE key = ?").get("workspace_root")?.value;
     if (!root) return [];
-    const files = this.db.query<{ path: string; content_hash: string; domain_id: number }, []>("SELECT path, content_hash, domain_id FROM files").all();
+    const files = this.db.query<{ path: string; content_hash: string; domain_id: number }, string[]>(
+      `SELECT path, content_hash, domain_id FROM files ${sourceFile === undefined ? "" : "WHERE path = ?"}`
+    ).all(...(sourceFile === undefined ? [] : [sourceFile]));
     const domains = this.db.query<{ name: string; root_path: string }, []>("SELECT name, root_path FROM domains").all().sort((a,b)=>b.root_path.length-a.root_path.length);
     const resolver = new ImportResolver(root, domains.map(domain => domain.root_path));
     const freshness = new Map<string, ImportRelationship["freshness"]>();
     const hashes = new Map(files.map(f => [f.path, f.content_hash]));
-    return this.getAllDependenciesWithDomains().map(dep => {
+    return this.getAllDependenciesWithDomains(sourceFile).map(dep => {
       if (!freshness.has(dep.source_file)) {
         try { assertPathContained(dep.source_file, root, "Import source"); freshness.set(dep.source_file, computeContentHash(readSourceFile(resolve(root,dep.source_file))) === hashes.get(dep.source_file) ? "current" : "stale"); }
         catch { freshness.set(dep.source_file,"unavailable"); }
@@ -180,7 +183,8 @@ export class DependencyRepository {
         kind: "imports", derivation: "source",
         source: { file: dep.source_file, line: dep.line_number, statement: dep.statement, indexed_content_hash: hashes.get(dep.source_file) ?? "" },
         resolution, target_domains: [...new Set(targetDomains)], freshness: current,
-        index_coverage: resolution.targets.every(target => target.files.every(file => hashes.has(file) || !getLanguageCapability(file))) ? "complete" : "partial",
+        index_coverage: resolution.targets.every(target => target.files.every(file => hashes.has(file) ||
+          (sourceFile !== undefined && !!this.db.query("SELECT 1 FROM files WHERE path = ?").get(file)) || !getLanguageCapability(file))) ? "complete" : "partial",
         ...(dep.source_file.endsWith(".go") ? { import_binding: (() => {
           const alias = dep.statement.replace(/^\s*import\s+/, "").match(/^\s*([A-Za-z_]\w*|\.)\s+["`]/)?.[1];
           return { kind: alias === "_" ? "blank" : alias === "." ? "dot" : alias ? "named" : "default", alias };

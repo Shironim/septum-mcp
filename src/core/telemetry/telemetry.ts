@@ -1,17 +1,28 @@
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+export interface SeptumToolCallMetrics {
+  bytes_out?: number;
+  lines_out?: number;
+  estimated_tokens?: number;
+  nodes_returned?: number;
+}
+
+export interface SeptumOutputDigest {
+  summary?: string;
+  sample_preview?: string;
+}
+
 export interface SeptumToolCallEvent {
   timestamp?: string;
   event: "tool_call_completed" | "tool_call_failed";
   tool: string;
+  action?: string;
   duration_ms: number;
   input: Record<string, any>;
-  metrics?: {
-    bytes_out?: number;
-    lines_out?: number;
-    nodes_returned?: number;
-  };
+  metrics?: SeptumToolCallMetrics;
+  bloat_alert?: boolean;
+  output_digest?: SeptumOutputDigest;
   session?: {
     feature_key?: string | null;
     domain?: string | null;
@@ -25,8 +36,32 @@ export interface SeptumToolCallEvent {
 }
 
 export class SeptumTelemetry {
-  private static readonly MAX_LOG_SIZE_BYTES = 2 * 1024 * 1024; // 2MB
-  private static readonly SLOW_EXECUTION_THRESHOLD_MS = 250;
+  public static readonly MAX_LOG_SIZE_BYTES = 2 * 1024 * 1024; // 2MB
+  public static readonly SLOW_EXECUTION_THRESHOLD_MS = 250;
+  public static readonly BLOAT_BYTE_THRESHOLD = 16 * 1024; // 16KB (~4,000 tokens)
+
+  /**
+   * Generates a concise sample preview of output content to inspect payload relevancy and bloat.
+   */
+  public static createOutputDigest(text: string, maxPreviewChars = 300): SeptumOutputDigest {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return { summary: "empty_output" };
+    }
+
+    let samplePreview = trimmed;
+    if (trimmed.length > maxPreviewChars) {
+      const head = trimmed.slice(0, 200).replace(/\s+/g, " ");
+      const tail = trimmed.slice(-80).replace(/\s+/g, " ");
+      samplePreview = `${head} ... [${trimmed.length - 280} chars omitted] ... ${tail}`;
+    } else {
+      samplePreview = trimmed.replace(/\s+/g, " ");
+    }
+
+    return {
+      sample_preview: samplePreview,
+    };
+  }
 
   /**
    * Resolves the log file path inside the active workspace's .septum directory.
@@ -49,9 +84,11 @@ export class SeptumTelemetry {
 
     const jsonLine = JSON.stringify(payload);
 
-    // Sink 1: Live stderr stream for operator monitoring (slow queries & failures)
+    // Sink 1: Live stderr stream for operator monitoring (slow queries, bloat alerts & failures)
     if (payload.status === "error") {
       console.error(`[Septum Telemetry ERROR] ${jsonLine}`);
+    } else if (payload.bloat_alert) {
+      console.error(`[Septum Telemetry BLOAT_WARN] Tool '${payload.tool}' output exceeds threshold (${payload.metrics?.bytes_out} bytes, ~${payload.metrics?.estimated_tokens} tokens)`);
     } else if (payload.duration_ms >= this.SLOW_EXECUTION_THRESHOLD_MS) {
       console.error(`[Septum Telemetry SLOW_WARN] ${jsonLine}`);
     }

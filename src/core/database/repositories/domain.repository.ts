@@ -293,13 +293,24 @@ export class DomainRepository {
         imported_by_count: rawConn?.imported_by_count ?? 0,
       };
 
+      const allMappedSymbols = Array.from(symbolMap.values());
+      const isCompact = detailLevel === "compact";
+      const MAX_COMPACT_SYMBOLS = 25;
+      const symbolsToDisplay = isCompact && allMappedSymbols.length > MAX_COMPACT_SYMBOLS
+        ? allMappedSymbols.slice(0, MAX_COMPACT_SYMBOLS)
+        : allMappedSymbols;
+      const symbolsOmitted = isCompact && allMappedSymbols.length > MAX_COMPACT_SYMBOLS
+        ? allMappedSymbols.length - MAX_COMPACT_SYMBOLS
+        : undefined;
+
       catalogFiles.push({
         ...(detailLevel === "full" ? { declarations: symbols.map(sym => symbolReference({ ...sym, file_path: file.path, indexed_content_hash: file.content_hash })) } : {}),
         path: file.path,
         archetype: file.archetype,
         line_count: file.line_count,
         connections: fileConnections,
-        symbols: Array.from(symbolMap.values()).map((s) => {
+        ...(symbolsOmitted !== undefined ? { symbols_omitted: symbolsOmitted } : {}),
+        symbols: symbolsToDisplay.map((s) => {
           if (detailLevel === "compact") {
             return {
               name: s.name,
@@ -334,7 +345,7 @@ export class DomainRepository {
       files: catalogFiles,
       agent_hint:
         detailLevel === "compact"
-          ? "Compact view (<400 tokens). Use septum_symbol({ action: 'inspect', query: symbol }) for exact method signatures, or septum_domain({ action: 'catalog', domain, detail_level: 'full', file_filter: '<path>' }) for full member lists."
+          ? "Compact view (<400 tokens). Use septum_symbol({ action: 'inspect', query: symbol }) for exact method signatures, or septum_map({ action: 'catalog', domain, detail_level: 'full', file_filter: '<path>' }) for full member lists."
           : undefined,
     };
   }
