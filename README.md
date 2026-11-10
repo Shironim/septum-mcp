@@ -2,13 +2,15 @@
 
 > **Architecture boundary guard and codebase intelligence for AI coding agents.**
 
-[![Version: 0.2.1](https://img.shields.io/badge/Version-0.2.1-blue)](package.json)
+[![Version: 0.2.2](https://img.shields.io/badge/Version-0.2.2-blue)](package.json)
 [![Runtime: Bun](https://img.shields.io/badge/Runtime-Bun-black?logo=bun)](https://bun.sh)
 [![Protocol: Model Context Protocol](https://img.shields.io/badge/Protocol-MCP-green)](https://modelcontextprotocol.io/)
 [![Database: SQLite WAL](https://img.shields.io/badge/Database-SQLite%20(bun:sqlite)-003B57?logo=sqlite)](https://sqlite.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
-Septum helps AI coding agents understand codebase architecture and respect modular boundaries. It parses and indexes your codebase into a local SQLite database (`.septum/septum.db`), validates module dependencies, and prevents unauthorized cross-boundary modifications.
+Septum provides architecture maps, change context, and boundary checks for AI coding agents before and after edits. It indexes source in a local SQLite database (`.septum/septum.db`) and evaluates configured dependency rules and task scope. Results describe detected relationships and analysis limits; application behavior still requires application verification.
+
+Start with the [product requirements and feature inventory](docs/feature/README.md), which serves as the Single Source of Truth (SSOT) for all Septum capabilities, architectures, and hook specifications.
 
 ---
 
@@ -64,6 +66,10 @@ Septum automatically:
    - **Opencode** (`opencode/`, `opencode.json`)
    - **.agents Standard** (`.agents/`, `AGENTS.md`)
 
+Septum retains twelve semantic adapters: Laravel, Symfony, MCP/CLI, NestJS, Express, Fastify, Hono, Elysia, FastAPI, Django, Flask, and Go. They cover selected static patterns with framework-specific limits; registration does not certify complete framework understanding. Behavioral and migration/Prisma schema enrichment remain available within their declared heuristic limits.
+
+Detection and scaffolding do not certify every framework pattern or active client hook. See the [feature specifications and architecture contracts](docs/feature/README.md) for full scope and technical details.
+
 ### 2. Manual MCP Client Configuration (Optional)
 
 If your MCP client is not configured via `septum init`, add Septum to your MCP configuration (`.mcp.json` or `claude_desktop_config.json`):
@@ -86,12 +92,10 @@ If your MCP client is not configured via `septum init`, add Septum to your MCP c
 
 | Command | Description |
 |---|---|
-| `septum init [--force]` | Detect project topology, scaffold agent integrations, and build initial symbol catalog. `--force` regenerates Septum-managed configs while preserving existing database and user git hooks |
+| `septum init [--force]` | Scaffold agent integrations and build initial symbol catalog. `--force` regenerates Septum-managed configs while preserving existing database and user git hooks |
 | `septum sync [--json]` | Synchronize AST and update symbol catalog into `.septum/septum.db` (full or incremental) |
-| `septum check [--strict] [--staged] [--feature <name>] [--json]` | Verify boundary rules and detect cross-domain or circular dependency violations |
-| `septum feature [status\|clear] [--force]` | View or release active feature editing scope |
-| `septum hook pre-write` | Pre-tool guard hook to validate proposed changes before file edits |
-| `septum topology [subcommand]` | Inspect environment topology and infrastructure services |
+| `septum check [--strict] [--staged] [--domain <name>] [--json]` | Verify boundary rules and detect cross-domain or circular dependency violations |
+| `septum hook pre-write` | Pre-write guard hook to intercept forbidden cross-domain imports in real time |
 | `septum serve` | Start stdio Model Context Protocol (MCP) server |
 
 ---
@@ -100,22 +104,33 @@ If your MCP client is not configured via `septum init`, add Septum to your MCP c
 
 All tools provide structured schemas via the Model Context Protocol:
 
-- **Domain & Architecture Overview (`septum_domain`):**
+- **Domain Map & Discovery (`septum_map`):**
   - `action: "catalog"`: High-level architecture map and module dependencies (`detail_level: "compact" | "full"`).
   - `action: "register"`: Register or update domain boundaries with allowed and forbidden dependencies.
-  - `action: "topology"`: Inspect deployment environment and infrastructure services.
 - **Symbol Inspection & Impact Analysis (`septum_symbol`):**
   - `action: "locate"`: Search and find symbols across the codebase.
-  - `action: "inspect"`: Inspect symbol declarations, signatures, and source snippets.
-  - `action: "impact"`: Analyze call graphs, dependents, and refactoring blast radius.
-  - `action: "hotspots"`: Identify complex functions based on line count and nesting depth.
+  - `action: "context"` (accepts `action: "inspect"` as alias): Retrieve declaration implementation and supporting declarations (deep TypeScript context retrieval within `budget_bytes`, or bounded polyglot source inspection).
+  - `action: "impact"`: Inspect static dependent/caller hints. Imports are reported separately and do not prove executed calls or a complete runtime blast radius.
 - **Execution Flow Tracer (`septum_slice`):**
-  - Trace call chains across application layers (*Route ➔ Controller ➔ Service ➔ Repository ➔ Entity*) from HTTP endpoints, queue jobs, CLI commands, or event handlers.
+  - Navigate static context across application layers from supported entrypoints (`query`, `controller_file`, `max_depth`). Each node shows its relationship evidence or `unknown`.
 - **Dependency & Boundary Validator (`septum_boundary`):**
   - Validate proposed file imports against defined architectural rules (`scope: "file"`).
-  - Check staged files (`scope: "staged"`), specific domains (`scope: "domain"`), or the whole codebase (`scope: "all"`) for circular dependencies and boundary violations.
-- **Feature Scope Management (`septum_feature`):**
-  - Restrict agent editing scope to designated touchpoint files during feature work to prevent unintended changes.
+  - Check staged files in the Git index before commit (`scope: "staged"`).
+  - Audit circular dependencies and boundary violations for a specific domain (`scope: "domain"`) or the entire codebase (`scope: "all"`).
+
+---
+
+## Select context before editing
+
+Locate a declaration, select its returned `symbol_ref` when names are ambiguous, then request context:
+
+```json
+{"action":"context","query":"submit","file_path":"src/submit.ts","budget_bytes":65536}
+```
+
+Send these arguments to `septum_symbol` with an explicit `workspace_path` when needed. Context v2 supports `.ts/.mts/.cts` and selects supporting declarations through bounded local/import bindings. TSX and complete business dependency closure are outside this policy.
+
+Read evidence scope, freshness and omissions before editing. Retrieval is strictly read-only; use impact for potential consumers and application checks for behavior. Budget, paging, source identity and recovery semantics have one owner: the [symbol context contract](docs/feature/symbol-context-contract.md). Per-action requirements are in [septum_symbol](docs/feature/septum-symbol.md).
 
 ---
 
