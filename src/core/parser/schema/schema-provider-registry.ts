@@ -3,12 +3,10 @@ import type {
   StackSchemaProvider,
 } from "./schema-provider.interface.ts";
 import { LaravelMigrationSchemaProvider } from "./providers/laravel-migration-provider.ts";
-import { PrismaSchemaProvider } from "./providers/prisma-schema-provider.ts";
 
 export class SchemaProviderRegistry {
   private static providers: StackSchemaProvider[] = [
     new LaravelMigrationSchemaProvider(),
-    new PrismaSchemaProvider(),
   ];
 
   /**

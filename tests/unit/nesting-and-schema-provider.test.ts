@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { calculateControlFlowNesting, calculatePythonNesting } from "../../src/core/parser/boundary-tracker.ts";
 import { LaravelMigrationSchemaProvider } from "../../src/core/parser/schema/providers/laravel-migration-provider.ts";
-import { PrismaSchemaProvider } from "../../src/core/parser/schema/providers/prisma-schema-provider.ts";
 import { SchemaProviderRegistry } from "../../src/core/parser/schema/schema-provider-registry.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -124,48 +123,6 @@ return new class extends Migration {
 
     const notesCol = schema?.fields.find((f) => f.name === "notes");
     expect(notesCol?.nullable).toBe(true);
-
-    // Clean up
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("should extract Prisma schema model definitions", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "septum-test-prisma-"));
-    const prismaDir = path.join(tmpDir, "prisma");
-    fs.mkdirSync(prismaDir, { recursive: true });
-
-    const prismaContent = `
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-model User {
-  id        Int      @id @default(autoincrement())
-  email     String   @unique
-  name      String?
-  role      String   @default("user")
-  createdAt DateTime @default(now())
-}
-`;
-    fs.writeFileSync(path.join(prismaDir, "schema.prisma"), prismaContent);
-
-    const provider = new PrismaSchemaProvider();
-    expect(provider.canHandle(tmpDir)).toBe(true);
-
-    const schema = provider.resolveEntitySchema(tmpDir, "User");
-    expect(schema).not.toBeNull();
-    expect(schema?.entityName).toBe("User");
-    expect(schema?.tableName).toBe("user");
-
-    const colNames = schema?.fields.map((f) => f.name);
-    expect(colNames).toContain("id");
-    expect(colNames).toContain("email");
-    expect(colNames).toContain("name");
-    expect(colNames).toContain("role");
-
-    const nameCol = schema?.fields.find((f) => f.name === "name");
-    expect(nameCol?.nullable).toBe(true);
 
     // Clean up
     fs.rmSync(tmpDir, { recursive: true, force: true });
