@@ -1,4 +1,3 @@
-import { SOURCE_READ_REVISION } from "../resources/source-files.ts";
+import { ANALYSIS_FINGERPRINT } from "./implementation-fingerprint.ts";
 
-// Invalidate persisted slices when behavioral/schema interpretation changes.
-export const SEMANTIC_EXTRACTOR_REVISION = `6-inputs-${SOURCE_READ_REVISION}`;
+export const SEMANTIC_FINGERPRINT = ANALYSIS_FINGERPRINT;

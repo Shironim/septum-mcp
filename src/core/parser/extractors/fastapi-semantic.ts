@@ -1,3 +1,4 @@
+import { readPythonStaticString as cleanLiteral } from "../static-string.ts";
 import type Parser from "web-tree-sitter";
 import { parseSourceWithTreeSitter } from "../wasm-loader.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
@@ -30,7 +31,7 @@ interface ExtractedInclusion {
   relPath: string;
   parentVar: string;
   targetExpr: string;
-  prefix: string;
+  prefix: string | undefined;
   line: number;
 }
 
@@ -39,16 +40,6 @@ interface ImportBinding {
   symbol?: string;
 }
 
-function cleanLiteral(node: Parser.SyntaxNode | null | undefined): string | undefined {
-  if (!node) return undefined;
-  if (node.type === "string") {
-    const raw = node.text.trim();
-    const match = raw.match(/^[rRbBuU]*('''|"""|'|")([\s\S]*?)\1$/);
-    if (match) return match[2];
-    return raw.replace(/^[rRbBuU]*['"]|['"]$/g, "");
-  }
-  return undefined;
-}
 
 function normalizeRouteUri(prefix: string, rawPath: string): string {
   const p = (prefix ?? "").trim().replace(/\/+$/, "");
@@ -131,7 +122,7 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
     const allInclusions: ExtractedInclusion[] = [];
     const localRouters = new Map<
       string,
-      { prefix: string; isApp: boolean; guards?: string[]; dependencies?: string[] }
+      { prefix: string | undefined; isApp: boolean; guards?: string[]; dependencies?: string[] }
     >();
     const fileImports = new Map<string, Map<string, ImportBinding>>();
 
@@ -201,7 +192,7 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
           const keyword = args.find(
             (child) => child.type === "keyword_argument" && child.childForFieldName("name")?.text === "prefix"
           );
-          const prefix = cleanLiteral(keyword?.childForFieldName("value")) ?? "";
+          const prefix = keyword ? cleanLiteral(keyword.childForFieldName("value")) : "";
 
           // Router-level dependencies: router = APIRouter(dependencies=[Depends(...)])
           const depsKw = args.find(
@@ -219,7 +210,7 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
           }
 
           localRouters.set(`${relPath}#${leftName}`, {
-            prefix: prefix.replace(/\/+$/, ""),
+            prefix: prefix?.replace(/\/+$/, ""),
             isApp,
             guards: routerGuards,
             dependencies: routerDeps,
@@ -240,13 +231,13 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
           const prefixKw = args.find(
             (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "prefix"
           );
-          const incPrefix = cleanLiteral(prefixKw?.childForFieldName("value")) ?? "";
+          const incPrefix = prefixKw ? cleanLiteral(prefixKw.childForFieldName("value")) : "";
           allInclusions.push({
             file,
             relPath,
             parentVar,
             targetExpr,
-            prefix: incPrefix.replace(/\/+$/, ""),
+            prefix: incPrefix?.replace(/\/+$/, ""),
             line: node.startPosition.row + 1,
           });
         });
@@ -394,9 +385,9 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
     }
 
     // 5. Build Inclusion Graph and Resolve Cross-File Router Targets
-    // Adjacency: parentKey -> Array<{ childKey: string; prefix: string }>
-    const routerChildren = new Map<string, Array<{ childKey: string; prefix: string }>>();
-    const incomingInclusions = new Map<string, Array<{ parentKey: string; prefix: string }>>();
+    // Adjacency: parentKey -> Array<{ childKey: string; prefix: string | undefined }>
+    const routerChildren = new Map<string, Array<{ childKey: string; prefix: string | undefined }>>();
+    const incomingInclusions = new Map<string, Array<{ parentKey: string; prefix: string | undefined }>>();
 
     for (const inc of allInclusions) {
       const parentKey = `${inc.relPath}#${inc.parentVar}`;
@@ -465,8 +456,8 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
     for (const routerKey of allRouterKeys) {
       const incoming = incomingInclusions.get(routerKey);
       if (!incoming || incoming.length === 0) {
-        const local = localRouters.get(routerKey)?.prefix ?? "";
-        effectivePrefixesByRouter.set(routerKey, [local]);
+        const local = localRouters.get(routerKey);
+        effectivePrefixesByRouter.set(routerKey, local && local.prefix === undefined ? [] : [local?.prefix ?? ""]);
       }
     }
 
@@ -484,8 +475,9 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
         if (visitedEdges.has(edgeKey)) continue;
         visitedEdges.add(edgeKey);
 
-        const childLocal = localRouters.get(child.childKey)?.prefix ?? "";
-        const nextPrefixes = currentPrefixes.map((p) => {
+        const childMeta = localRouters.get(child.childKey);
+        const childLocal = childMeta?.prefix ?? "";
+        const nextPrefixes = child.prefix === undefined || childMeta && childMeta.prefix === undefined ? [] : currentPrefixes.map((p) => {
           const combined = `${p ? (p.startsWith("/") ? p : `/${p}`) : ""}${child.prefix ? (child.prefix.startsWith("/") ? child.prefix : `/${child.prefix}`) : ""}${childLocal ? (childLocal.startsWith("/") ? childLocal : `/${childLocal}`) : ""}`;
           return combined.replace(/\/+/g, "/").replace(/\/+$/, "");
         });
@@ -500,10 +492,7 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
     // 7. Generate Vertical Slices
     for (const route of allRoutes) {
       const routerKey = `${route.relPath}#${route.routerVar}`;
-      let prefixes = effectivePrefixesByRouter.get(routerKey);
-      if (!prefixes || prefixes.length === 0) {
-        prefixes = [localRouters.get(routerKey)?.prefix ?? ""];
-      }
+      const prefixes = effectivePrefixesByRouter.get(routerKey) ?? [];
 
       for (const prefix of prefixes) {
         const fullUri = normalizeRouteUri(prefix, route.rawPath);

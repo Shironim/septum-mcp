@@ -97,7 +97,8 @@ export class JavaExtractor implements CodeExtractor {
         } else if (
           member.type === "class_declaration" ||
           member.type === "interface_declaration" ||
-          member.type === "enum_declaration"
+          member.type === "enum_declaration" ||
+          member.type === "record_declaration"
         ) {
           processTopLevel(member, className);
         }
@@ -107,12 +108,13 @@ export class JavaExtractor implements CodeExtractor {
     const processTopLevel = (node: Parser.SyntaxNode, parentName?: string): void => {
       if (node.type === "import_declaration") {
         const pathNode = node.namedChildren.find((c) => c.type === "scoped_identifier" || c.type === "identifier");
-        const rawImport = pathNode ? pathNode.text : (lines[node.startPosition.row] ?? "").replace(/^import\s+|;$/g, "").trim();
+        const rawImport = pathNode ? pathNode.text + (node.namedChildren.some(c => c.type === "asterisk") ? ".*" : "")
+          : node.text.replace(/^import\s+(?:static\s+)?|;$/g, "").trim();
         const leafSymbol = rawImport.split(".").pop() || rawImport;
 
         dependencies.push({
           target: rawImport,
-          statement: (lines[node.startPosition.row] ?? node.text).trim().replace(/;$/, ""),
+          statement: node.text.trim().replace(/;$/, ""),
           line_number: node.startPosition.row + 1,
           is_external: this.isExternalImport(rawImport),
           imported_symbols: [leafSymbol],

@@ -101,7 +101,8 @@ export class CSharpExtractor implements CodeExtractor {
           member.type === "class_declaration" ||
           member.type === "interface_declaration" ||
           member.type === "struct_declaration" ||
-          member.type === "record_declaration"
+          member.type === "record_declaration" ||
+          member.type === "enum_declaration"
         ) {
           processNode(member, typeName);
         }
@@ -123,7 +124,8 @@ export class CSharpExtractor implements CodeExtractor {
           statement: (lines[node.startPosition.row] ?? node.text).trim().replace(/;$/, ""),
           line_number: node.startPosition.row + 1,
           is_external: this.isExternalUsing(rawUsing),
-          imported_symbols: [leafSymbol],
+          imported_symbols: [...new Set([leafSymbol, ...node.namedChildren
+            .filter(c => c.type === "name_equals").map(c => c.firstNamedChild?.text).filter((name): name is string => !!name)])],
         });
         return;
       }
@@ -132,12 +134,14 @@ export class CSharpExtractor implements CodeExtractor {
         node.type === "namespace_declaration" ||
         node.type === "file_scoped_namespace_declaration"
       ) {
+        const name = node.childForFieldName("name")?.text;
+        const namespaceScope = name ? (parentScope ? `${parentScope}.${name}` : name) : parentScope;
         const body =
           node.childForFieldName("body") ??
           node.namedChildren.find((c) => c.type === "declaration_list") ??
           node;
         for (const child of body.namedChildren) {
-          processNode(child, parentScope);
+          processNode(child, namespaceScope);
         }
         return;
       }

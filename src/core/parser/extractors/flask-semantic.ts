@@ -1,3 +1,4 @@
+import { readPythonStaticString as cleanLiteral } from "../static-string.ts";
 import type Parser from "web-tree-sitter";
 import { parseSourceWithTreeSitter } from "../wasm-loader.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
@@ -25,7 +26,7 @@ interface ExtractedBlueprintRegistration {
   relPath: string;
   parentVar: string;
   targetExpr: string;
-  prefix: string;
+  prefix: string | null | undefined; // undefined: no override; null: unresolved expression.
   line: number;
 }
 
@@ -34,16 +35,6 @@ interface ImportBinding {
   symbol?: string;
 }
 
-function cleanLiteral(node: Parser.SyntaxNode | null | undefined): string | undefined {
-  if (!node) return undefined;
-  if (node.type === "string") {
-    const raw = node.text.trim();
-    const match = raw.match(/^[rRbBuU]*('''|"""|'|")([\s\S]*?)\1$/);
-    if (match) return match[2];
-    return raw.replace(/^[rRbBuU]*['"]|['"]$/g, "");
-  }
-  return undefined;
-}
 
 function normalizeRouteUri(prefix: string, rawPath: string): string {
   const p = (prefix ?? "").trim().replace(/\/+$/, "");
@@ -102,7 +93,7 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
     const allRegistrations: ExtractedBlueprintRegistration[] = [];
     const localBlueprints = new Map<
       string,
-      { bpName: string; prefix: string; isApp: boolean }
+      { bpName: string; prefix: string | null; isApp: boolean }
     >();
     const fileImports = new Map<string, Map<string, ImportBinding>>();
 
@@ -176,7 +167,7 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
 
           const args = call.childForFieldName("arguments")?.namedChildren ?? [];
           let bpName = leftName;
-          let prefix = "";
+          let prefix: string | null = "";
 
           if (isBlueprint && args.length > 0) {
             const firstArg = args[0];
@@ -190,12 +181,13 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
             (child) => child.type === "keyword_argument" && child.childForFieldName("name")?.text === "url_prefix"
           );
           if (prefixKw) {
-            prefix = cleanLiteral(prefixKw.childForFieldName("value")) ?? "";
+            const value = prefixKw.childForFieldName("value");
+            prefix = value?.type === "none" ? "" : cleanLiteral(value) ?? null;
           }
 
           localBlueprints.set(`${relPath}#${leftName}`, {
             bpName,
-            prefix: prefix.replace(/\/+$/, ""),
+            prefix: prefix?.replace(/\/+$/, "") ?? null,
             isApp,
           });
         });
@@ -214,13 +206,14 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
           const prefixKw = args.find(
             (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "url_prefix"
           );
-          const incPrefix = cleanLiteral(prefixKw?.childForFieldName("value")) ?? "";
+          const prefixValue = prefixKw?.childForFieldName("value");
+          const incPrefix = !prefixKw || prefixValue?.type === "none" ? undefined : cleanLiteral(prefixValue) ?? null;
           allRegistrations.push({
             file,
             relPath,
             parentVar,
             targetExpr,
-            prefix: incPrefix.replace(/\/+$/, ""),
+            prefix: incPrefix === undefined ? undefined : incPrefix?.replace(/\/+$/, "") ?? null,
             line: node.startPosition.row + 1,
           });
         });
@@ -318,8 +311,8 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
     }
 
     // 5. Build Inclusion Graph and Resolve Cross-File Blueprint Targets
-    const routerChildren = new Map<string, Array<{ childKey: string; prefix: string }>>();
-    const incomingRegistrations = new Map<string, Array<{ parentKey: string; prefix: string }>>();
+    const routerChildren = new Map<string, Array<{ childKey: string; prefix: string | null | undefined }>>();
+    const incomingRegistrations = new Map<string, Array<{ parentKey: string; prefix: string | null | undefined }>>();
 
     for (const reg of allRegistrations) {
       const parentKey = `${reg.relPath}#${reg.parentVar}`;
@@ -386,8 +379,8 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
     for (const routerKey of allRouterKeys) {
       const incoming = incomingRegistrations.get(routerKey);
       if (!incoming || incoming.length === 0) {
-        const local = localBlueprints.get(routerKey)?.prefix ?? "";
-        effectivePrefixesByRouter.set(routerKey, [local]);
+        const local = localBlueprints.get(routerKey);
+        effectivePrefixesByRouter.set(routerKey, local?.prefix === null ? [] : [local?.prefix ?? ""]);
       }
     }
 
@@ -405,11 +398,11 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
         if (visitedEdges.has(edgeKey)) continue;
         visitedEdges.add(edgeKey);
 
-        const childLocal = localBlueprints.get(child.childKey)?.prefix ?? "";
-        const nextPrefixes = currentPrefixes.map((p) => {
+        const childPrefix = child.prefix === undefined ? localBlueprints.get(child.childKey)?.prefix ?? null : child.prefix;
+        const nextPrefixes = childPrefix === null ? [] : currentPrefixes.map((p) => {
           const combined = `${p ? (p.startsWith("/") ? p : `/${p}`) : ""}${
-            child.prefix ? (child.prefix.startsWith("/") ? child.prefix : `/${child.prefix}`) : ""
-          }${childLocal ? (childLocal.startsWith("/") ? childLocal : `/${childLocal}`) : ""}`;
+            childPrefix ? (childPrefix.startsWith("/") ? childPrefix : `/${childPrefix}`) : ""
+          }`;
           return combined.replace(/\/+/g, "/").replace(/\/+$/, "");
         });
 
@@ -423,10 +416,7 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
     // 7. Generate Vertical Slices (Level 0 – Level 3)
     for (const route of allRoutes) {
       const routerKey = `${route.relPath}#${route.routerVar}`;
-      let prefixes = effectivePrefixesByRouter.get(routerKey);
-      if (!prefixes || prefixes.length === 0) {
-        prefixes = [localBlueprints.get(routerKey)?.prefix ?? ""];
-      }
+      const prefixes = effectivePrefixesByRouter.get(routerKey) ?? [];
 
       const bpMeta = localBlueprints.get(routerKey);
       const controllerClass = bpMeta?.bpName || path.basename(route.file, ".py");

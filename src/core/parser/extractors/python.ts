@@ -290,7 +290,7 @@ export class PythonExtractor implements CodeExtractor {
         ? "protected"
         : "public";
 
-    const processNode = (node: Parser.SyntaxNode, currentClass: string | null, pendingDecorators?: string[]): void => {
+    const extractImports = (node: Parser.SyntaxNode): void => {
       if (node.type === "import_from_statement") {
         const modNode =
           node.childForFieldName("module_name") ??
@@ -316,7 +316,7 @@ export class PythonExtractor implements CodeExtractor {
 
           dependencies.push({
             target: modulePath,
-            statement: (lines[node.startPosition.row] ?? node.text).trim(),
+            statement: node.text.trim(),
             line_number: node.startPosition.row + 1,
             is_external: isExternal,
             ...(importedSymbols.length > 0 ? { imported_symbols: Array.from(new Set(importedSymbols)) } : {}),
@@ -333,7 +333,7 @@ export class PythonExtractor implements CodeExtractor {
             const shortName = modulePath.split(".").pop() || modulePath;
             dependencies.push({
               target: modulePath,
-              statement: (lines[node.startPosition.row] ?? node.text).trim(),
+              statement: node.text.trim(),
               line_number: node.startPosition.row + 1,
               is_external: PYTHON_STDLIB_AND_EXTERNALS.has(topPackage),
               imported_symbols: [shortName],
@@ -347,7 +347,7 @@ export class PythonExtractor implements CodeExtractor {
               const shortName = alias?.text?.trim() || modulePath.split(".").pop() || modulePath;
               dependencies.push({
                 target: modulePath,
-                statement: (lines[node.startPosition.row] ?? node.text).trim(),
+                statement: node.text.trim(),
                 line_number: node.startPosition.row + 1,
                 is_external: PYTHON_STDLIB_AND_EXTERNALS.has(topPackage),
                 imported_symbols: [shortName],
@@ -358,6 +358,11 @@ export class PythonExtractor implements CodeExtractor {
         return;
       }
 
+      for (const child of node.namedChildren) extractImports(child);
+    };
+    extractImports(rootNode);
+
+    const processNode = (node: Parser.SyntaxNode, currentClass: string | null, pendingDecorators?: string[]): void => {
       if (node.type === "decorated_definition") {
         const decorators: string[] = [];
         for (const child of node.namedChildren) {

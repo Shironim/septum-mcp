@@ -471,11 +471,9 @@ def b_world():
         `.trim();
         fs.writeFileSync(path.join(tempDir, "b.py"), bCode);
 
-        // Extractor must terminate safely without infinite recursion or stack overflow
+        // A cycle without a root has no resolved mount path; do not invent root routes.
         const slices = await extractor.extractSlices(tempDir);
-        expect(slices.length).toBeGreaterThanOrEqual(2);
-        expect(slices.some((s) => s.action_name === "a_hello")).toBe(true);
-        expect(slices.some((s) => s.action_name === "b_world")).toBe(true);
+        expect(slices).toEqual([]);
       } finally {
         fs.rmSync(tempDir, { recursive: true, force: true });
       }

@@ -59,6 +59,8 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
       boundDto?: string;
       serviceCall?: string;
       repoCall?: string;
+      receiverVar?: string;
+      body: string;
     }
 
     interface GoStructInfo {
@@ -77,12 +79,18 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
       line: number;
       body: string;
       params?: string;
+      receiverVar?: string;
     }
 
     // 1. Catalog all handler functions & methods across .go files
     const handlers = new Map<string, HandlerInfo>();
     const goStructs = new Map<string, GoStructInfo>();
     const goMethods = new Map<string, GoMethodInfo>();
+    const constructors = new Map<string, string>();
+    const goModPath = path.join(projectRoot, "go.mod");
+    const moduleName = fs.existsSync(goModPath)
+      ? readOptionalSourceFile(goModPath, "utf-8").match(/^module\s+(\S+)/m)?.[1]
+      : undefined;
 
     for (const file of goFiles) {
       const content = readOptionalSourceFile(file, "utf-8");
@@ -150,7 +158,7 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
 
         // Detect repo/db calls: h.repo.Save(...) or db.Create(&order)
         let repoCall: string | undefined;
-        const rMatch = fnBody.match(/(?:([a-zA-Z0-9_]+(?:Repo|Repository))\s*\.\s*([A-Z][a-zA-Z0-9_]+)|db\s*\.\s*(?:Create|Save|Find|First|Update|Delete)\s*\(\s*&?([A-Z][a-zA-Z0-9_]+)\s*\))/i);
+        const rMatch = fnBody.match(/(?:([a-zA-Z0-9_]+(?:Repo|Repository))\s*\.\s*([A-Z][a-zA-Z0-9_]+)\s*\(|db\s*\.\s*(?:Create|Save|Find|First|Update|Delete)\s*\(\s*&?([A-Z][a-zA-Z0-9_]+)\s*\))/i);
         if (rMatch) {
           repoCall = rMatch[1] ? `${rMatch[1]}::${rMatch[2]}` : `DB::${rMatch[3]}`;
         }
@@ -164,6 +172,8 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
           boundDto,
           serviceCall,
           repoCall,
+          receiverVar: fMatch[0].match(/^func\s*\(\s*(\w+)/)?.[1],
+          body: fnBody,
         };
 
         if (receiver) {
@@ -205,10 +215,29 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
         const bEnd = this.findGoBraceBlockEnd(content, bStart - 1);
         const bText = content.slice(bStart, bEnd);
         const params = afMatch[3];
+        const returnType = afMatch[0].match(/\)\s+\*?([A-Z][a-zA-Z0-9_]*)\s*\{$/)?.[1];
+        if (!rcv && returnType) {
+          constructors.set(`${path.dirname(file)}:${fn}`, returnType);
+        }
         if (rcv) {
-          goMethods.set(`${rcv}.${fn}`, { receiver: rcv, name: fn, file, relPath, line: fLine, body: bText, params });
+          goMethods.set(`${rcv}.${fn}`, { receiver: rcv, name: fn, file, relPath, line: fLine, body: bText, params,
+            receiverVar: afMatch[0].match(/^func\s*\(\s*(\w+)/)?.[1] });
         } else {
           goMethods.set(fn, { name: fn, file, relPath, line: fLine, body: bText, params });
+        }
+      }
+    }
+
+    // Resolve calls through declared fields, regardless of the field's local name.
+    for (const handler of handlers.values()) {
+      if (!handler.receiver || !handler.receiverVar) continue;
+      const fields = goStructs.get(handler.receiver)?.fields;
+      const calls = /\b([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\.\s*([A-Z][a-zA-Z0-9_]*)\s*\(/g;
+      for (const call of handler.body.matchAll(calls)) {
+        const fieldType = fields?.get(call[2]);
+        if (call[1] === handler.receiverVar && fieldType && /(?:Service|Usecase|UC)$/i.test(fieldType)) {
+          handler.serviceCall = `${call[2]}::${call[3]}`;
+          break;
         }
       }
     }
@@ -219,6 +248,12 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
       if (!content) continue;
 
       const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
+      const importedPackages = new Map<string, string>();
+      for (const spec of content.matchAll(/^\s*(?:import\s+)?(?:(\w+)\s+)?"([^"\n]+)"/gm)) {
+        if (moduleName && spec[2].startsWith(`${moduleName}/`)) {
+          importedPackages.set(spec[1] || path.basename(spec[2]), path.join(projectRoot, spec[2].slice(moduleName.length + 1)));
+        }
+      }
 
       // Find router/setup functions and methods to scope groups and variable types
       const setupFuncRegex =
@@ -257,6 +292,14 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
           if (varName && typeName) {
             scopedVarReceivers.set(varName, typeName);
           }
+        }
+
+        // A factory call is typed by its declared return, never by the function name.
+        for (const call of funcBody.matchAll(/\b(\w+)\s*:=\s*(?:(\w+)\.)?([A-Z]\w*)\s*\(/g)) {
+          const directory = call[2] ? importedPackages.get(call[2]) : path.dirname(file);
+          const typeName = directory && constructors.get(`${directory}:${call[3]}`);
+          scopedVarReceivers.delete(call[1]);
+          if (typeName) scopedVarReceivers.set(call[1], typeName);
         }
 
         // Scoped router groups: groupVar -> accumulatedPrefix
@@ -467,10 +510,17 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
       // Scan service body for repo or DB persistence
       if (targetMethod?.body) {
         const rMatch = targetMethod.body.match(
-          /(?:(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]*(?:repo|repository))\s*\.\s*([A-Z][a-zA-Z0-9_]+)|db\s*\.\s*(?:Create|Save|Find|First|Update|Delete)\s*\(\s*&?([A-Z][a-zA-Z0-9_]+)\s*\))/i
+          /(?:(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]*(?:repo|repository))\s*\.\s*([A-Z][a-zA-Z0-9_]+)\s*\(|db\s*\.\s*(?:Create|Save|Find|First|Update|Delete)\s*\(\s*&?([A-Z][a-zA-Z0-9_]+)\s*\))/i
         );
         if (rMatch && !repoCall) {
           repoCall = rMatch[1] ? `${rMatch[1]}::${rMatch[2]}` : `DB::${rMatch[3]}`;
+        }
+        for (const call of targetMethod.body.matchAll(/\b(\w+)\.(\w+)\s*\.\s*([A-Z]\w*)\s*\(/g)) {
+          const fieldType = targetStruct?.fields.get(call[2]);
+          if (call[1] === targetMethod.receiverVar && fieldType && /(?:Repo|Repository)$/i.test(fieldType)) {
+            repoCall = `${call[2]}::${call[3]}`;
+            break;
+          }
         }
       }
     }

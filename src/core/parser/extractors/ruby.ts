@@ -79,19 +79,22 @@ export class RubyExtractor implements CodeExtractor {
               continue;
             }
           }
-          if (methodName === "require" || methodName === "require_relative") {
+          if ((methodName === "require" || methodName === "require_relative") && !child.childForFieldName("receiver")) {
             const argsNode = child.childForFieldName("arguments") ?? child.namedChildren[1];
             if (argsNode) {
-              const rawTarget = argsNode.text.replace(/^["':]|["']$/g, "").trim();
+              const arg = argsNode.namedChildren[0];
+              const literal = arg?.type === "string" && !arg.namedChildren.some(c => c.type === "interpolation")
+                && !arg.text.includes("\\") && argsNode.namedChildren.length === 1;
+              const rawTarget = literal ? arg.text.slice(1, -1) : `dynamic:${child.text}`;
               const isRel = methodName === "require_relative";
               const leaf = rawTarget.split("/").pop() || rawTarget;
 
               dependencies.push({
                 target: rawTarget,
-                statement: (lines[child.startPosition.row] ?? child.text).trim(),
+                statement: child.text.trim(),
                 line_number: child.startPosition.row + 1,
-                is_external: this.isExternalRequire(rawTarget, isRel),
-                imported_symbols: [leaf],
+                is_external: literal ? this.isExternalRequire(rawTarget, isRel) : false,
+                ...(literal ? { imported_symbols: [leaf] } : {}),
               });
             }
           }

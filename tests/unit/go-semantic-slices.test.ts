@@ -11,6 +11,89 @@ function createTempDir(prefix: string): string {
 describe("GoSemanticExtractor (Gin, Echo, Chi)", () => {
   const extractor = new GoSemanticExtractor();
 
+  it("resolves constructor-wired Chi handlers and service fields without naming suffixes", () => {
+    const root = createTempDir("constructor-wiring");
+    try {
+      const files: Record<string, string> = {
+        "go.mod": "module example.test/shop\n\ngo 1.22\n",
+        "router/router.go": `package router
+import (
+  "github.com/go-chi/chi/v5"
+  delivery "example.test/shop/handler"
+)
+func Routes() {
+  orderH := delivery.NewOrderHandler()
+  paymentH := delivery.NewPaymentHandler()
+  unknownH := delivery.NewUnknownHandler()
+  r := chi.NewRouter()
+  r.Route("/api/v1", func(r chi.Router) {
+    r.Post("/orders", orderH.Create)
+    r.Post("/payments/{id}/konfirmasi", paymentH.Confirm)
+    r.Post("/unknown", unknownH.Create)
+  })
+}`,
+        "handler/orders.go": `package handler
+import "net/http"
+type OrderHandler struct {
+  orders *OrderService
+}
+func NewOrderHandler() *OrderHandler { return &OrderHandler{} }
+func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
+  h.orders.Checkout(r.Context())
+}
+type OrderService struct {
+  orders *OrderRepo
+}
+func (s *OrderService) Checkout(ctx context.Context) {
+  err := repository.ErrNotFound
+  s.orders.Create(ctx)
+}
+type OrderRepo struct{}
+func (r *OrderRepo) Create(ctx context.Context) {}`,
+        "handler/payments.go": `package handler
+import "net/http"
+type PaymentHandler struct {
+  svc *PaymentService
+}
+func NewPaymentHandler() *PaymentHandler { return &PaymentHandler{} }
+func (h *PaymentHandler) Confirm(w http.ResponseWriter, r *http.Request) {
+  h.svc.Confirm(r.Context())
+}
+type PaymentService struct{}
+func (s *PaymentService) Confirm(ctx context.Context) {
+  err := repository.ErrNotFound
+}`,
+      };
+      for (const [file, content] of Object.entries(files)) {
+        fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+        fs.writeFileSync(path.join(root, file), content);
+      }
+      const slices = extractor.extractSlices(root);
+      for (const [uri, controller, service, file] of [
+        ["/api/v1/orders", "OrderHandler", "orders::Checkout", "handler/orders.go"],
+        ["/api/v1/payments/{id}/konfirmasi", "PaymentHandler", "svc::Confirm", "handler/payments.go"],
+      ]) {
+        const slice = slices.find(s => s.route_uri === uri)!;
+        expect(slice.controller_class).toBe(controller);
+        expect(slice.controller_file).toBe(file);
+        expect(JSON.parse(slice.execution_chain_json)).toContainEqual(expect.objectContaining({
+          stage: "service", symbol: service, file,
+        }));
+      }
+      const unknown = slices.find(s => s.route_uri === "/api/v1/unknown")!;
+      expect(unknown.controller_file).toBe("router/router.go");
+      expect(JSON.parse(unknown.execution_chain_json).some((n: any) => n.stage === "service")).toBe(false);
+      const checkout = slices.find(s => s.route_uri === "/api/v1/orders")!;
+      expect(JSON.parse(checkout.execution_chain_json)).toContainEqual(expect.objectContaining({
+        stage: "repository", symbol: "orders::Create", file: "handler/orders.go",
+      }));
+      const payment = slices.find(s => s.route_uri.endsWith("/konfirmasi"))!;
+      expect(JSON.parse(payment.execution_chain_json).some((n: any) => n.stage === "repository")).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("should detect Gin / Echo / Chi frameworks in go.mod and extract full execution slices", () => {
     const tempDir = createTempDir("golang");
 

@@ -72,19 +72,34 @@ export class RustExtractor implements CodeExtractor {
         return;
       }
       if (node.type === "use_declaration") {
-        const text = (lines[node.startPosition.row] ?? node.text).trim().replace(/;$/, "");
-        const argumentNode = node.namedChildren.find((c) => c.type !== "visibility_modifier");
-        const fullUsePath = argumentNode ? argumentNode.text : text.replace(/^pub\s+use\s+|^use\s+/, "");
-        const rawImport = fullUsePath.trim();
-        const leafSymbol = rawImport.split("::").pop()?.replace(/[{}\s]/g, "") || rawImport;
-
-        dependencies.push({
-          target: rawImport,
-          statement: text,
-          line_number: node.startPosition.row + 1,
-          is_external: this.isExternalUse(rawImport),
-          imported_symbols: [leafSymbol],
-        });
+        const argument = node.childForFieldName("argument");
+        const addUse = (item: Parser.SyntaxNode, prefix = ""): void => {
+          if (item.type === "line_comment" || item.type === "block_comment") return;
+          if (item.type === "scoped_use_list") {
+            const scope = item.childForFieldName("path")?.text;
+            const list = item.childForFieldName("list");
+            const nestedPrefix = [prefix, scope].filter(Boolean).join("::");
+            if (list) for (const child of list.namedChildren) addUse(child, nestedPrefix);
+            return;
+          }
+          if (item.type === "use_list") {
+            for (const child of item.namedChildren) addUse(child, prefix);
+            return;
+          }
+          const alias = item.type === "use_as_clause" ? item.childForFieldName("alias")?.text : undefined;
+          const importPath = item.type === "use_as_clause" ? item.childForFieldName("path")?.text : item.text;
+          if (!importPath) return;
+          const target = importPath === "self" && prefix ? prefix : [prefix, importPath].filter(Boolean).join("::");
+          const leaf = target.split("::").pop()!;
+          dependencies.push({
+            target,
+            statement: node.text.trim().replace(/;$/, ""),
+            line_number: node.startPosition.row + 1,
+            is_external: this.isExternalUse(target),
+            imported_symbols: [...new Set([leaf, ...(alias ? [alias] : [])])],
+          });
+        };
+        if (argument) addUse(argument);
         return;
       }
 

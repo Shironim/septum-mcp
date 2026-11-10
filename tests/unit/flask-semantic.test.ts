@@ -70,7 +70,7 @@ def create_order():
     expect(order?.action_name).toBe("create_order");
   });
 
-  it("resolves multi-file Blueprints registered with prefix composition", async () => {
+  it("resolves multi-file Blueprints with a registration prefix overriding their default", async () => {
     fs.writeFileSync(path.join(tmpDir, "pyproject.toml"), '[project]\ndependencies = ["flask>=3.0"]\n');
     expect(extractor.canHandle(tmpDir)).toBe(true);
 
@@ -106,14 +106,14 @@ app.register_blueprint(user_bp, url_prefix="/api/v1")
     const slices = await extractor.extractSlices(tmpDir);
     expect(slices).toHaveLength(2);
 
-    const listSlice = slices.find((s) => s.route_uri === "/api/v1/users/");
+    const listSlice = slices.find((s) => s.route_uri === "/api/v1/");
     expect(listSlice).toBeDefined();
     expect(listSlice?.http_method).toBe("GET");
     expect(listSlice?.controller_class).toBe("users");
     expect(listSlice?.action_name).toBe("list_users");
     expect(listSlice?.controller_file).toBe("routes/users.py");
 
-    const getSlice = slices.find((s) => s.route_uri === "/api/v1/users/<int:user_id>");
+    const getSlice = slices.find((s) => s.route_uri === "/api/v1/<int:user_id>");
     expect(getSlice).toBeDefined();
     expect(getSlice?.controller_file).toBe("routes/users.py");
     expect(getSlice?.action_name).toBe("get_user");

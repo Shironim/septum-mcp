@@ -485,6 +485,22 @@ export class PHPExtractor implements CodeExtractor {
           line_count: mCount,
           nesting_depth: nestingDepth,
         });
+        if (methodName.toLowerCase() === "__construct" && paramsNode) {
+          for (const param of paramsNode.namedChildren) {
+            if (param.type !== "property_promotion_parameter") continue;
+            const propName = param.childForFieldName("name");
+            if (!propName) continue;
+            symbols.push({
+              name: `${containerName}::${propName.text}`,
+              kind: "property",
+              signature: param.text,
+              visibility: this.extractPhpVisibility(param),
+              line_start: param.startPosition.row + 1,
+              line_end: param.endPosition.row + 1,
+              line_count: param.endPosition.row - param.startPosition.row + 1,
+            });
+          }
+        }
         continue;
       }
 

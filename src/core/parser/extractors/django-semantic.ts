@@ -1,3 +1,4 @@
+import { readPythonStaticString as cleanLiteral } from "../static-string.ts";
 import type Parser from "web-tree-sitter";
 import { parseSourceWithTreeSitter } from "../wasm-loader.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
@@ -49,16 +50,6 @@ interface UrlInclusion {
   line: number;
 }
 
-function cleanLiteral(node: Parser.SyntaxNode | null | undefined): string | undefined {
-  if (!node) return undefined;
-  if (node.type === "string") {
-    const raw = node.text.trim();
-    const match = raw.match(/^[rRbBuU]*('''|"""|'|")([\s\S]*?)\1$/);
-    if (match) return match[2];
-    return raw.replace(/^[rRbBuU]*['"]|['"]$/g, "");
-  }
-  return undefined;
-}
 
 function normalizeUri(prefix: string, sub: string): string {
   const p = (prefix ?? "").trim().replace(/^\/+|\/+$/g, "");

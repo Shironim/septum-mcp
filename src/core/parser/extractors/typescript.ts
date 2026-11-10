@@ -387,6 +387,19 @@ export class TypeScriptExtractor implements CodeExtractor {
         return;
       }
 
+      if (stmtNode.type === "internal_module") {
+        const name = stmtNode.childForFieldName("name");
+        const body = stmtNode.childForFieldName("body");
+        if (name && body && name.type !== "string") {
+          const firstSymbol = symbols.length;
+          for (const child of body.namedChildren) processTopLevelNode(child, false);
+          for (let i = firstSymbol; i < symbols.length; i++) {
+            symbols[i].name = `${name.text}::${symbols[i].name}`;
+          }
+        }
+        return;
+      }
+
       if (
         stmtNode.type === "class_declaration" ||
         stmtNode.type === "abstract_class_declaration" ||

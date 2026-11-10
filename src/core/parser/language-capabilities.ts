@@ -1,8 +1,8 @@
 import * as path from "node:path";
 import grammarPackage from "tree-sitter-wasms/package.json";
+import { ANALYSIS_FINGERPRINT } from "./implementation-fingerprint.ts";
 
-// Keep this revision aligned with ingestion invalidation; coverage is never implied by parse success.
-export const PARSER_REVISION = "5";
+export const PARSER_FINGERPRINT = ANALYSIS_FINGERPRINT;
 
 type LanguageDefinition = {
   id: string;
@@ -49,7 +49,7 @@ export function grammarFileForKey(keyOrPath: string): string | null {
 
 export function getParserCapabilities(full: boolean) {
   const common = {
-    parser_revision: PARSER_REVISION,
+    parser_revision: PARSER_FINGERPRINT,
     grammar_package: `${grammarPackage.name}@${grammarPackage.version}`,
     coverage: "partial",
     status_contract: "parsed = parser/scanner completed; degraded = recovery/fallback; unsupported = no extractor. None implies complete extraction or runtime correctness.",
