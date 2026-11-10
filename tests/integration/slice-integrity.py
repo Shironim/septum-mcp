@@ -13,14 +13,9 @@ import sys
 import tempfile
 
 sys.dont_write_bytecode = True
-from mcp_fixture import McpSession
-from importlib.util import module_from_spec, spec_from_file_location
+from mcp_fixture import McpSession as RecordedSession, snapshot
 
 PROJECT = Path(__file__).resolve().parents[2]
-spec = spec_from_file_location('workflow', PROJECT / 'tests/integration/change-workflow.py')
-workflow = module_from_spec(spec)
-spec.loader.exec_module(workflow)
-RecordedSession = workflow.RecordedSession
 
 
 def manifests(fixture):
@@ -46,12 +41,12 @@ def run(command, fixture, root):
         path.write_text(source)
     record = {'framework': fixture['framework'], 'requests': [],
               'scope': 'static adapter patterns plus injected catalog faults; versions not certified',
-              'fixture': workflow.snapshot(root)}
+              'fixture': snapshot(root)}
     with RecordedSession(command, root, record['requests']) as client:
         listing = client.request('tools/list', {})
         schema = next(tool for tool in listing['tools'] if tool['name'] == 'septum_slice')['inputSchema']
         assert 'controller_file' in schema['properties']
-        client.tool('septum_domain', {'action': 'register', 'domain': 'root', 'root': '.', 'ingest_now': True})
+        client.tool('septum_map', {'action': 'register', 'domain': 'root', 'root': '.', 'ingest_now': True})
         invalid = client.request('tools/call', {'name': 'septum_slice', 'arguments': {
             'controller_file': 'orders.ts', 'workspace_path': str(root)}})
         assert invalid.get('isError'), invalid

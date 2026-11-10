@@ -3,7 +3,7 @@ import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
 import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
-import { SEMANTIC_EXTRACTOR_REVISION } from "../../src/core/parser/semantic-revision.ts";
+import { SEMANTIC_FINGERPRINT } from "../../src/core/parser/semantic-revision.ts";
 
 describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
   let db: SeptumDatabase;
@@ -24,11 +24,31 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
     db = new SeptumDatabase(":memory:");
     repo = new SeptumRepository(db.raw);
     // These tests inject current formatter fixtures rather than running extraction.
-    repo.setMeta("semantic_extractor_revision", SEMANTIC_EXTRACTOR_REVISION);
+    repo.setMeta("semantic_extractor_revision", SEMANTIC_FINGERPRINT);
   });
 
   afterEach(() => {
     db.close();
+  });
+
+  it("keeps Go package imports out of the selected handler chain", async () => {
+    repo.upsertVerticalSlice({
+      domain_id: null, feature_key: null, http_method: "POST", route_uri: "/orders",
+      route_name: null, controller_class: "OrderHandler", action_name: "Create",
+      controller_file: "handler/orders.go", controller_line: 1,
+      architecture_style: "go-http", entry_kind: "http_route",
+      execution_chain_json: JSON.stringify([
+        { stage: "controller", symbol: "OrderHandler::Create", file: "handler/orders.go" },
+        { stage: "service", symbol: "orders::Checkout", file: "service/orders.go" },
+        { stage: "service", symbol: "Unrelated", file: "service/auth.go", relationship: { kind: "imports" } },
+      ]),
+    });
+    // A package import traversal must not be requested for a Go handler.
+    repo.getAllFiles = () => { throw new Error("unexpected package expansion"); };
+    const result = JSON.parse((await handleTraceVerticalSlice(repo, mockConfig, { query: "POST /orders" })).content[0].text);
+    expect(result.status).toBe("success");
+    expect(result.chain.map((node: { symbol: string }) => node.symbol)).toEqual(["OrderHandler::Create", "orders::Checkout"]);
+    expect(result.message).toContain("Go package import expansion is omitted");
   });
 
   it("returns parseable JSON string in content[0].text when slice is not found", async () => {

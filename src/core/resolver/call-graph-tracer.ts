@@ -23,6 +23,7 @@ export interface DiscoveredRoute {
 
 export class CallGraphTracer {
   private importEvidence?: ReturnType<SeptumRepository["getImportRelationships"]>;
+  private evidenceByFile = new Map<string, ReturnType<SeptumRepository["getImportRelationships"]>>();
   private fileMapByNormPath: Map<string, FileRecord> = new Map();
   private fileMapById: Map<number, FileRecord> = new Map();
   private symbolsByFileId: Map<number, SymbolRecord[]> = new Map();
@@ -33,10 +34,33 @@ export class CallGraphTracer {
 
   constructor(private repo: SeptumRepository, private projectRoot: string = process.cwd()) {}
 
+  private fileForPath(path: string): FileRecord | undefined {
+    const key = this.normalizeFilePath(path);
+    const cached = this.fileMapByNormPath.get(key);
+    if (cached) return cached;
+    const file = this.repo.getFileByPath(path.replace(/\\/g, "/").replace(/^\.\//, ""));
+    if (!file) return undefined;
+    this.fileMapByNormPath.set(key, file);
+    this.fileMapById.set(file.id, file);
+    return file;
+  }
+
+  private fileSymbols(fileId: number): SymbolRecord[] {
+    if (!this.symbolsByFileId.has(fileId)) this.symbolsByFileId.set(fileId, this.repo.getSymbolsByFileId(fileId));
+    return this.symbolsByFileId.get(fileId)!;
+  }
+
+  private fileDependencies(fileId: number) {
+    if (!this.dependenciesByFileId.has(fileId)) this.dependenciesByFileId.set(fileId, this.repo.getDependenciesByFileId(fileId));
+    return this.dependenciesByFileId.get(fileId)!;
+  }
+
   /**
    * Initializes internal fast lookup maps from SQLite repository data.
    */
   public initMaps(): void {
+    this.fileMapByNormPath.clear(); this.fileMapById.clear();
+    this.symbolsByFileId.clear(); this.dependenciesByFileId.clear(); this.evidenceByFile.clear();
     const allSymbolsWithFiles = this.repo.getAllSymbolsWithFiles();
     const allDeps = this.repo.getAllDependenciesWithDomains();
     this.importEvidence = this.repo.getMeta?.("workspace_root") ? this.repo.getImportRelationships(this.projectRoot) : undefined;
@@ -190,7 +214,7 @@ export class CallGraphTracer {
 
       if (!isController) continue;
 
-      const symbols = this.symbolsByFileId.get(file.id) || [];
+      const symbols = this.fileSymbols(file.id);
       const methods = symbols.filter((s) => s.kind === "method" || s.kind === "function");
 
       for (const m of methods) {
@@ -278,7 +302,7 @@ export class CallGraphTracer {
     }
 
     if (controllerFile) {
-      const syms = this.symbolsByFileId.get(controllerFile.id) || [];
+      const syms = this.fileSymbols(controllerFile.id);
       const methodSym = syms.find(
         (s) => s.name.toLowerCase() === actionMethod.toLowerCase()
       );
@@ -315,7 +339,7 @@ export class CallGraphTracer {
   ): ExecutionChainNode[] {
     const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
     const chain: ExecutionChainNode[] = [];
-    const syms = this.symbolsByFileId.get(controllerFile.id) || [];
+    const syms = this.fileSymbols(controllerFile.id);
     const ctrlName =
       syms.find((s) => s.kind === "class")?.name ||
       controllerFile.path.split("/").pop()?.replace(/\.[^.]+$/, "") ||
@@ -363,10 +387,7 @@ export class CallGraphTracer {
     maxDepth: number = 5
   ): ExecutionChainNode[] {
     const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
-    if (this.fileMapByNormPath.size === 0) {
-      this.initMaps();
-    }
-    const startFile = this.fileMapByNormPath.get(this.normalizeFilePath(controllerFilePath));
+    const startFile = this.fileForPath(controllerFilePath);
     if (!startFile) {
       return existingChain.slice(0, CallGraphTracer.MAX_CHAIN_NODES);
     }
@@ -374,6 +395,322 @@ export class CallGraphTracer {
     const chain = [...existingChain];
     this.traverseOutboundDependencies(startFile, chain, effectiveMaxDepth);
     return chain;
+  }
+
+  /**
+   * AST-scoped Call Tracing: Only expands dependencies referenced inside the specific target method body & signature.
+   * Completely filters out unused file-level imports to prevent context bloat and cognitive noise.
+   */
+  public expandChainFromMethod(
+    controllerFilePath: string,
+    actionName: string,
+    existingChain: ExecutionChainNode[],
+    maxDepth: number = 5
+  ): ExecutionChainNode[] {
+    const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
+    const startFile = this.fileForPath(controllerFilePath);
+    if (!startFile) {
+      return existingChain.slice(0, CallGraphTracer.MAX_CHAIN_NODES);
+    }
+
+    const symbols = this.fileSymbols(startFile.id);
+    const methodSymbol = symbols.find(
+      (s) => (s.kind === "method" || s.kind === "function") && (s.name.endsWith(`::${actionName}`) || s.name.endsWith(`@${actionName}`) || s.name === actionName)
+    );
+
+    if (!methodSymbol) {
+      return this.expandChainFromFile(controllerFilePath, existingChain, maxDepth);
+    }
+
+    const fullPath = resolve(this.projectRoot, startFile.path);
+    if (!existsSync(fullPath)) {
+      return existingChain.slice(0, CallGraphTracer.MAX_CHAIN_NODES);
+    }
+
+    let methodBody = "";
+    try {
+      const fileContent = readOptionalSourceFile(fullPath, "utf-8");
+      const lines = fileContent.split(/\r?\n/);
+      const start = Math.max(0, methodSymbol.line_start - 1);
+      const end = Math.min(lines.length, methodSymbol.line_end);
+      methodBody = this.scopeWithInjectedTypes(fileContent, lines.slice(start, end).join("\n"));
+    } catch {
+      return this.expandChainFromFile(controllerFilePath, existingChain, maxDepth);
+    }
+
+    const chain = [...existingChain];
+    this.traverseMethodScopedDependencies(startFile, methodBody, methodSymbol, chain, effectiveMaxDepth);
+    return chain;
+  }
+
+  private extractScopeForCollaborator(
+    collaboratorFile: FileRecord,
+    callerScopeText: string
+  ): string {
+    const symbols = this.fileSymbols(collaboratorFile.id);
+    const methods = symbols.filter((s) => s.kind === "method" || s.kind === "function");
+    if (methods.length === 0) return "";
+
+    // Find methods whose short name is referenced in callerScopeText
+    let matchedMethods = methods.filter((m) => {
+      const shortName = m.name.split("::").pop() || "";
+      return shortName.length > 2 && callerScopeText.includes(shortName);
+    });
+
+    // If no direct method name match, check for standard action execution methods: execute / handle
+    if (matchedMethods.length === 0) {
+      if (callerScopeText.includes("execute") || callerScopeText.includes("handle")) {
+        matchedMethods = methods.filter((m) => {
+          const shortName = m.name.split("::").pop() || "";
+          return shortName === "execute" || shortName === "handle";
+        });
+      }
+    }
+
+    if (matchedMethods.length === 0) return "";
+
+    const fullPath = resolve(this.projectRoot, collaboratorFile.path);
+    if (!existsSync(fullPath)) return "";
+
+    try {
+      const fileContent = readOptionalSourceFile(fullPath, "utf-8");
+      const lines = fileContent.split(/\r?\n/);
+      let scope = "";
+      for (const m of matchedMethods) {
+        const start = Math.max(0, m.line_start - 1);
+        const end = Math.min(lines.length, m.line_end);
+        scope += (m.signature || "") + "\n" + lines.slice(start, end).join("\n") + "\n";
+      }
+      return this.scopeWithInjectedTypes(fileContent, scope);
+    } catch {
+      return "";
+    }
+  }
+
+  /** Static hints for explicitly typed properties used by this scope. */
+  private scopeWithInjectedTypes(source: string, scope: string): string {
+    const types = new Set<string>();
+    for (const match of scope.matchAll(/(?:\bthis\.([A-Za-z_]\w*)|\$this->([A-Za-z_]\w*))/g)) {
+      const property = match[1] ?? match[2]!;
+      const tsType = new RegExp(`\\b${property}\\s*[?!]?\\s*:\\s*([A-Za-z_]\\w*)\\b`, "g");
+      const phpType = new RegExp(`\\b(?:public|protected|private)\\s+(?:readonly\\s+)?([\\\\A-Za-z_]\\w*(?:\\\\\\w+)*)\\s+\\$${property}\\b`, "g");
+      for (const declaration of source.matchAll(tsType)) types.add(declaration[1]!);
+      for (const declaration of source.matchAll(phpType)) types.add(declaration[1]!.split("\\").pop()!);
+    }
+    return scope + "\n" + [...types].join("\n");
+  }
+
+  private isExecutableSymbol(s: SymbolRecord): boolean {
+    if (
+      s.kind === "class" ||
+      s.kind === "function" ||
+      s.kind === "method" ||
+      s.kind === "struct" ||
+      s.kind === "trait" ||
+      s.kind === "component" ||
+      s.kind === "view"
+    ) {
+      return true;
+    }
+    if (
+      s.kind === "interface" ||
+      s.kind === "type" ||
+      s.kind === "property" ||
+      s.kind === "constant" ||
+      s.kind === "enum"
+    ) {
+      return false;
+    }
+    if (s.kind === "variable") {
+      if (/^[A-Z0-9_]{3,}$/.test(s.name)) return false;
+      if (/(?:Schema|Config|Options|Settings|Params)$/i.test(s.name)) return false;
+      return true;
+    }
+    return false;
+  }
+
+  private resolveExecutableSymbol(
+    fileSymbols: SymbolRecord[],
+    importedNames: string[]
+  ): SymbolRecord | undefined {
+    if (importedNames.length > 0) {
+      const matched = fileSymbols.find((s) => importedNames.includes(s.name) && this.isExecutableSymbol(s));
+      if (matched) return matched;
+
+      // If imported symbols match in this file but none are executable (e.g. types/constants),
+      // then this import was solely for non-executable definitions.
+      const nonExecutableMatched = fileSymbols.some((s) => importedNames.includes(s.name));
+      if (nonExecutableMatched) {
+        return undefined;
+      }
+    }
+
+    const executable = fileSymbols.filter((s) => this.isExecutableSymbol(s));
+    return (
+      executable.find((s) => s.kind === "class" || s.kind === "struct") ||
+      executable.find((s) => s.kind === "function" || s.kind === "method") ||
+      executable[0]
+    );
+  }
+
+  public traverseMethodScopedDependencies(
+    startFile: FileRecord,
+    methodBody: string,
+    methodSymbol: SymbolRecord,
+    chain: ExecutionChainNode[],
+    maxDepth: number = 5
+  ): void {
+    const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
+    const visitedFiles = new Set<string>();
+    visitedFiles.add(startFile.path);
+    const queue: Array<{ file: FileRecord; depth: number; scopeText?: string }> = [];
+
+    const deps = this.fileDependencies(startFile.id);
+    const scopeText = (methodSymbol.signature || "") + "\n" + methodBody;
+
+    for (const dep of deps) {
+      if (chain.length >= CallGraphTracer.MAX_CHAIN_NODES) break;
+      const importedNames = this.extractImportedSymbolNames(dep.statement);
+      const baseTarget = dep.target.split(/[\/\\]/).pop()?.replace(/\.[^.]+$/, "") || "";
+
+      // Only include if imported symbol or target name is referenced in the method scope (signature + body)
+      const isReferenced =
+        (importedNames.length > 0 &&
+          importedNames.some((name) => {
+            const camel = name.charAt(0).toLowerCase() + name.slice(1);
+            return scopeText.includes(name) || scopeText.includes(camel);
+          })) ||
+        (baseTarget.length > 0 &&
+          (scopeText.includes(baseTarget) ||
+            scopeText.includes(baseTarget.charAt(0).toLowerCase() + baseTarget.slice(1))));
+
+      if (!isReferenced) {
+        // Drop uncalled static import to eliminate cognitive noise and payload bloat
+        continue;
+      }
+
+      const resolvedFiles = this.repo.getMeta?.("workspace_root")
+        ? this.resolveImportTargets(startFile.path, dep.target)
+        : dep.is_external
+        ? []
+        : [this.resolveImportToFile(startFile.path, dep.target)].filter((file): file is FileRecord => !!file);
+
+      for (const resolvedFile of resolvedFiles) {
+        if (!resolvedFile || visitedFiles.has(resolvedFile.path)) continue;
+        visitedFiles.add(resolvedFile.path);
+
+        const stage = this.detectStage(resolvedFile.path, resolvedFile.archetype);
+        const fileSymbols = this.fileSymbols(resolvedFile.id);
+        const mainSymbol = this.resolveExecutableSymbol(fileSymbols, importedNames);
+        if (!mainSymbol) {
+          continue;
+        }
+
+        const symbolDisplay = mainSymbol.name;
+
+        const existingNode = chain.find(
+          (c) => (c.file && c.file === resolvedFile.path) || (c.symbol === symbolDisplay && c.stage === stage)
+        );
+
+        if (!existingNode) {
+          chain.push({
+            stage,
+            symbol: symbolDisplay,
+            file: resolvedFile.path,
+            line: mainSymbol.line_start || 1,
+            description: `${stage.toUpperCase()} (direct call site): ${symbolDisplay}`,
+            relationship: {
+              kind: "imports",
+              derivation: "source",
+              source: { file: startFile.path, line: dep.line_number, statement: dep.statement },
+              reason: "method-scoped call site dependency",
+            },
+          });
+        }
+
+        const collaboratorScope = this.extractScopeForCollaborator(resolvedFile, scopeText);
+        if (collaboratorScope) {
+          queue.push({ file: resolvedFile, depth: 2, scopeText: collaboratorScope });
+        }
+      }
+    }
+
+    // Expand transitive hops from actually executed dependencies
+    while (queue.length > 0 && chain.length < CallGraphTracer.MAX_CHAIN_NODES) {
+      const current = queue.shift()!;
+      if (current.depth > effectiveMaxDepth) break;
+
+      const currentDeps = this.fileDependencies(current.file.id);
+      for (const dep of currentDeps) {
+        if (chain.length >= CallGraphTracer.MAX_CHAIN_NODES) break;
+
+        const importedNames = this.extractImportedSymbolNames(dep.statement);
+        const baseTarget = dep.target.split(/[\/\\]/).pop()?.replace(/\.[^.]+$/, "") || "";
+
+        if (current.scopeText) {
+          const isReferenced =
+            (importedNames.length > 0 &&
+              importedNames.some((name) => {
+                const camel = name.charAt(0).toLowerCase() + name.slice(1);
+                return current.scopeText!.includes(name) || current.scopeText!.includes(camel);
+              })) ||
+            (baseTarget.length > 0 &&
+              (current.scopeText!.includes(baseTarget) ||
+                current.scopeText!.includes(baseTarget.charAt(0).toLowerCase() + baseTarget.slice(1))));
+
+          if (!isReferenced) {
+            continue;
+          }
+        }
+
+        const resolvedFiles = this.repo.getMeta?.("workspace_root")
+          ? this.resolveImportTargets(current.file.path, dep.target)
+          : dep.is_external
+          ? []
+          : [this.resolveImportToFile(current.file.path, dep.target)].filter((file): file is FileRecord => !!file);
+
+        for (const resolvedFile of resolvedFiles) {
+          if (!resolvedFile || visitedFiles.has(resolvedFile.path)) continue;
+          visitedFiles.add(resolvedFile.path);
+
+          const stage = this.detectStage(resolvedFile.path, resolvedFile.archetype);
+          const fileSymbols = this.fileSymbols(resolvedFile.id);
+          const mainSymbol = this.resolveExecutableSymbol(fileSymbols, importedNames);
+          if (!mainSymbol) {
+            continue;
+          }
+
+          const symbolDisplay = mainSymbol.name;
+
+          const existingNode = chain.find(
+            (c) => (c.file && c.file === resolvedFile.path) || (c.symbol === symbolDisplay && c.stage === stage)
+          );
+
+          if (!existingNode) {
+            chain.push({
+              stage,
+              symbol: symbolDisplay,
+              file: resolvedFile.path,
+              line: mainSymbol.line_start || 1,
+              description: `${stage.toUpperCase()}: ${symbolDisplay}`,
+              relationship: {
+                kind: "imports",
+                derivation: "source",
+                source: { file: current.file.path, line: dep.line_number, statement: dep.statement },
+                reason: "transitive method dependency",
+              },
+            });
+          }
+
+          if (current.scopeText) {
+            const nextScope = this.extractScopeForCollaborator(resolvedFile, current.scopeText);
+            if (nextScope) {
+              queue.push({ file: resolvedFile, depth: current.depth + 1, scopeText: nextScope });
+            }
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -395,7 +732,7 @@ export class CallGraphTracer {
       const current = queue.shift()!;
       if (current.depth > effectiveMaxDepth) break;
 
-      const deps = this.dependenciesByFileId.get(current.file.id) || [];
+      const deps = this.fileDependencies(current.file.id);
 
       for (const dep of deps) {
         if (chain.length >= CallGraphTracer.MAX_CHAIN_NODES) break;
@@ -407,21 +744,14 @@ export class CallGraphTracer {
         visitedFiles.add(resolvedFile.path);
 
         const stage = this.detectStage(resolvedFile.path, resolvedFile.archetype);
-        const fileSymbols = this.symbolsByFileId.get(resolvedFile.id) || [];
+        const fileSymbols = this.fileSymbols(resolvedFile.id);
         const importedNames = this.extractImportedSymbolNames(dep.statement);
-        const matchedImportedSymbol =
-          importedNames.length > 0
-            ? fileSymbols.find((s) => importedNames.includes(s.name))
-            : undefined;
-        const mainSymbol =
-          matchedImportedSymbol ||
-          fileSymbols.find((s) => s.kind === "class" || s.kind === "interface") ||
-          fileSymbols.find((s) => s.kind === "function") ||
-          fileSymbols[0];
+        const mainSymbol = this.resolveExecutableSymbol(fileSymbols, importedNames);
+        if (!mainSymbol) {
+          continue;
+        }
 
-        const symbolDisplay = mainSymbol
-          ? mainSymbol.name
-          : resolvedFile.path.split("/").pop()?.replace(/\.[^.]+$/, "") || "Module";
+        const symbolDisplay = mainSymbol.name;
 
         // Prevent adding duplicate stages if already present, or add as refinement
         const existingStageNode = chain.find(
@@ -433,7 +763,7 @@ export class CallGraphTracer {
             stage,
             symbol: symbolDisplay,
             file: resolvedFile.path,
-            line: mainSymbol?.line_start || 1,
+            line: mainSymbol.line_start || 1,
             description: `${stage.toUpperCase()} (dependency, not a proven call): ${symbolDisplay}`,
             relationship: { kind: "imports", derivation: "source", source: { file: current.file.path, line: dep.line_number, statement: dep.statement }, reason: "static import; stage classification is inferred" },
           });
@@ -546,12 +876,31 @@ export class CallGraphTracer {
    * Resolve an import target path (relative or alias) to a FileRecord in the catalog.
    */
   public resolveImportTargets(sourceFilePath: string, importTarget: string): FileRecord[] {
-    const evidence = this.importEvidence?.find(edge => edge.source.file === sourceFilePath && edge.resolution.source.target === importTarget);
+    if (!this.importEvidence && !this.evidenceByFile.has(sourceFilePath)) {
+      this.evidenceByFile.set(sourceFilePath, this.repo.getImportRelationships(this.projectRoot, sourceFilePath));
+    }
+    const evidence = (this.importEvidence ?? this.evidenceByFile.get(sourceFilePath))?.find(edge => edge.source.file === sourceFilePath && edge.resolution.source.target === importTarget);
     if (evidence && (evidence.freshness !== "current" || evidence.index_coverage !== "complete")) return [];
     const result = evidence?.resolution ?? new ImportResolver(this.projectRoot, this.repo.getAllDomains?.().map(domain => domain.root_path) ?? []).resolve(importTarget,sourceFilePath);
-    if (result.status !== "resolved" || result.coverage === "conditional") return [];
+    if (result.status !== "resolved" || result.coverage === "conditional") {
+      // Fallback: check symbols in repository (e.g. PHP namespace classes, Go packages, Python modules)
+      const matching = this.repo.findSymbolsByName(importTarget);
+      if (matching.length === 1) {
+        const file = this.fileForPath(matching[0].file_path);
+        if (file) return [file];
+      }
+      const shortName = importTarget.split(/[\/\\]/).pop();
+      if (shortName && shortName !== importTarget) {
+        const shortMatches = this.repo.findSymbolsByName(shortName);
+        if (shortMatches.length === 1) {
+          const file = this.fileForPath(shortMatches[0].file_path);
+          if (file) return [file];
+        }
+      }
+      return [];
+    }
     return result.targets.flatMap(target => target.files).flatMap(file => {
-      const indexed = this.fileMapByNormPath.get(this.normalizeFilePath(file));
+      const indexed = this.fileForPath(file);
       return indexed ? [indexed] : [];
     });
   }
@@ -577,7 +926,7 @@ export class CallGraphTracer {
       ];
 
       for (const cand of candidates) {
-        const found = this.fileMapByNormPath.get(this.normalizeFilePath(cand));
+        const found = this.fileForPath(cand);
         if (found) return found;
       }
     }
@@ -595,7 +944,7 @@ export class CallGraphTracer {
     ];
 
     for (const cand of aliasCandidates) {
-      const found = this.fileMapByNormPath.get(this.normalizeFilePath(cand));
+      const found = this.fileForPath(cand);
       if (found) return found;
     }
 
@@ -625,12 +974,12 @@ export class CallGraphTracer {
     if (relativeToFile) {
       const file = this.fileMapByNormPath.get(this.normalizeFilePath(relativeToFile));
       if (file) {
-        const deps = this.dependenciesByFileId.get(file.id) || [];
+        const deps = this.fileDependencies(file.id);
         for (const dep of deps) {
           if (dep.target.includes(cleanSymbol) || dep.statement.includes(cleanSymbol)) {
             const targetFile = this.resolveImportToFile(relativeToFile, dep.target);
             if (targetFile) {
-              const syms = this.symbolsByFileId.get(targetFile.id) || [];
+              const syms = this.fileSymbols(targetFile.id);
               const s = syms.find((sym) => sym.name === cleanSymbol);
               return {
                 file: targetFile.path,
@@ -672,12 +1021,12 @@ export class CallGraphTracer {
     if (contextFile) {
       const srcFile = this.fileMapByNormPath.get(this.normalizeFilePath(contextFile));
       if (srcFile) {
-        const deps = this.dependenciesByFileId.get(srcFile.id) || [];
+        const deps = this.fileDependencies(srcFile.id);
         for (const d of deps) {
           if (d.statement.toLowerCase().includes(cleanIdent) || d.target.toLowerCase().includes(cleanIdent)) {
             const resolved = this.resolveImportToFile(contextFile, d.target);
             if (resolved) {
-              const syms = this.symbolsByFileId.get(resolved.id) || [];
+              const syms = this.fileSymbols(resolved.id);
               const sym = syms.find(
                 (s) => s.name.toLowerCase() === ident.toLowerCase() || s.name.toLowerCase().includes(cleanIdent)
               );
@@ -697,7 +1046,7 @@ export class CallGraphTracer {
     // 2. Try match file path
     for (const [norm, file] of this.fileMapByNormPath.entries()) {
       if (norm.toLowerCase().includes(cleanIdent) && norm.toLowerCase().includes("controller")) {
-        const syms = this.symbolsByFileId.get(file.id) || [];
+        const syms = this.fileSymbols(file.id);
         return { file, symbol: syms.find((s) => s.kind === "class") };
       }
     }

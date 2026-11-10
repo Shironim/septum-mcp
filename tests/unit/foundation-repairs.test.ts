@@ -12,7 +12,7 @@ import { BehavioralAnalyzer } from "../../src/core/parser/behavioral-analyzer.ts
 import { LaravelMigrationSchemaProvider } from "../../src/core/parser/schema/providers/laravel-migration-provider.ts";
 import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
 import { SEPTUM_POST_WRITE_SCRIPT } from "../../src/cli/templates/hooks.ts";
-import { SEMANTIC_EXTRACTOR_REVISION } from "../../src/core/parser/semantic-revision.ts";
+import { SEMANTIC_FINGERPRINT } from "../../src/core/parser/semantic-revision.ts";
 import { VerticalSliceTracer } from "../../src/core/resolver/vertical-slice-tracer.ts";
 
 const roots: string[] = [];
@@ -42,7 +42,7 @@ test("staged aliases, inherited config and target membership ignore unstaged edi
   const f = fixture();
   await new IngestionPipeline(f.repo, f.root).run(f.config);
   f.git("init", "-q"); f.git("add", "package.json", "src", "configs", "tsconfig.json");
-  const audit = () => auditStagedFiles(f.evaluator, f.config, f.root, undefined, f.repo);
+  const audit = () => auditStagedFiles(f.evaluator, f.config, f.root, f.repo);
   const before = await audit();
   expect(before.violations.some(v => v.rule === "forbidden_dependency")).toBe(true);
   f.put("configs/base.json", JSON.stringify({ compilerOptions: { baseUrl: "..", paths: { "@invoice": ["src/orders/Local.ts"] } } }));
@@ -108,7 +108,7 @@ test("a staged config-only alias change checks unchanged sources", async () => {
   f.git("-c", "user.name=Foundation Test", "-c", "user.email=foundation@example.invalid", "commit", "-qm", "fixture baseline");
   f.put("configs/base.json", JSON.stringify({ compilerOptions: { baseUrl: "..", paths: { "@invoice": ["src/billing/Invoice.ts"] } } }));
   f.git("add", "configs/base.json");
-  const changed = await auditStagedFiles(f.evaluator, f.config, f.root, undefined, f.repo);
+  const changed = await auditStagedFiles(f.evaluator, f.config, f.root, f.repo);
   expect(changed.files).toEqual(["configs/base.json"]);
   expect(changed.violations.some(v => v.file === "src/orders/Order.ts" && v.rule === "forbidden_dependency")).toBe(true);
 });
@@ -145,8 +145,8 @@ test("sync and on-demand tracing invalidate slices from the previous semantic im
   };
   seed(); await pipeline.run(f.config, { verifyContent: true });
   expect(f.repo.getAllVerticalSlices().some(slice => slice.route_uri === "/phantom")).toBe(false);
-  expect(f.repo.getMeta("semantic_extractor_revision")).toBe(SEMANTIC_EXTRACTOR_REVISION);
+  expect(f.repo.getMeta("semantic_extractor_revision")).toBe(SEMANTIC_FINGERPRINT);
   seed(); await new VerticalSliceTracer(f.repo, f.root, [], false).traceAsync("/phantom");
   expect(f.repo.getAllVerticalSlices().some(slice => slice.route_uri === "/phantom")).toBe(false);
-  expect(f.repo.getMeta("semantic_extractor_revision")).toBe(SEMANTIC_EXTRACTOR_REVISION);
+  expect(f.repo.getMeta("semantic_extractor_revision")).toBe(SEMANTIC_FINGERPRINT);
 });

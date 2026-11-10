@@ -7,7 +7,7 @@ import { SemanticSliceExtractorRegistry } from "../../src/core/parser/extractors
 import { VerticalSliceTracer } from "../../src/core/resolver/vertical-slice-tracer.ts";
 import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
-import { SEMANTIC_EXTRACTOR_REVISION } from "../../src/core/parser/semantic-revision.ts";
+import { SEMANTIC_FINGERPRINT } from "../../src/core/parser/semantic-revision.ts";
 import { SliceToolSchema } from "../../src/mcp/schemas.ts";
 
 import { sliceIntegrityCases as cases } from "../fixtures/slice-integrity-cases.ts";
@@ -31,7 +31,7 @@ describe("adapter output through shared catalog and public slice handler", () =>
       expect(repo.getAllVerticalSlices()).toHaveLength(2);
       repo.upsertVerticalSlice({ ...original, controller_line: original.controller_line + 1 });
       expect(repo.getAllVerticalSlices()).toHaveLength(2);
-      repo.setMeta("semantic_extractor_revision", SEMANTIC_EXTRACTOR_REVISION);
+      repo.setMeta("semantic_extractor_revision", SEMANTIC_FINGERPRINT);
       const query = `${original.http_method} ${original.route_uri}`;
       const config = ConfigLoader.getDefaultConfig();
       const ambiguous = JSON.parse((await handleTraceVerticalSlice(repo, config, { query }, root)).content[0].text);

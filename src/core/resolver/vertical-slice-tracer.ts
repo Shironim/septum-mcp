@@ -1,4 +1,4 @@
-import { SEMANTIC_EXTRACTOR_REVISION } from "../parser/semantic-revision.ts";
+import { SEMANTIC_FINGERPRINT } from "../parser/semantic-revision.ts";
 import { readSourceFile } from "../resources/source-files.ts";
 import { computeContentHash } from "../ingestion/hasher.ts";
 import { assertPathContained } from "./path-resolver.ts";
@@ -30,7 +30,7 @@ export class VerticalSliceTracer {
     let membershipChanged = false;
     try {
       const inputs = JSON.parse(this.repo.getMeta("semantic_inputs") || "[]") as Array<{path:string;hash:string}>;
-      inputsChanged = this.repo.getMeta("semantic_extractor_revision") !== SEMANTIC_EXTRACTOR_REVISION ||
+      inputsChanged = this.repo.getMeta("semantic_extractor_revision") !== SEMANTIC_FINGERPRINT ||
         (!!this.repo.getMeta("semantic_inputs") && this.repo.getMeta("semantic_input_revision") !== SOURCE_READ_REVISION) ||
         !sourceObservationsCurrent(this.projectRoot, JSON.parse(this.repo.getMeta("semantic_observations") || '{"paths":[],"directories":[]}')) || inputs.some(input => {
         signal?.throwIfAborted();
@@ -59,7 +59,7 @@ export class VerticalSliceTracer {
           this.repo.setMeta("semantic_inputs", JSON.stringify(extracted.inputs));
           this.repo.setMeta("semantic_observations", JSON.stringify(extracted.observations));
           this.repo.setMeta("semantic_input_revision", SOURCE_READ_REVISION);
-          this.repo.setMeta("semantic_extractor_revision", SEMANTIC_EXTRACTOR_REVISION);
+          this.repo.setMeta("semantic_extractor_revision", SEMANTIC_FINGERPRINT);
           if (this.verifyMembership) this.repo.setMeta("semantic_catalog_files", JSON.stringify(this.listSourceFiles(this.projectRoot)));
         });
       } catch (error) {
@@ -334,17 +334,25 @@ export class VerticalSliceTracer {
 
     // Import expansion is derived per request, so cached depth cannot override the requested hop limit.
     chain = chain.filter(node => node.relationship?.kind !== "imports" && !node.description?.includes("(dependency)"));
+    // Go imports resolve whole packages; expanding them injects unrelated handlers/services.
     if (
-      !diagnostics.length && record.controller_file &&
+      record.architecture_style !== "go-http" && !diagnostics.length && record.controller_file &&
       typeof (this.repo as any).getAllFiles === "function"
     ) {
       try {
         const callGraphTracer = new CallGraphTracer(this.repo, this.projectRoot);
-        chain = callGraphTracer.expandChainFromFile(
-          record.controller_file,
-          chain,
-          effectiveMaxDepth
-        );
+        chain = record.action_name
+          ? callGraphTracer.expandChainFromMethod(
+              record.controller_file,
+              record.action_name,
+              chain,
+              effectiveMaxDepth
+            )
+          : callGraphTracer.expandChainFromFile(
+              record.controller_file,
+              chain,
+              effectiveMaxDepth
+            );
       } catch {
         diagnostics.push("dependency_expansion_failed");
       }
@@ -373,6 +381,9 @@ export class VerticalSliceTracer {
         return `${formatSliceNode(node)}${loc}${extra}`;
       });
       message = `=== VERTICAL SLICE TRACE (TARGET MATCH: ${confidence.toUpperCase()}) ===\n${SLICE_RELATIONSHIP_LIMITS}\n` + stageLines.join("\n");
+    }
+    if (record.architecture_style === "go-http") {
+      message += "\nGo package import expansion is omitted; extracted handler/service relationships remain lexical and partial.";
     }
     if (diagnostics.length) message += `\nAnalysis incomplete: ${diagnostics.join(", ")}. Run septum sync and retry; inspect source if it persists.`;
 
