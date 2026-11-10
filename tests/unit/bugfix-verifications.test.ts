@@ -146,7 +146,7 @@ describe("Bugfix Verifications: 4 Root Cause Fixes", () => {
       const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(workspace, repo));
 
       // Running auditStagedFiles from the nested subfolder
-      const result = await auditStagedFiles(evaluator, config, workspace, undefined, repo);
+      const result = await auditStagedFiles(evaluator, config, workspace, repo);
       expect(result.files).toEqual(["src/index.ts"]);
       expect(result.violations.length).toBe(0);
     } finally {

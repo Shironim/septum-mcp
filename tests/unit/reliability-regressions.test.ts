@@ -199,7 +199,7 @@ it('does not reject unrelated baseline cycles during a staged check', async () =
   const { root, repo, config, evaluator } = await committedCycle();
   file(root, 'src/a/C.ts', 'export const unrelated=1;');
   expect(Bun.spawnSync(['git', 'add', 'src/a/C.ts'], { cwd: root }).exitCode).toBe(0);
-  const result = await auditStagedFiles(evaluator, config, root, undefined, repo);
+  const result = await auditStagedFiles(evaluator, config, root, repo);
   expect(result.violations).toHaveLength(0);
 });
 
@@ -208,6 +208,6 @@ it('removes deleted dependency edges from the staged cycle graph', async () => {
   rmSync(join(root, 'src/b/B.ts'));
   file(root, 'src/a/A.ts', "import {b} from '../b/B';\nexport const a=b;\nexport const extra=1;\n");
   expect(Bun.spawnSync(['git', 'add', '-u'], { cwd: root }).exitCode).toBe(0);
-  const result = await auditStagedFiles(evaluator, config, root, undefined, repo);
+  const result = await auditStagedFiles(evaluator, config, root, repo);
   expect(result.violations.some(violation => violation.rule === 'circular_dependency')).toBe(false);
 });

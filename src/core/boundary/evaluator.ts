@@ -187,6 +187,11 @@ export class BoundaryEvaluator {
     const fileGraph = new Map<string, Map<string, EdgeMeta>>();
     const domainGraph = new Map<string, Map<string, EdgeMeta>>();
 
+    const isTypeOnlyImport = (statement?: string): boolean => {
+      if (!statement) return false;
+      return /^\s*(?:import|export)\s+type\b/.test(statement.trim());
+    };
+
     for (const dep of allDependencies) {
       if (this.repo.getMeta?.("workspace_root")) {
         const result = this.resolver.resolveImport(dep.target,dep.source_file);
@@ -195,8 +200,14 @@ export class BoundaryEvaluator {
 
       const targetDomain = this.resolveTargetDomain(dep.target, config, dep.source_file);
 
-      // 1. Domain-to-domain edge
-      if (targetDomain && targetDomain !== dep.source_domain) {
+      // 1. Domain-to-domain edge (exclude virtual/top-level aggregator "root" domain and type-only imports)
+      if (
+        targetDomain &&
+        targetDomain !== dep.source_domain &&
+        dep.source_domain !== "root" &&
+        targetDomain !== "root" &&
+        !isTypeOnlyImport(dep.statement)
+      ) {
         let outMap = domainGraph.get(dep.source_domain);
         if (!outMap) {
           outMap = new Map();
@@ -215,7 +226,11 @@ export class BoundaryEvaluator {
         outMap.get(targetDomain)!.files.add(dep.source_file);
       }
 
-      // 2. File-to-file edge
+      // 2. File-to-file edge (type-only imports are erased at compile time and do not create runtime cycles)
+      if (isTypeOnlyImport(dep.statement)) {
+        continue;
+      }
+
       const targetFile = resolveTargetFile(dep.source_file, dep.target);
       if (targetFile && targetFile !== dep.source_file) {
         let outMap = fileGraph.get(dep.source_file);
