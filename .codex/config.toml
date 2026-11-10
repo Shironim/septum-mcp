@@ -1,7 +1,0 @@
-[mcp_servers.septum]
-command = "septum"
-args = ["serve"]
-
-[mcp_servers.strata]
-command = "strata"
-args = ["serve"]
