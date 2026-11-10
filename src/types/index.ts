@@ -334,6 +334,7 @@ export interface GetSymbolArgs {
   include_source?: boolean;
   source_start_line?: number;
   source_line_limit?: number;
+  semantic_depth?: number;
   workspace_path?: string;
 }
 

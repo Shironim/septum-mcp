@@ -2,10 +2,9 @@ import { resolve } from "node:path";
 import type { SeptumRepository } from "../database/repository.ts";
 import type { SymbolReference } from "../../types/index.ts";
 import { computeContentHash } from "../ingestion/hasher.ts";
-import { collectSourceSkipsSync, probeSourcePath, readSourceFile, SOURCE_READ_REVISION } from "../resources/source-files.ts";
+import { collectSourceSkipsSync, probeSourcePath, readSourceFile } from "../resources/source-files.ts";
 import { assertPathContained } from "../resolver/path-resolver.ts";
-import { PARSER_REVISION } from "../parser/language-capabilities.ts";
-import { RESOLVER_REVISION } from "../resolver/import-resolver.ts";
+import { PARSER_FINGERPRINT } from "../parser/language-capabilities.ts";
 
 /** Content-bound declaration identity, shared across operations; not a continuation token. */
 export function symbolTargetId(workspace: string, ref: SymbolReference): string {
@@ -48,7 +47,7 @@ export function withSymbolEvidence<T extends TextResult>(repo: SeptumRepository,
     const syncState = meta("sync_state");
     if (syncState !== "complete") reasons.push("index_completeness_unverified");
     const parserRevision = meta("parser_revision");
-    if (parserRevision !== PARSER_REVISION) reasons.push("indexed_parser_revision_unverified");
+    if (parserRevision !== PARSER_FINGERPRINT) reasons.push("indexed_parser_revision_unverified");
     return { result, payload, target, freshness, observedHash, reasons, syncState, parserRevision };
   });
   const { result, payload, target, freshness, observedHash, reasons, syncState, parserRevision } = collected.value;
@@ -63,28 +62,36 @@ export function withSymbolEvidence<T extends TextResult>(repo: SeptumRepository,
   if (staleInputs) reasons.push("observed_indexed_inputs_stale");
   if (unavailableInputs) reasons.push("observed_indexed_inputs_unavailable");
   if (collected.skipped.length) reasons.push("source_read_exclusions");
-  const retrieval = {
-    version: 1, operation: query.operation, workspace: root,
+  const leanRetrieval = {
+    operation: query.operation,
     target_id: target ? symbolTargetId(root, target) : null,
-    requested_target_id: query.requested ? symbolTargetId(root, query.requested) : null,
-    freshness, freshness_scope: "selected_declaration_source_only",
-    source_version: target ? { file_path: target.file_path, indexed_hash: target.indexed_content_hash, observed_hash: observedHash } : null,
-    completeness: "partial", analysis_freshness: "unavailable",
-    limits: "Selected source validation does not certify index-derived callers, dependency closure, absence, or runtime execution. Input ID is not a snapshot generation or continuation token.",
-    index: { sync_state: syncState, parser_revision: parserRevision },
-    implementation: { parser_revision: PARSER_REVISION, resolver_revision: RESOLVER_REVISION, collector_revision: SOURCE_READ_REVISION },
-    observed_inputs: { files: collected.inputs.length, paths: collected.observations.paths.length,
-      directories: collected.observations.directories.length, stale_indexed_files: staleInputs,
-      unavailable_indexed_files: unavailableInputs, excluded_files: collected.skipped.length },
+    ...(query.requested ? { requested_target_id: symbolTargetId(root, query.requested) } : {}),
+    freshness,
+    freshness_scope: "selected_declaration_source_only",
+    completeness: "partial",
+    analysis_freshness: "unavailable",
+    source_version: target ? {
+      file_path: target.file_path,
+      indexed_hash: target.indexed_content_hash,
+      observed_hash: observedHash,
+    } : null,
+    ...(staleInputs > 0 || unavailableInputs > 0 ? {
+      observed_inputs: {
+        stale_indexed_files: staleInputs,
+        unavailable_indexed_files: unavailableInputs,
+      },
+    } : {}),
     reasons: [...new Set(reasons)].sort(),
-    input_id: computeContentHash(JSON.stringify({ workspace: root, inputs: collected.inputs.map(({ path, hash }) => ({ path, hash })), observations: collected.observations })),
   };
   if (query.operation === "locate" && payload.found && freshness !== "current") {
     const note = `[SOURCE ${freshness.toUpperCase()}] Indexed coordinates are not validated against current source; synchronize before editing.`;
     payload.summary = `${payload.summary} | ${note}`;
     payload.message = `${payload.message} | ${note}`;
   }
-  const enriched = { ...payload, retrieval };
-  return { ...result, content: [{ ...result.content[0]!, text: JSON.stringify(enriched, null, 2) }, ...result.content.slice(1)],
-    ...("metadata" in result ? { metadata: enriched } : {}) } as T;
+  const enriched = { ...payload, retrieval: leanRetrieval };
+  return {
+    ...result,
+    content: [{ ...result.content[0]!, text: JSON.stringify(enriched, null, 2) }, ...result.content.slice(1)],
+    ...("metadata" in result ? { metadata: enriched } : { metadata: enriched }),
+  } as T;
 }

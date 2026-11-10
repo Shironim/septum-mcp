@@ -44,7 +44,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
     put("src/caller.ts", 'import { submit } from "./submit";\nexport function run() { return submit({ subtotal: 12 }); }\n');
     put("src/import-only.ts", 'import { submit } from "./submit";\nexport const unused = true;\n');
     put("src/decoy.ts", 'export function unrelated() { return "submit validate"; }\n');
-    put("src/unresolved.ts", 'import missing from "./missing";\nexport function pending() {}\n');
+    put("src/unresolved.ts", 'import missing from "./missing";\nexport function pending() { return missing; }\n');
   });
   afterEach(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
 
@@ -166,7 +166,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
     expect(sources.map((i: any) => i.name).sort()).toEqual(["percentage", "surcharge", "tax", "total", "validateLocal"]);
     expect(sources.map((i: any) => i.source.text).join("\n")).not.toContain("emailMarketing");
     expect(result.task_sufficiency).toBe("unknown");
-    expect(result.policy).toBe("referenced-typescript-declarations/v2");
+    expect(result.policy).toBe("referenced-typescript-declarations/v4");
   });
 
   it("respects shadowed bindings and terminates local recursion without reading string decoys", async () => {
@@ -260,11 +260,11 @@ describe("TypeScript selective retrieval manual oracle", () => {
     expect((await tool({ ...base, continuation: fresh.continuation })).status).toBe("stale_continuation");
   });
 
-  it("keeps unresolved imports and incomplete index visible and never cuts oversized declarations", async () => {
+  it("keeps unresolved imports visible and labels oversized source fragments", async () => {
     await pipeline.run(config);
     const unresolved = await tool({ action: "context", query: "pending", file_path: "src/unresolved.ts" });
     expect(unresolved.completeness).toBe("partial");
-    expect(unresolved.items.some((item: any) => item.reason === "import_not_fully_resolved")).toBe(true);
+    expect(unresolved.items.some((item: any) => item.reason === "referenced_import_not_expanded")).toBe(true);
     repo.setMeta("sync_state", "error");
     const incomplete = await tool({ action: "context", query: "submit", file_path: "src/submit.ts" });
     expect(incomplete.completeness).toBe("partial");
@@ -274,8 +274,10 @@ describe("TypeScript selective retrieval manual oracle", () => {
     const args = SymbolToolSchema.parse({ action: "context", query: "huge", budget_bytes: 3500 });
     const result = await handleSymbolTool(repo, config, args, undefined, root);
     const oversized = JSON.parse(result.content[0]!.text);
-    expect(oversized.status).toBe("item_exceeds_budget");
-    expect(oversized.items).toEqual([]);
+    expect(oversized.status).toBe("partial");
+    expect(oversized.items[0].fragment.start_utf16).toBe(0);
+    expect(oversized.items[0].source.text.length).toBeGreaterThan(0);
+    expect(oversized.continuation).toBeString();
     expect(oversized.accounting.omitted_after).toBe(1);
     expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(3500);
   });
@@ -285,10 +287,10 @@ describe("TypeScript selective retrieval manual oracle", () => {
     put("src/other.py", "def other():\n    return 1\n");
     await pipeline.run(config);
     expect((await tool({ action: "context", query: "submit" })).status).toBe("ambiguous");
-    expect((await tool({ action: "context", query: "other", file_path: "src/other.py" })).status).toBe("unsupported");
+    expect((await tool({ action: "context", query: "other", file_path: "src/other.py" })).source_slice.text).toContain("return 1");
     expect((await tool({ action: "context", query: "absent" })).status).toBe("not_found");
     expect((await tool({ action: "context", query: "submit", file_path: "src/submit.ts", continuation: "invalid" })).status).toBe("invalid_continuation");
-    expect(() => SymbolToolSchema.parse({ action: "inspect", query: "submit", budget_bytes: 3500 })).toThrow();
+    expect(SymbolToolSchema.parse({ action: "inspect", query: "submit", budget_bytes: 3500 }).action).toBe("context");
     expect(() => SymbolToolSchema.parse({ action: "context", query: "submit", budget_bytes: 2047 })).toThrow();
   });
 
@@ -383,7 +385,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
   });
 
   it("invalidates continuation when a previously missing dependency appears without a sync", async () => {
-    put("src/unresolved.ts", 'import missing from "./missing";\nexport function pending() {\n  return "' + "x".repeat(400) + '";\n}\n');
+    put("src/unresolved.ts", 'import missing from "./missing";\nexport function pending() {\n  return missing + "' + "x".repeat(400) + '";\n}\n');
     await pipeline.run(config);
     const query = { action: "context" as const, query: "pending", file_path: "src/unresolved.ts" };
     const whole = await tool(query);
@@ -407,6 +409,43 @@ describe("TypeScript selective retrieval manual oracle", () => {
         .rejects.toThrow("Source changed during synchronization:");
       expect(repo.getMeta("sync_state")).toBe("complete"); // A read must not mutate session/index state.
     } finally { intercepted.mockRestore(); }
+  });
+
+  it("makes inspect and context equivalent and preserves explicit bounded and polyglot source", async () => {
+    put("src/python.py", "def python_entry():\n    return 42\n");
+    await pipeline.run(config);
+    const base = { query: "submit", file_path: "src/submit.ts" };
+    const deep = await tool(SymbolToolSchema.parse({ ...base, action: "context" }));
+    expect(await tool(SymbolToolSchema.parse({ ...base, action: "inspect" }))).toEqual(deep);
+    expect(await tool({ ...base, action: "inspect" })).toEqual(deep);
+    expect(deep.items.some((item: any) => item.name === "validate")).toBe(true);
+    for (const action of ["context", "inspect"] as const) {
+      const bounded = await tool(SymbolToolSchema.parse({ ...base, action, source_line_limit: 1 }));
+      expect(bounded.source_slice.text).toBe("export function submit(order: Order) {");
+      expect(bounded.source_slice.truncated).toBe(true);
+      const python = await tool(SymbolToolSchema.parse({ action, query: "python_entry" }));
+      expect(python.source_slice.text).toBe("def python_entry():\n    return 42");
+      expect((await tool({ ...base, action, include_source: true, budget_bytes: 4096 })).status).toBe("invalid_context_options");
+    }
+  });
+
+  it("returns source before provenance and excludes imports used only by unrelated declarations", async () => {
+    put("src/focused.ts", [
+      'import { unused } from "./unrelated";',
+      'import { validate } from "@rules/validator";',
+      'function helper(x: number) { return validate({ subtotal: x }); }',
+      'export function focused(x: number) { return helper(x); }',
+      'export function other() { return unused(); }',
+    ].join("\n"));
+    put("src/unrelated.ts", 'export function unused() { return "not needed for focused"; }');
+    await pipeline.run(config);
+    const result = await tool({ action: "context", query: "focused" });
+    expect(result.items.filter((item: any) => item.kind === "source").map((item: any) => item.name))
+      .toEqual(["focused", "helper", "validate"]);
+    expect(result.items.slice(0, 3).every((item: any) => item.kind === "source")).toBe(true);
+    expect(result.items.filter((item: any) => item.kind === "relationship").map((item: any) => item.relationship.source.statement))
+      .toEqual(['import { validate } from "@rules/validator";']);
+    expect(JSON.stringify(result.items)).not.toContain("unrelated");
   });
 
   it("prioritizes direct value imports over type-only class imports and prunes runtime collaborators of type-only classes", async () => {
@@ -436,9 +475,98 @@ describe("TypeScript selective retrieval manual oracle", () => {
 
     const ctx = await tool(inferred);
     const sourceNames = ctx.items.filter((i: any) => i.kind === "source").map((i: any) => i.name);
-    expect(sourceNames).toEqual(["orchestrate", "stepB", "stepA", "RepoFacade"]);
+    expect(sourceNames).toEqual(["orchestrate", "stepB", "stepA"]);
     expect(sourceNames).not.toContain("HeavyCollaborator");
-    expect(ctx.items.some((i: any) => i.kind === "diagnostic" && i.reason === "type_only_class_runtime_import_not_expanded")).toBe(true);
+    const contract = ctx.items.find((i: any) => i.kind === "type_contract");
+    expect(contract.name).toBe("RepoFacade");
+    expect(contract.projection).toBe("public_instance_signatures");
+    expect(contract.text).toContain("run(): unknown;");
+    expect(contract.text).not.toContain("HeavyCollaborator");
+    expect(contract.text).not.toContain("collab");
+    expect(ctx.items.some((i: any) => i.reason === "type_only_class_bodies_omitted")).toBe(true);
     expect(ctx.completeness).toBe("partial");
+  });
+
+  it("propagates literal option objects through forwarding calls and keeps unknown and conflicting branches", async () => {
+    put("src/choice.ts", 'import { expensive } from "./expensive";\nimport { normal } from "./normal";\nexport function choose(options?: { domainOnly?: boolean }) { let path = "src"; path = String(path); if (options?.domainOnly) { return expensive(); } else { return normal(); } }');
+    put("src/forward.ts", 'import { choose } from "./choice";\nexport function forward(options?: { domainOnly?: boolean }) { return choose(options); }');
+    put("src/expensive.ts", 'export function expensive() { return "domain detection"; }');
+    put("src/normal.ts", 'export function normal() { return "ordinary files"; }');
+    put("src/entries.ts", 'import { forward } from "./forward";\nexport function fixed() { return forward({}); }\nexport function dynamic(options: { domainOnly?: boolean }) { return forward(options); }\nexport function both() { return [forward({}), forward({ domainOnly: true })]; }');
+    await pipeline.run(config);
+    const fixed = await tool({ action: "context", query: "fixed", budget_bytes: 65536 });
+    expect(fixed.items.filter((i: any) => i.kind === "source").map((i: any) => i.name).sort()).toEqual(["choose", "fixed", "forward", "normal"]);
+    expect(fixed.items.some((i: any) => i.kind === "selection" && i.pruned_branches === 1)).toBe(true);
+    for (const query of ["dynamic", "both"]) {
+      const ctx = await tool({ action: "context", query, budget_bytes: 65536 });
+      const names = ctx.items.filter((i: any) => i.kind === "source").map((i: any) => i.name);
+      expect(names).toContain("expensive");
+      expect(names).toContain("normal");
+      expect(new Set(names).size).toBe(names.length);
+    }
+  });
+
+  it("keeps type-only signature dependencies projected even when their imports use value syntax", async () => {
+    put("src/dependency.ts", 'export class Dependency { read(id: string): number { return Number(id); } private hidden() { return "not a contract"; } }');
+    put("src/facade.ts", 'import { Dependency } from "./dependency";\nexport class Facade { constructor(public readonly dependency: Dependency) {} async run(id: string): Promise<number> { return this.dependency.read(id); } }');
+    put("src/use-facade.ts", 'import type { Facade } from "./facade";\nexport function useFacade(facade: Facade) { return Boolean(facade); }');
+    await pipeline.run(config);
+    const ctx = await tool({ action: "context", query: "useFacade", budget_bytes: 65536 });
+    const contracts = ctx.items.filter((i: any) => i.kind === "type_contract");
+    expect(contracts.map((i: any) => i.name)).toEqual(["Facade", "Dependency"]);
+    expect(contracts[0].text).toContain("readonly dependency: Dependency;");
+    expect(contracts[0].text).toContain("run(id: string): Promise<number>;");
+    expect(contracts[1].text).toContain("read(id: string): number;");
+    expect(JSON.stringify(contracts)).not.toContain("Number(id)");
+    expect(JSON.stringify(contracts)).not.toContain("hidden");
+    expect(ctx.items.filter((i: any) => i.kind === "source").map((i: any) => i.name)).toEqual(["useFacade"]);
+  });
+
+  it("does not prune mutable, escaping, spread, callback, or effectful argument contexts", async () => {
+    put("src/conditional.ts", 'import { expensive } from "./expensive";\nexport function conditional(opts: { enabled?: boolean }) { if (opts.enabled) return expensive(); return 0; }\nexport function mutated(opts: { enabled?: boolean }) { const alias = opts; alias.enabled = true; if (opts.enabled) return expensive(); return 0; }\nexport function escaped(opts: { enabled?: boolean }) { mutate(opts); if (opts.enabled) return expensive(); return 0; }\nexport function closure(opts: { enabled?: boolean }) { const leak = () => opts; register(leak); if (opts.enabled) return expensive(); return 0; }\nexport function constructed(opts: { enabled?: boolean }) { new Mutator(opts); if (opts.enabled) return expensive(); return 0; }\nexport function unrelated(opts: { enabled?: boolean }) { consume({ name: "x" }); if (opts.enabled) return expensive(); return 0; }');
+    put("src/expensive.ts", 'export function expensive() { return "required if unknown"; }');
+    put("src/entries.ts", 'import { conditional, mutated, escaped, closure, constructed, unrelated } from "./conditional";\nexport function mutation() { return mutated({}); }\nexport function escape() { return escaped({}); }\nexport function spread(x: object) { return conditional({ ...x }); }\nexport function callback() { return [conditional({}), invoke(conditional)]; }\nexport function effect() { const opts = {}; return conditional((mutate(opts), opts)); }\nexport function capture() { return closure({}); }\nexport function constructorEscape() { return constructed({}); }\nexport function shared() { const opts = {}; const iterator = conditional(opts); opts.enabled = true; return iterator; }\nexport function isolated() { return unrelated({}); }');
+    await pipeline.run(config);
+    for (const query of ["mutation", "escape", "spread", "callback", "effect", "capture", "constructorEscape", "shared"]) {
+      const ctx = await tool({ action: "context", query, budget_bytes: 65536 });
+      expect(ctx.items.filter((i: any) => i.kind === "source").map((i: any) => i.name)).toContain("expensive");
+    }
+    const isolated = await tool({ action: "context", query: "isolated", budget_bytes: 65536 });
+    expect(isolated.items.filter((i: any) => i.kind === "source").map((i: any) => i.name)).not.toContain("expensive");
+  });
+
+  it("pages a large CRLF Unicode declaration without loss, then reaches later helpers at the same budget", async () => {
+    const large = 'export function large() {\r\n  return "' + "😀".repeat(2500) + '";\r\n}';
+    put("src/large.ts", large + '\r\nexport function small() { return 7; }');
+    put("src/entry-large.ts", 'import { large, small } from "./large";\nexport function entryLarge() { return [large(), small()]; }');
+    await pipeline.run(config);
+    const base = { action: "context" as const, query: "entryLarge", budget_bytes: 4096 };
+    const pieces: string[] = [];
+    const names: string[] = [];
+    let continuation: string | undefined;
+    let snapshot: string | undefined;
+    let count = 0;
+    do {
+      const result = await handleSymbolTool(repo, config, { ...base, continuation }, undefined, root);
+      const page = JSON.parse(result.content[0]!.text);
+      expect(["partial", "success"]).toContain(page.status);
+      if (page.accounting.source_offset > 0) expect(page.completeness).toBe("partial");
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(base.budget_bytes);
+      snapshot ??= page.snapshot_id;
+      expect(page.snapshot_id).toBe(snapshot);
+      for (const item of page.items) if (item.kind === "source") {
+        names.push(item.name);
+        if (item.name === "large") {
+          expect(item.fragment.start_utf16).toBe(pieces.join("").length);
+          expect(item.source.text).not.toContain("\ufffd");
+          pieces.push(item.source.text);
+        }
+      }
+      continuation = page.continuation;
+      expect(++count).toBeLessThan(40);
+    } while (continuation);
+    expect(pieces.join("")).toBe(large);
+    expect(names).toContain("small");
+    expect(pieces.length).toBeGreaterThan(1);
   });
 });

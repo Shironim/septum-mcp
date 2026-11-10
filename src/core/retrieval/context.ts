@@ -1,17 +1,17 @@
 import ts from "typescript";
-import { bindContextFile } from "./typescript-references.ts";
+import { bindContextFile, type ContextValue } from "./typescript-references.ts";
 import { resolve } from "node:path";
 import type { SeptumRepository } from "../database/repository.ts";
 import type { ValidatedSeptumConfig } from "../config/schema.ts";
 import type { ImportRelationship, SymbolReference } from "../../types/index.ts";
 import { computeContentHash } from "../ingestion/hasher.ts";
-import { PARSER_REVISION } from "../parser/language-capabilities.ts";
+import { PARSER_FINGERPRINT } from "../parser/language-capabilities.ts";
 import { RESOLVER_REVISION } from "../resolver/import-resolver.ts";
 import { assertPathContained } from "../resolver/path-resolver.ts";
 import { collectSourceSkips, readSourceFile, SOURCE_READ_REVISION } from "../resources/source-files.ts";
 import { symbolTargetId } from "./symbol-evidence.ts";
 
-export const CONTEXT_POLICY = "referenced-typescript-declarations/v2";
+export const CONTEXT_POLICY = "referenced-typescript-declarations/v4";
 export const MIN_CONTEXT_BUDGET = 2048;
 export const MAX_CONTEXT_BUDGET = 2 * 1024 * 1024;
 const MAX_ITEMS = 256;
@@ -31,9 +31,13 @@ type SourceItem = {
   name: string;
   reason: "target_implementation" | "direct_import_declaration" | "local_dependency";
   source: { file_path: string; indexed_content_hash: string; start_line: number; end_line: number; text: string };
+  fragment?: { start_utf16: number; end_utf16: number; total_utf16: number; declaration_start_line: number; declaration_end_line: number };
 };
 type DiagnosticItem = { kind: "diagnostic"; reason: string; file_path?: string; detail?: string };
-type ContextItem = SourceItem | DiagnosticItem | { kind: "relationship"; reason: "target_file_import"; relationship: ImportRelationship };
+type ContextItem = SourceItem | DiagnosticItem | { kind: "relationship"; reason: "target_file_import"; relationship: ImportRelationship } |
+  { kind: "type_contract"; name: string; file_path: string; indexed_content_hash: string; start_line: number; end_line: number;
+    projection: "public_instance_signatures"; text: string; inferred_types: "unknown" | "explicit"; fragment?: SourceItem["fragment"] } |
+  { kind: "selection"; reason: "known_call_arguments"; file_path: string; start_line: number; arguments: ContextValue[]; pruned_branches: number };
 
 function response(payload: object) {
   return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
@@ -59,33 +63,18 @@ function canonical(value: unknown): unknown {
 }
 function digest(value: unknown) { return computeContentHash(JSON.stringify(canonical(value))); }
 
-// Conservative identity until a publication revision covers every writer.
-// Compare actual facts, excluding insertion IDs and timestamps.
-function indexIdentity(repo: SeptumRepository) {
-  const domains = repo.getAllDomains();
-  return digest({
-    files: repo.getAllFiles().map(file => ({ path: file.path, hash: file.content_hash,
-      domain: domains.find(domain => domain.id === file.domain_id)?.name,
-      symbols: repo.getSymbolsByFileId(file.id).map(({ id, file_id, ...symbol }) => symbol)
-        .sort((a, b) => JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b)))),
-    })).sort((a, b) => a.path.localeCompare(b.path)),
-    domains: domains.map(({ id, created_at, updated_at, ...domain }) => domain).sort((a, b) => a.name.localeCompare(b.name)),
-    dependencies: repo.getAllDependenciesWithDomains().sort((a, b) => JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b)))),
-    state: repo.getMeta("sync_state"), parser: repo.getMeta("parser_revision"),
-  });
-}
 
 /** Read-only context for a bounded import policy; no complete call graph claim. */
 export async function retrieveContext(repo: SeptumRepository, config: ValidatedSeptumConfig, query: ContextQuery, workspaceRoot: string, signal?: AbortSignal) {
   signal?.throwIfAborted();
-  const budget = query.budget_bytes ?? 64 * 1024;
+  const budget = query.budget_bytes ?? 16 * 1024;
   if (!Number.isInteger(budget) || budget < MIN_CONTEXT_BUDGET || budget > MAX_CONTEXT_BUDGET) {
     return response({ status: "invalid_budget", minimum_budget_bytes: MIN_CONTEXT_BUDGET, maximum_budget_bytes: MAX_CONTEXT_BUDGET });
   }
   const root = resolve(workspaceRoot);
   const name = (query.symbol_ref?.name || query.symbol || query.query || "").trim();
   if (!name) return response({ status: "invalid_query", message: "Choose a target with query, symbol or symbol_ref." });
-  const initialIndex = indexIdentity(repo);
+  const initialIndex = repo.getIndexIdentity();
   if (query.symbol_ref && repo.getFileByPath(query.symbol_ref.file_path)?.content_hash !== query.symbol_ref.indexed_content_hash) {
     return response({ status: "stale_reference", message: "Locate the target again before retrieving context." });
   }
@@ -100,13 +89,14 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
     return response({ status: "unsupported", capability: "TypeScript static imports and indexed declarations", message: "Use locate/inspect/impact for other languages." });
   }
   const queryId = digest({ root, target: target.symbol_ref, policy: CONTEXT_POLICY, domain: query.domain ?? null,
-    budget, parser: PARSER_REVISION, resolver: RESOLVER_REVISION, reads: SOURCE_READ_REVISION, config });
-  let cursor: { query: string; snapshot: string; offset: number } | undefined;
+    budget, parser: PARSER_FINGERPRINT, resolver: RESOLVER_REVISION, reads: SOURCE_READ_REVISION, config });
+  let cursor: { query: string; snapshot: string; offset: number; source_offset?: number } | undefined;
   if (query.continuation) {
     try {
       cursor = JSON.parse(Buffer.from(query.continuation, "base64url").toString("utf8"));
       if (!cursor || cursor.query !== queryId || typeof cursor.snapshot !== "string" ||
-        !Number.isSafeInteger(cursor.offset) || cursor.offset < 0) throw new Error("invalid");
+        !Number.isSafeInteger(cursor.offset) || cursor.offset < 0 ||
+        cursor.source_offset !== undefined && (!Number.isSafeInteger(cursor.source_offset) || cursor.source_offset < 0)) throw new Error("invalid");
     } catch { return response({ status: "invalid_continuation", message: "Continuation must match the target, workspace, policy and budget; restart retrieval." }); }
   }
   let freshness: "current" | "stale" | "unavailable" = "current";
@@ -155,7 +145,10 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
     if (source === undefined) return items;
     addSource(target.file_path, source, target, "target_implementation");
     const relationships = repo.getImportRelationships(root);
+    const referencedEdges = new Set<ImportRelationship>();
     const visited = new Set<string>();
+    const emitted = new Set<string>();
+    const variants = new Map<string, Set<string>>();
     const files = new Map<string, { text: string; bound: ReturnType<typeof bindContextFile> }>();
     const load = (path: string) => {
       if (files.has(path)) return files.get(path);
@@ -170,13 +163,6 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
       const bound = bindContextFile(path, text);
       const value = { text, bound }; files.set(path, value);
       if (bound.hasErrors) addDiagnostic("typescript_syntax_errors", path);
-      if (path === target.file_path) {
-        for (const edge of relationships.filter(e => e.source.file === path)) {
-          add({ kind: "relationship", reason: "target_file_import", relationship: edge });
-          if (edge.freshness !== "current" || (edge.resolution.status !== "resolved" && edge.resolution.status !== "external") || edge.resolution.coverage === "conditional")
-            addDiagnostic("import_not_fully_resolved", path, `${edge.resolution.source.target}: ${edge.resolution.reason}`);
-        }
-      }
       // Initializers and decorators can execute independently of references.
       // Retain relationships and explicitly decline module-execution closure.
       if (bound.source.statements.some(node => ts.isImportDeclaration(node) && !node.importClause))
@@ -200,57 +186,83 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
       }
       return false;
     };
-    type QueuedNode = { path: string; node: ts.Node; depth: number; reason: SourceItem["reason"]; typeOnlyClass: boolean };
+    type QueuedNode = { path: string; node: ts.Node; depth: number; reason: SourceItem["reason"]; typeOnlyClass: boolean; arguments?: ContextValue[] };
     const expansionQueue: QueuedNode[] = [];
-    const enqueueNode = (path: string, node: ts.Node, depth: number, reason: SourceItem["reason"], typeOnlyClass = false) => {
-      const key = `${path}:${node.pos}:${node.end}`;
+    const enqueueNode = (path: string, node: ts.Node, depth: number, reason: SourceItem["reason"], typeOnlyClass = false, argumentFacts?: ContextValue[]) => {
+      const declarationKey = `${path}:${node.pos}:${node.end}:${typeOnlyClass}`;
+      const seen = variants.get(declarationKey) ?? new Set<string>();
+      if (seen.size >= 4) argumentFacts = undefined;
+      const variant = JSON.stringify(argumentFacts ?? null);
+      seen.add(variant); variants.set(declarationKey, seen);
+      const key = `${declarationKey}:${variant}`;
       if (visited.has(key)) return;
       visited.add(key);
       if (items.length >= MAX_ITEMS) { capacityOmissions++; incomplete = true; return; }
       const file = load(path);
       if (!file) return;
-      if (reason !== "target_implementation") {
+      if (reason === "target_implementation") emitted.add(declarationKey);
+      if (reason !== "target_implementation" && !emitted.has(declarationKey)) {
+        emitted.add(declarationKey);
         const start = file.bound.source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
         const end = file.bound.source.getLineAndCharacterOfPosition(node.end).line + 1;
         const indexed = repo.getSymbolsByFileId(repo.getFileByPath(path)!.id).find(s => s.line_start >= start && s.line_end <= end);
         const name = indexed?.name ?? ("name" in node ? (node as ts.NamedDeclaration).name?.getText(file.bound.source) : undefined) ?? "local_declaration";
-        addSource(path, file.text, { name, line_start: start, line_end: end }, reason);
+        if (typeOnlyClass && ts.isClassDeclaration(node)) {
+          const contract = file.bound.contract(node);
+          add({ kind: "type_contract", name, file_path: path, indexed_content_hash: repo.getFileByPath(path)!.content_hash,
+            start_line: start, end_line: end, projection: "public_instance_signatures", text: contract.text,
+            inferred_types: contract.inferred ? "unknown" : "explicit" });
+          addDiagnostic("type_only_class_bodies_omitted", path, "Instance signature projection; constructors, private/static members, bodies and initializers omitted. Inferred types use unknown.");
+        } else addSource(path, file.text, { name, line_start: start, line_end: end }, reason);
       }
-      expansionQueue.push({ path, node, depth, reason, typeOnlyClass });
+      expansionQueue.push({ path, node, depth, reason, typeOnlyClass, arguments: argumentFacts });
     };
     const expandReferences = async (entry: QueuedNode) => {
       signal?.throwIfAborted();
       const file = load(entry.path);
       if (!file) return;
-      const refs = file.bound.references(entry.node);
+      const startLine = file.bound.source.getLineAndCharacterOfPosition(entry.node.getStart()).line + 1;
+      const endLine = file.bound.source.getLineAndCharacterOfPosition(entry.node.end).line + 1;
+      for (const edge of relationships.filter(edge => !entry.typeOnlyClass && edge.source.file === entry.path &&
+        edge.source.line >= startLine && edge.source.line <= endLine)) {
+        if (entry.path === target.file_path) referencedEdges.add(edge);
+        if (edge.freshness !== "current" || (edge.resolution.status !== "resolved" && edge.resolution.status !== "external") || edge.resolution.coverage === "conditional")
+          addDiagnostic("import_not_fully_resolved", entry.path, `${edge.resolution.source.target}: ${edge.resolution.reason}`);
+      }
+      const signatureNodes = entry.typeOnlyClass && ts.isClassDeclaration(entry.node) ? file.bound.contract(entry.node).signatures : undefined;
+      const refs = file.bound.references(entry.node, entry.arguments, signatureNodes);
+      if (refs.prunedBranches && entry.arguments) add({ kind: "selection", reason: "known_call_arguments", file_path: entry.path,
+        start_line: startLine, arguments: entry.arguments, pruned_branches: refs.prunedBranches });
       for (const local of refs.locals) {
+        const calls = refs.escapes.has(local) ? [] : refs.calls.filter(call => call.target === local);
         if (entry.depth === 0) {
           // For the target file (depth 0), emit and expand local helpers immediately before cross-file imports
           const prevLen = expansionQueue.length;
-          enqueueNode(entry.path, local, 0, "local_dependency", entry.typeOnlyClass);
+          if (calls.length) for (const call of calls) enqueueNode(entry.path, local, 0, "local_dependency", false, call.arguments);
+          else enqueueNode(entry.path, local, 0, "local_dependency", entry.typeOnlyClass);
           while (expansionQueue.length > prevLen) {
             const localEntry = expansionQueue.pop()!;
             await expandReferences(localEntry);
           }
         } else {
-          enqueueNode(entry.path, local, entry.depth, "local_dependency", entry.typeOnlyClass);
+          if (calls.length) for (const call of calls) enqueueNode(entry.path, local, entry.depth, "local_dependency", false, call.arguments);
+          else enqueueNode(entry.path, local, entry.depth, "local_dependency", entry.typeOnlyClass);
         }
       }
       const deferredTypeOnlyClassImports: Array<{ dependencyPath: string; effectiveNames: string[]; depth: number }> = [];
       for (const [declaration, names] of refs.imports) {
         const sortedNames = [...names].sort();
         const typeOnlyByName = new Map<string, boolean>();
-        for (const n of sortedNames) typeOnlyByName.set(n, isTypeOnlyImportBinding(declaration, n));
-        if (entry.typeOnlyClass && sortedNames.every(n => !typeOnlyByName.get(n))) {
-          unexpandedFiles++; addDiagnostic("type_only_class_runtime_import_not_expanded", entry.path, declaration.getText()); continue;
-        }
-        const effectiveNames = entry.typeOnlyClass ? sortedNames.filter(n => typeOnlyByName.get(n)) : sortedNames;
+        for (const n of sortedNames) typeOnlyByName.set(n, entry.typeOnlyClass || isTypeOnlyImportBinding(declaration, n));
+        const effectiveNames = sortedNames;
         const line = file.bound.source.getLineAndCharacterOfPosition(declaration.getStart()).line + 1;
         const moduleName = ts.isStringLiteral(declaration.moduleSpecifier) ? declaration.moduleSpecifier.text : undefined;
         const edge = relationships.find(e => e.source.file === entry.path && e.source.line === line &&
           e.resolution.source.target === moduleName);
+        if (edge && entry.path === target.file_path) referencedEdges.add(edge);
         if (!edge || edge.freshness !== "current" || edge.resolution.status !== "resolved" || edge.resolution.coverage === "conditional") {
-          addDiagnostic("referenced_import_not_expanded", entry.path, declaration.getText()); continue;
+          addDiagnostic("referenced_import_not_expanded", entry.path,
+            `${declaration.getText()}: ${edge?.resolution.reason ?? "relationship_not_found"}`); continue;
         }
         const paths = [...new Set(edge.resolution.targets.flatMap(t => t.files))];
         if (entry.depth >= 3 || paths.length !== 1 || names.has("*")) {
@@ -272,7 +284,10 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
           const selected = dependency.bound.exported(name);
           if (!selected) { addDiagnostic("export_binding_not_resolved", dependencyPath, name); continue; }
           const nextTypeOnlyClass = Boolean(typeOnlyByName.get(name)) && ts.isClassDeclaration(selected);
-          enqueueNode(dependencyPath, selected, entry.depth + 1, "direct_import_declaration", nextTypeOnlyClass);
+          const calls = refs.escapes.has(declaration) ? [] : refs.calls.filter(call => call.target === declaration && call.name === name);
+          if (calls.length && !nextTypeOnlyClass) for (const call of calls)
+            enqueueNode(dependencyPath, selected, entry.depth + 1, "direct_import_declaration", false, call.arguments);
+          else enqueueNode(dependencyPath, selected, entry.depth + 1, "direct_import_declaration", nextTypeOnlyClass);
         }
       }
       for (const deferred of deferredTypeOnlyClassImports) {
@@ -298,10 +313,13 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
       }
     }
     else addDiagnostic("target_ast_declaration_not_found", target.file_path);
+    // Source precedes provenance so file-level import records cannot crowd out helpers.
+    items.sort((a, b) => Number(b.kind === "source") - Number(a.kind === "source"));
+    for (const edge of referencedEdges) add({ kind: "relationship", reason: "target_file_import", relationship: edge });
     return items;
   });
   signal?.throwIfAborted();
-  if (indexIdentity(repo) !== initialIndex) return response({ status: "index_changed", message: "Index changed during context analysis; retry retrieval." });
+  if (repo.getIndexIdentity() !== initialIndex) return response({ status: "index_changed", message: "Index changed during context analysis; retry retrieval." });
   // Negative resolution can change when an unindexed file appears. Observed file
   // reads alone cannot capture that; bind the resolved selection and diagnostics too.
   const snapshot = digest({ index: initialIndex, inputs: collected.inputs.map(({ path, hash }) => ({ path, hash })), observations: collected.observations, selection: collected.value });
@@ -309,35 +327,75 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
     return response({ status: "stale_continuation", message: "Input/index identity changed or the page is invalid; restart retrieval." });
   }
   const start = cursor?.offset ?? 0;
+  const sourceOffset = cursor?.source_offset ?? 0;
   const all = collected.value;
-  const envelope = (items: ContextItem[], end: number) => ({
-    status: incomplete || end < all.length || start > 0 ? "partial" : "success", policy: CONTEXT_POLICY, workspace: root, target: target.symbol_ref,
+  const current = all[start];
+  const currentText = current?.kind === "source" ? current.source.text : current?.kind === "type_contract" ? current.text : undefined;
+  if (sourceOffset && (currentText === undefined || sourceOffset >= currentText.length ||
+    currentText.charCodeAt(sourceOffset - 1) >= 0xd800 && currentText.charCodeAt(sourceOffset - 1) <= 0xdbff ||
+    currentText[sourceOffset - 1] === "\r" && currentText[sourceOffset] === "\n"))
+    return response({ status: "invalid_continuation", message: "Source fragment offset is outside the selected declaration." });
+  const envelope = (items: ContextItem[], end: number, nextSourceOffset = 0) => ({
+    status: incomplete || end < all.length || start > 0 || sourceOffset > 0 ? "partial" : "success", policy: CONTEXT_POLICY, workspace: root, target: target.symbol_ref,
     target_id: symbolTargetId(root, target.symbol_ref),
     query_id: queryId, snapshot_id: snapshot, freshness,
     freshness_scope: "returned source hashes checked against index during response preparation",
-    completeness: incomplete || end < all.length || start > 0 ? "partial" : "complete",
+    completeness: incomplete || end < all.length || start > 0 || sourceOffset > 0 ? "partial" : "complete",
     completeness_scope: "target and bound local/referenced declarations in directly imported TypeScript files and up to three import edges",
-    capability_limits: "Static references, not calls or runtime execution. Namespace imports, reexports and module execution may need further context. Dynamic/runtime dependencies and business requirements are not covered. Identity covers observed reads and resolver probes; filesystem is not an atomic snapshot.",
+    capability_limits: "static references, not calls",
     task_sufficiency: "unknown",
-    parser_revision: PARSER_REVISION, resolver_revision: RESOLVER_REVISION,
     input_count: collected.inputs.length, selected_source_bytes_read: sourceBytes,
-    observed_path_count: collected.observations.paths.length, observed_directory_count: collected.observations.directories.length,
-    resolution_scope: "workspace relationships; selection follows bound references", dependency_depth: 3, items,
+    dependency_depth: 3, items,
     accounting: { total: all.length, returned: items.length, offset: start, omitted_before: start,
-      omitted_after: all.length - end, omitted_by_capacity: capacityOmissions, unexpanded_dependency_files: unexpandedFiles },
-    ...(end < all.length && end > start ? { continuation: Buffer.from(JSON.stringify({ query: queryId, snapshot, offset: end })).toString("base64url") } : {}),
-    budget_bytes: budget, budget_unit: "UTF-8 bytes of serialized MCP tool result",
+      omitted_after: all.length - end, source_offset: sourceOffset, next_source_offset: nextSourceOffset,
+      omitted_by_capacity: capacityOmissions, unexpanded_dependency_files: unexpandedFiles },
+    ...(end < all.length && (end > start || nextSourceOffset > sourceOffset) ? { continuation: Buffer.from(JSON.stringify({ query: queryId, snapshot, offset: end,
+      ...(nextSourceOffset ? { source_offset: nextSourceOffset } : {}) })).toString("base64url") } : {}),
+    budget_bytes: budget,
   });
   let end = start;
+  const page: ContextItem[] = [];
   let result = budgetedResponse(envelope([], start), budget);
   for (; end < all.length; end++) {
-    const next = budgetedResponse(envelope(all.slice(start, end + 1), end + 1), budget);
-    if (JSON.parse(next.content[0]!.text).status === "budget_too_small") break;
+    const item = all[end]!;
+    const offset = end === start ? sourceOffset : 0;
+    const text = item.kind === "source" ? item.source.text : item.kind === "type_contract" ? item.text : undefined;
+    const fragment = (stop: number): ContextItem => {
+      if (text === undefined || (item.kind !== "source" && item.kind !== "type_contract")) return item;
+      const location = item.kind === "source" ? item.source : item;
+      const portion = text.slice(offset, stop);
+      const identity = { start_utf16: offset, end_utf16: stop, total_utf16: text.length,
+        declaration_start_line: location.start_line, declaration_end_line: location.end_line };
+      if (item.kind === "type_contract") return { ...item, text: portion, fragment: identity };
+      const line = item.source.start_line + (text.slice(0, offset).match(/\r\n|\r|\n/g)?.length ?? 0);
+      const lastLine = line + (portion.match(/\r\n|\r|\n/g)?.length ?? 0) - (/\r\n$|[\r\n]$/.test(portion) ? 1 : 0);
+      return { ...item, source: { ...item.source, text: portion, start_line: line, end_line: Math.max(line, lastLine) }, fragment: identity };
+    };
+    const whole = offset ? fragment(text!.length) : item;
+    const next = budgetedResponse(envelope([...page, whole], end + 1), budget);
+    if (JSON.parse(next.content[0]!.text).status === "budget_too_small") {
+      if (text !== undefined) {
+        let low = offset + 1, high = text.length - 1;
+        while (low <= high) {
+          const middle = Math.floor((low + high) / 2);
+          let stop = middle;
+          // Keep UTF-16 surrogate pairs and CRLF boundaries intact.
+          if (stop > offset && ((text.charCodeAt(stop - 1) >= 0xd800 && text.charCodeAt(stop - 1) <= 0xdbff) || text[stop - 1] === "\r" && text[stop] === "\n")) stop--;
+          if (stop === offset && offset + 2 < text.length) stop = offset + 2;
+          const partial = stop > offset ? budgetedResponse(envelope([...page, fragment(stop)], end, stop), budget) : undefined;
+          if (partial && JSON.parse(partial.content[0]!.text).status !== "budget_too_small") {
+            result = partial; low = middle + 1;
+          } else high = middle - 1;
+        }
+      }
+      break;
+    }
+    page.push(whole);
     result = next;
   }
-  if (end === start && all.length > start) {
-    return budgetedResponse({ ...envelope([], start), status: "item_exceeds_budget", completeness: "partial",
-      message: "The next whole declaration or diagnostic does not fit; retry with a larger budget or use inspect with bounded source lines. No source was silently cut." }, budget);
+  if (end === start && all.length > start && !JSON.parse(result.content[0]!.text).continuation) {
+    return budgetedResponse({ ...envelope([], start), status: "budget_too_small", completeness: "partial",
+      message: "Response metadata and the next item fragment do not fit. Increase budget_bytes; no source was silently omitted." }, budget);
   }
   return result;
 }

@@ -26,7 +26,9 @@ describe("symbol retrieval evidence parity", () => {
   });
   afterEach(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
   async function tool(args: Record<string, unknown>, jit?: IngestionPipeline) {
-    return JSON.parse((await handleSymbolTool(repo, config, SymbolToolSchema.parse(args), jit, root)).content[0]!.text);
+    return JSON.parse((await handleSymbolTool(repo, config, SymbolToolSchema.parse({
+      ...(args.action === "inspect" ? { include_source: true } : {}), ...args,
+    }), jit, root)).content[0]!.text);
   }
 
   it("shares one content-bound target identity across locate, inspect, impact and context", async () => {

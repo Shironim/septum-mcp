@@ -30,13 +30,13 @@ def run(binary):
             tools = session.request('tools/list', {})['tools']
             assert len(tools) == 5
             for name, directory in corpus['domains'].items():
-                session.tool('septum_domain', {'action': 'register', 'domain': name, 'root': directory, 'ingest_now': False})
-            session.tool('septum_domain', {'action': 'register', 'domain': 'app', 'root': 'app', 'ingest_now': True})
-            macro = session.tool('septum_domain', {'action': 'catalog'})
+                session.tool('septum_map', {'action': 'register', 'domain': name, 'root': directory, 'ingest_now': False})
+            session.tool('septum_map', {'action': 'register', 'domain': 'app', 'root': 'app', 'ingest_now': True})
+            macro = session.tool('septum_map', {'action': 'catalog'})
             actual = set()
             relationships = []
             for domain in corpus['domains']:
-                catalog = session.tool('septum_domain', {'action': 'catalog', 'domain': domain, 'detail_level': 'full'})
+                catalog = session.tool('septum_map', {'action': 'catalog', 'domain': domain, 'detail_level': 'full'})
                 relationships += catalog.get('relationships', [])
                 for edge in catalog.get('relationships', []):
                     if edge['resolution']['status'] == 'resolved':
@@ -65,7 +65,7 @@ def run(binary):
             route = session.tool('septum_slice', {'query': corpus['route']})
             checks['scoped_ast_route'] = route.get('found') is True and route.get('entrypoint', {}).get('uri') == '/one/items'
             (root / 'app/unknown.kt').write_text('class Unsupported')
-            session.tool('septum_domain', {'action': 'register', 'domain': 'app', 'root': 'app', 'ingest_now': True})
+            session.tool('septum_map', {'action': 'register', 'domain': 'app', 'root': 'app', 'ingest_now': True})
             partial = session.tool('septum_boundary', {'scope': 'file', 'file_path': 'app/unknown.kt'})
             checks['partial_index_not_approved'] = partial.get('status') == 'unknown'
             metrics = session.metrics()

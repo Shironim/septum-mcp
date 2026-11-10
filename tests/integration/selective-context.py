@@ -89,16 +89,22 @@ def run(command, root):
 
     try:
         listing = request('tools/list', {})
+        assert {tool['name'] for tool in listing['tools']} == {
+            'septum_map', 'septum_symbol', 'septum_slice', 'septum_boundary'}
+        for retired in ['septum_domain', 'septum_feature']:
+            rejected = request('tools/call', {'name': retired, 'arguments': {'workspace_path': str(root)}})
+            assert rejected.get('isError'), rejected
         symbol_schema = next(tool for tool in listing['tools'] if tool['name'] == 'septum_symbol')['inputSchema']
         assert 'context' in symbol_schema['properties']['action']['enum']
         assert symbol_schema['properties']['budget_bytes']['minimum'] == 2048
+        assert symbol_schema['properties']['budget_bytes']['default'] == 16384
+        assert 'default' not in symbol_schema['properties']['source_line_limit']
         # Assert analytical payloads through real MCP transport for every tool.
-        # A not_found slice and feature prompt are deliberate negative contracts.
+        # A not_found slice is a deliberate negative contract.
         probes = [
-            ('septum_domain', {'action': 'catalog', 'detail_level': 'full'}, {'domains', 'index_status'}),
+            ('septum_map', {'action': 'catalog', 'detail_level': 'full'}, {'domains', 'index_status'}),
             ('septum_slice', {'query': 'GET /absent'}, {'chain', 'found', 'relationship_limits'}),
             ('septum_boundary', {'scope': 'all'}, {'violations', 'total_violations'}),
-            ('septum_feature', {'action': 'get'}, {'available_features', 'instructions'}),
         ]
         for name, arguments, required in probes:
             result = request('tools/call', {'name': name, 'arguments': {**arguments, 'workspace_path': str(root)}})
@@ -114,6 +120,9 @@ def run(command, root):
         assert [edge['source']['file'] for edge in impact['import_dependents']] == ['src/caller.ts', 'src/import-only.ts']
         assert impact['inbound_callers_complete'] is False
         full = tool({'action': 'context', 'symbol_ref': reference})
+        assert tool({'action': 'inspect', 'symbol_ref': reference}) == full
+        bounded = tool({'action': 'context', 'symbol_ref': reference, 'source_line_limit': 1})
+        assert bounded['source_slice']['text'] == 'export function submit(order: Order) {'
         for payload in [located, inspected, impact]:
             evidence = payload['retrieval']
             assert evidence['target_id'] == full['target_id']
@@ -125,7 +134,7 @@ def run(command, root):
             ('submit', 'src/target.ts'), ('Order', 'src/contract.ts'), ('validate', 'src/validator.ts')]
         assert full['freshness'] == 'current' and full['completeness'] == 'complete'
         arithmetic = tool({'action': 'context', 'query': 'total', 'file_path': 'src/order.ts'})
-        assert arithmetic['policy'] == 'referenced-typescript-declarations/v2'
+        assert arithmetic['policy'] == 'referenced-typescript-declarations/v4'
         assert arithmetic['task_sufficiency'] == 'unknown'
         assert sorted(item['name'] for item in arithmetic['items'] if item['kind'] == 'source') == [
             'percentage', 'surcharge', 'tax', 'total', 'validateLocal']
@@ -145,6 +154,9 @@ def run(command, root):
             pages += 1
             assert pages <= 16
         assert items == full['items']
+        for action in ['inspect', 'context']:
+            details = tool({'action': action, 'symbol_ref': reference, 'include_source': False})
+            assert 'source_slice' not in details and 'items' not in details, details
         # This config is outside source inventory and changes interpretation only.
         nested = root / 'src/tsconfig.json'
         nested.write_text('{}\n')
@@ -163,7 +175,7 @@ def run(command, root):
         assert fresh['snapshot_id'] != full['snapshot_id']
         (root / 'src/target.ts').write_text('// moved declaration\n' + (root / 'src/target.ts').read_text())
         assert tool({'action': 'context', 'symbol_ref': reference})['status'] == 'stale_reference'
-        for action in ['locate', 'inspect', 'impact']:
+        for action in ['locate', 'impact']:
             stale_reference = tool({'action': action, 'symbol_ref': reference})
             assert stale_reference['status'] == 'stale_reference'
             assert stale_reference['retrieval']['target_id'] is None
@@ -200,7 +212,7 @@ def main():
     evidence = {'platform': platform.platform(), 'machine': platform.machine(), 'processor': platform.processor(),
         'cpu_count': os.cpu_count(),
         'bun': subprocess.check_output(['bun', '--version'], text=True).strip(),
-        'scope': 'TypeScript bound-reference context and five-tool analytical payload smoke; isolated local stdio processes, not the user client connection',
+        'scope': 'TypeScript bound-reference context and four-tool analytical payload smoke; isolated local stdio processes, not the user client connection',
         'runtimes': {}}
     evidence['source_hashes'] = {str(file.relative_to(PROJECT)): hashlib.sha256(file.read_bytes()).hexdigest()
         for file in sorted((PROJECT / 'src').rglob('*.ts'))}
