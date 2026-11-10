@@ -250,9 +250,36 @@ export function configureHarness(
         if (outErrors) outErrors.push(`Malformed JSON in '.codex/hooks.json': ${hooksResult.error}`);
       } else {
         const codexHooksConfig = hooksResult.status === "valid" ? hooksResult.data : { hooks: {} };
+        const originalHooks = JSON.stringify(codexHooksConfig);
         codexHooksConfig.hooks = (typeof codexHooksConfig.hooks === "object" && codexHooksConfig.hooks !== null && !Array.isArray(codexHooksConfig.hooks))
           ? codexHooksConfig.hooks
           : {};
+        const legacy = codexHooksConfig["septum-boundary-guard"];
+        if (legacy && typeof legacy === "object" && !Array.isArray(legacy)) {
+          const unknownKeys = Object.keys(legacy).filter(key => !["PreToolUse", "PostToolUse"].includes(key));
+          if (unknownKeys.length) {
+            const message = `Cannot migrate unknown legacy Codex hook fields: ${unknownKeys.join(", ")}. Preserving hooks.json.`;
+            console.error(`  ✕ ${message}`);
+            outErrors?.push(message);
+            return configured.join(" & ");
+          }
+          for (const event of ["PreToolUse", "PostToolUse"]) {
+            if (Array.isArray(legacy[event])) {
+              codexHooksConfig.hooks[event] = [...(codexHooksConfig.hooks[event] ?? []), ...legacy[event]];
+            }
+          }
+          delete codexHooksConfig["septum-boundary-guard"];
+        }
+        for (const entries of Object.values(codexHooksConfig.hooks) as any[]) {
+          if (!Array.isArray(entries)) continue;
+          for (let i = 0; i < entries.length; i++) {
+            const entry = entries[i];
+            if (entry?.type === "command" && typeof entry.command === "string" && !entry.hooks) {
+              const { matcher, ...handler } = entry;
+              entries[i] = { ...(matcher !== undefined ? { matcher } : {}), hooks: [handler] };
+            }
+          }
+        }
         const preToolUse = Array.isArray(codexHooksConfig.hooks.PreToolUse) ? codexHooksConfig.hooks.PreToolUse : [];
 
         const hasSeptumHook = preToolUse.some((h: any) => {
@@ -276,7 +303,7 @@ export function configureHarness(
           codexHooksConfig.hooks.PreToolUse = preToolUse;
           writeJsonFile(codexHooksPath, codexHooksConfig);
           console.log("  ✓ Configured Codex CLI lifecycle boundary guard: '.codex/hooks.json'.");
-        } else if (force) {
+        } else if (force || legacy) {
           const cleanedHooks: any[] = [];
           for (const h of preToolUse) {
             if (Array.isArray(h?.hooks)) {
@@ -293,8 +320,9 @@ export function configureHarness(
           cleanedHooks.push(canonicalHook);
           codexHooksConfig.hooks.PreToolUse = cleanedHooks;
           writeJsonFile(codexHooksPath, codexHooksConfig);
-          console.log("  ✓ Force-regenerated Codex CLI lifecycle boundary guard: '.codex/hooks.json' (--force).");
+          console.log("  ✓ Regenerated Codex CLI lifecycle boundary guard: '.codex/hooks.json'.");
         }
+        if (JSON.stringify(codexHooksConfig) !== originalHooks) writeJsonFile(codexHooksPath, codexHooksConfig);
         configured.push(".codex/hooks.json");
       }
 
@@ -385,24 +413,34 @@ export function scaffoldHarnessCustomizations(
     fs.mkdirSync(targetDir, { recursive: true });
   }
 
-  // 1. Skill: <harnessDir>/skills/septum-map/SKILL.md
-  const skillDir = path.join(targetDir, "skills", "septum-map");
+  // 1. Skill: <harnessDir>/skills/use-septum/SKILL.md
+  // Clean up legacy skill folder if present
+  const legacySkillDir = path.join(targetDir, "skills", "septum-map");
+  if (fs.existsSync(legacySkillDir)) {
+    try {
+      fs.rmSync(legacySkillDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup
+    }
+  }
+
+  const skillDir = path.join(targetDir, "skills", "use-septum");
   if (!fs.existsSync(skillDir)) {
     fs.mkdirSync(skillDir, { recursive: true });
   }
   const skillPath = path.join(skillDir, "SKILL.md");
   if (!fs.existsSync(skillPath)) {
     fs.writeFileSync(skillPath, SEPTUM_MAP_SKILL_TEMPLATE, "utf-8");
-    console.log(`  ✓ Deployed AI Agent skill: '${harnessDirName}/skills/septum-map/SKILL.md'.`);
+    console.log(`  ✓ Deployed AI Agent skill: '${harnessDirName}/skills/use-septum/SKILL.md'.`);
   } else {
     const existing = fs.readFileSync(skillPath, "utf-8");
     if (existing === SEPTUM_MAP_SKILL_TEMPLATE) {
       // Unchanged
     } else if (force) {
       fs.writeFileSync(skillPath, SEPTUM_MAP_SKILL_TEMPLATE, "utf-8");
-      console.log(`  ✓ Updated AI Agent skill: '${harnessDirName}/skills/septum-map/SKILL.md' (--force).`);
+      console.log(`  ✓ Updated AI Agent skill: '${harnessDirName}/skills/use-septum/SKILL.md' (--force).`);
     } else {
-      console.log(`  ✓ Preserved existing customized AI Agent skill: '${harnessDirName}/skills/septum-map/SKILL.md'.`);
+      console.log(`  ✓ Preserved existing customized AI Agent skill: '${harnessDirName}/skills/use-septum/SKILL.md'.`);
     }
   }
 
@@ -437,7 +475,7 @@ export function scaffoldHarnessCustomizations(
       console.log(`  ✓ Created onboarding instructions: '${options.rootDoc}'.`);
     } else if (force) {
       const existing = fs.readFileSync(rootDocPath, "utf-8");
-      if (!existing.includes("septum_map") && !existing.includes("septum_domain")) {
+      if (!existing.includes("septum_map")) {
         fs.writeFileSync(rootDocPath, existing.trimEnd() + "\n\n" + SEPTUM_RULES_TEMPLATE + "\n", "utf-8");
         console.log(`  ✓ Appended Septum boundary rules to '${options.rootDoc}' (--force).`);
       }
@@ -458,6 +496,8 @@ export function deployHarnessHooksJson(
   force: boolean = false,
   outErrors?: string[]
 ): void {
+  // Codex uses the strict event schema installed by configureHarness, without a namespace wrapper.
+  if (harnessDirName === ".codex") return;
   const targetDir = path.join(cwd, harnessDirName);
   const hooksJsonPath = path.join(targetDir, "hooks.json");
   const hooksResult = readJsonConfigFile(hooksJsonPath);

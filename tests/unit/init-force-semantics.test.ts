@@ -101,7 +101,7 @@ describe("F2-07: Narrow --force Semantics on Init", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "septum-force-agent-"));
     try {
       const geminiDir = path.join(tmpDir, ".gemini");
-      const skillDir = path.join(geminiDir, "skills", "septum-map");
+      const skillDir = path.join(geminiDir, "skills", "use-septum");
       const rulesDir = path.join(geminiDir, "rules");
       const hooksDir = path.join(geminiDir, "hooks");
       fs.mkdirSync(skillDir, { recursive: true });
@@ -214,6 +214,29 @@ describe("F2-07: Narrow --force Semantics on Init", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it("migrates Codex namespace pollution and flat hooks without dropping user handlers", () => {
+    const tmpDir = fs.mkdtempSync(path.join(baseDir, "codex-schema-migration-"));
+    const hookPath = path.join(tmpDir, ".codex/hooks.json");
+    const user = { matcher: "Bash", hooks: [{ type: "command", command: "echo USER" }] };
+    const strata = { type: "command", matcher: "write|edit", command: ".codex/hooks/strata-post-write.sh" };
+    fs.mkdirSync(path.dirname(hookPath), { recursive: true });
+    fs.writeFileSync(hookPath, JSON.stringify({ description: "User description", "septum-boundary-guard": {
+      PreToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "old septum-pre-write.sh" }, { type: "command", command: "echo LEGACY_USER" }] }],
+      PostToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "septum-post-write.sh" }] }],
+    }, hooks: { PreToolUse: [user], PostToolUse: [strata] } }));
+    configureHarness("codex", tmpDir, false);
+    const result = JSON.parse(fs.readFileSync(hookPath, "utf8"));
+    expect(Object.keys(result).sort()).toEqual(["description", "hooks"]);
+    expect(result.description).toBe("User description");
+    expect(result.hooks.PreToolUse).toContainEqual(user);
+    expect(result.hooks.PreToolUse.some((entry: any) => entry.hooks.some((h: any) => h.command === "echo LEGACY_USER"))).toBe(true);
+    expect(result.hooks.PreToolUse.flatMap((entry: any) => entry.hooks).filter((h: any) => h.command.includes("septum-pre-write"))).toHaveLength(1);
+    expect(result.hooks.PostToolUse[0]).toEqual({ matcher: strata.matcher, hooks: [{ type: "command", command: strata.command }] });
+    const once = fs.readFileSync(hookPath, "utf8");
+    configureHarness("codex", tmpDir, false);
+    expect(fs.readFileSync(hookPath, "utf8")).toBe(once);
   });
 
   it("should update [mcp_servers.septum] in .codex/config.toml on --force while preserving other tables", () => {

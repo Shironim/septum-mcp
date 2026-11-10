@@ -100,21 +100,33 @@ export async function handleCheckCommand(
       return;
     }
 
-    console.error(`\n[Septum Boundary Violation] Found ${violations.length} boundary violation(s):\n`);
-
-    for (const v of violations) {
-      console.error(`  ✕ [${v.rule.toUpperCase()}] at ${v.file}:${v.line}`);
-      console.error(`    Source Domain:  ${v.source_domain}`);
-      console.error(`    Target Domain:  ${v.target_domain}`);
-      console.error(`    Import Target:  ${v.imported_target}`);
-      console.error(`    Message:        ${v.message}\n`);
-    }
-
-
     const isStrict = options.strict || config.settings.enforcement === "strict";
+
     if (isStrict) {
-      console.error("[Septum Failure] Process terminated with exit code 1 due to boundary violations.");
+      console.error(`\n[Septum Boundary Violation] Found ${violations.length} boundary violation(s) [STRICT MODE - BLOCKED]:\n`);
+
+      for (const v of violations) {
+        console.error(`  ✕ [${v.rule.toUpperCase()}] at ${v.file}:${v.line}`);
+        console.error(`    Source Domain:  ${v.source_domain}`);
+        console.error(`    Target Domain:  ${v.target_domain}`);
+        console.error(`    Import Target:  ${v.imported_target}`);
+        console.error(`    Message:        ${v.message}\n`);
+      }
+
+      console.error("[Septum Failure] Process terminated with exit code 1 due to boundary violations in strict mode.");
       process.exitCode = 1;
+    } else {
+      console.warn(`\n[Septum Boundary Advisory] Found ${violations.length} boundary advisory item(s) (enforcement: warn - non-blocking):\n`);
+
+      for (const v of violations) {
+        console.warn(`  • [${v.rule.toUpperCase()}] at ${v.file}:${v.line}`);
+        console.warn(`    Source Domain:  ${v.source_domain}`);
+        console.warn(`    Target Domain:  ${v.target_domain}`);
+        console.warn(`    Import Target:  ${v.imported_target}`);
+        console.warn(`    Message:        ${v.message}\n`);
+      }
+
+      console.warn("[Septum Advisory Notice] Staged changes allowed (exit code 0). To block commits on boundary violations, configure 'enforcement: \"strict\"' in septum settings or pass '--strict'.\n");
     }
   } finally {
     db.close();

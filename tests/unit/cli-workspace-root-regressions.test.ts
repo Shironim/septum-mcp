@@ -67,7 +67,7 @@ describe('CLI workspace root regressions', () => {
         repo.upsertDomain('lib', { root: 'lib' });
         const config = SeptumConfigSchema.parse({ domains: { app: { root: 'src', forbidden_dependencies: ['lib'] }, lib: { root: 'lib' } }, features: { edit: { domain: 'app', allowed_touchpoints: ['src/**'] } } });
         const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(workspace, repo));
-        const result = await auditStagedFiles(evaluator, config, workspace, 'edit', repo);
+        const result = await auditStagedFiles(evaluator, config, workspace, repo);
         expect(result.files).toEqual(['src/local.ts']);
         expect(result.violations.some(violation => violation.rule === 'forbidden_dependency')).toBe(true);
       } finally { db.close(); }

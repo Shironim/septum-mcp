@@ -97,4 +97,67 @@ export class PaymentService {
     );
     expect(domain).toBe("billing");
   });
+
+  it("should ignore type-only imports during circular dependency detection", () => {
+    const deps = [
+      {
+        source_file: "src/domains/billing/types.ts",
+        source_domain: "billing",
+        line_number: 1,
+        target: "./services/PaymentService",
+        statement: "import type { PaymentService } from './services/PaymentService';",
+        is_external: false,
+      },
+      {
+        source_file: "src/domains/billing/services/PaymentService.ts",
+        source_domain: "billing",
+        line_number: 1,
+        target: "../types",
+        statement: "import { PaymentConfig } from '../types';",
+        is_external: false,
+      },
+    ];
+
+    const violations = evaluator.detectCircularDependencies(mockConfig, deps);
+    expect(violations.filter(v => v.rule === "circular_dependency")).toHaveLength(0);
+  });
+
+  it("should ignore virtual top-level root domain during domain-to-domain cycle detection", () => {
+    const configWithRoot: ValidatedSeptumConfig = {
+      ...mockConfig,
+      domains: {
+        ...mockConfig.domains,
+        root: {
+          root: "src",
+          description: "Root top-level",
+          allowed_dependencies: ["billing", "orders"],
+          forbidden_dependencies: [],
+          archetypes: {},
+        },
+      },
+    };
+
+    const deps = [
+      {
+        source_file: "src/index.ts",
+        source_domain: "root",
+        line_number: 1,
+        target: "./domains/billing/service",
+        statement: "import { BillingService } from './domains/billing/service';",
+        is_external: false,
+      },
+      {
+        source_file: "src/domains/billing/service.ts",
+        source_domain: "billing",
+        line_number: 1,
+        target: "../../version",
+        statement: "import { VERSION } from '../../version';",
+        is_external: false,
+      },
+    ];
+
+    const violations = evaluator.detectCircularDependencies(configWithRoot, deps);
+    const domainCycles = violations.filter(v => v.rule === "circular_dependency" && v.message.includes("Circular domain"));
+    expect(domainCycles).toHaveLength(0);
+  });
 });

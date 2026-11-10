@@ -9,6 +9,7 @@ export interface SyncCommandOptions {
   json?: boolean;
   workspaceRoot?: string;
   dbPath?: string;
+  rebuild?: boolean;
 }
 
 export async function handleSyncCommand(options: SyncCommandOptions = {}): Promise<void> {
@@ -22,7 +23,7 @@ export async function handleSyncCommand(options: SyncCommandOptions = {}): Promi
     const repo = new SeptumRepository(db.raw);
     const pipeline = new IngestionPipeline(repo, root);
 
-    const metrics = await pipeline.run(config);
+    const metrics = await pipeline.run(config, { rebuild: options.rebuild });
 
     if (options.json) {
       console.log(JSON.stringify(metrics, null, 2));

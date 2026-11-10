@@ -181,7 +181,7 @@ def main():
         file(custom, '.mcp.json', json.dumps({'user_setting': True, 'mcpServers': {'other': {'command': 'keep'}, 'septum': {'command': 'user-septum', 'args': ['custom']}}}))
         file(custom, '.claude/settings.json', json.dumps({'custom': 42, 'hooks': {'PreToolUse': [{'matcher': 'Read', 'hooks': [{'type': 'command', 'command': 'user-hook'}]}]}}))
         file(custom, '.gemini/hooks.json', json.dumps({'user-custom-hook': {'enabled': True}, 'septum-boundary-guard': {'user_override': True}}))
-        file(custom, '.gemini/skills/septum-map/SKILL.md', 'USER_CUSTOM_SKILL')
+        file(custom, '.gemini/skills/use-septum/SKILL.md', 'USER_CUSTOM_SKILL')
         file(custom, '.gemini/rules/septum-boundary.md', 'USER_CUSTOM_RULE')
         file(custom, '.gemini/hooks/septum-pre-write.sh', '#!/bin/sh\necho USER_CUSTOM_SHARED_SCRIPT\n')
         force_custom = base / 'custom-git-force-matched'

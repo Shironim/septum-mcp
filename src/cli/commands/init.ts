@@ -73,7 +73,7 @@ export async function handleInitCommand(force: boolean = false): Promise<void> {
   // 4. Run initial codebase ingestion
   console.log("\x1b[36m◇\x1b[0m  Indexing codebase AST (Tree-Sitter) to build symbol table & dependency graph...");
   try {
-    await handleSyncCommand({ workspaceRoot, dbPath });
+    await handleSyncCommand({ workspaceRoot, dbPath, rebuild: true });
     console.log("\x1b[36m│\x1b[0m  \x1b[32m✓\x1b[0m AST indexing completed successfully.");
     console.log("\x1b[36m│\x1b[0m");
 

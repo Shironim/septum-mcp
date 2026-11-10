@@ -7,10 +7,10 @@ import { SEPTUM_RULES_TEMPLATE } from "../../src/cli/templates/rules.ts";
 import { SEPTUM_MAP_SKILL_TEMPLATE } from "../../src/cli/templates/skill.ts";
 
 describe("Agentic Scaffolding Templates", () => {
-  it("should contain valid frontmatter and content for septum-map skill", () => {
-    expect(SEPTUM_MAP_SKILL_TEMPLATE).toContain("name: septum-map");
-    expect(SEPTUM_MAP_SKILL_TEMPLATE.toLowerCase()).toContain("framework-agnostic");
+  it("should contain valid frontmatter and content for use-septum skill", () => {
+    expect(SEPTUM_MAP_SKILL_TEMPLATE).toContain("name: use-septum");
     expect(SEPTUM_MAP_SKILL_TEMPLATE).toContain("septum_map");
+    expect(SEPTUM_MAP_SKILL_TEMPLATE).toContain("use-septum");
   });
 
   it("should configure PreToolUse interceptors on write_to_file and replace_file_content", () => {
@@ -32,7 +32,7 @@ describe("Agentic Scaffolding Templates", () => {
       const agentsDir = path.join(tmpDir, ".agents");
 
       // 1. Skill
-      const skillDir = path.join(agentsDir, "skills", "septum-map");
+      const skillDir = path.join(agentsDir, "skills", "use-septum");
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(path.join(skillDir, "SKILL.md"), SEPTUM_MAP_SKILL_TEMPLATE, "utf-8");
 

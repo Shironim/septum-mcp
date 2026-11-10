@@ -165,12 +165,7 @@ def audit(command, root):
         'check_staged': ['check', '--staged', '--strict'],
         'check_typo': ['check', '--strcit'],
         'check_domain_flag': ['check', '--domain', 'missing', '--strict'],
-        'feature_status_json': ['feature', 'status', '--json'],
-        'feature_invalid': ['feature', 'lock'],
         'unknown_command': ['inspect', 'calculateTotal'],
-        'topology_json': ['topology', '--json'],
-        'topology_missing_resolve': ['topology', 'resolve'],
-        'topology_invalid_action': ['topology', 'wrong-action'],
     }.items():
         result['cli'][key] = cli(command, root, *args)
         if key == 'query_full':
@@ -180,14 +175,14 @@ def audit(command, root):
         result['identity'] = server.identity
         result['tools_list'] = server.request('tools/list', {})
         cases = {
-            'domain_default': ('septum_domain', {}),
-            'domain_catalog': ('septum_domain', {'domain': 'orders'}),
-            'domain_full': ('septum_domain', {'domain': 'orders', 'detail_level': 'full', 'file_filter': 'Order.ts'}),
-            'domain_missing': ('septum_domain', {'domain': 'missing'}),
-            'domain_invalid_action': ('septum_domain', {'action': 'wrong-action'}),
-            'domain_register_missing': ('septum_domain', {'action': 'register'}),
-            'domain_register_alias': ('septum_domain', {'name': 'extra', 'root': 'src/extra'}),
-            'domain_invalid_archetypes': ('septum_domain', {'action': 'register', 'domain': 'bad', 'root': 'src/bad', 'archetypes': {'service': ['**/*.ts']}}),
+            'domain_default': ('septum_map', {}),
+            'domain_catalog': ('septum_map', {'domain': 'orders'}),
+            'domain_full': ('septum_map', {'domain': 'orders', 'detail_level': 'full', 'file_filter': 'Order.ts'}),
+            'domain_missing': ('septum_map', {'domain': 'missing'}),
+            'domain_invalid_action': ('septum_map', {'action': 'wrong-action'}),
+            'domain_register_missing': ('septum_map', {'action': 'register'}),
+            'domain_register_alias': ('septum_map', {'name': 'extra', 'root': 'src/extra'}),
+            'domain_invalid_archetypes': ('septum_map', {'action': 'register', 'domain': 'bad', 'root': 'src/bad', 'archetypes': {'service': ['**/*.ts']}}),
             'symbol_default': ('septum_symbol', {'query': 'calculateTotal'}),
             'symbol_empty': ('septum_symbol', {}),
             'symbol_missing': ('septum_symbol', {'query': 'nonexistentXYZ'}),
@@ -210,44 +205,14 @@ def audit(command, root):
             'boundary_empty_file_scope': ('septum_boundary', {'scope': 'file'}),
             'boundary_staged_with_file': ('septum_boundary', {'scope': 'staged', 'file_path': 'src/orders/Order.ts'}),
             'boundary_all_with_file': ('septum_boundary', {'scope': 'all', 'file_path': 'src/orders/Order.ts'}),
-            'feature_default': ('septum_feature', {}),
-            'feature_missing': ('septum_feature', {'feature_key': 'unregistered'}),
-            'feature_lock_missing': ('septum_feature', {'action': 'lock'}),
-            'feature_lock': ('septum_feature', {'action': 'lock', 'feature_key': 'checkout', 'domain': 'orders', 'allowed_touchpoints': ['src/orders/Order.ts']}),
-            'feature_release_owner': ('septum_feature', {'action': 'release'}),
-            'feature_get': ('septum_feature', {'action': 'get', 'feature_key': 'checkout'}),
-            'topology': ('septum_domain', {'action': 'topology'}),
-            'topology_infer': ('septum_domain', {'refresh': True}),
-            'topology_bad_resolve': ('septum_domain', {'action': 'topology', 'resolve': {'layer': 'not-a-layer', 'platform': 'demo'}}),
-            'topology_resolve': ('septum_domain', {'action': 'topology', 'resolve': {'layer': 'host', 'platform': 'Docker', 'constraints': ['fixture constraint']}}),
-            'topology_node': ('septum_domain', {'action': 'topology', 'resolve_node': {'id': 'worker', 'name': 'Worker', 'layer': 'host', 'platform': 'Docker', 'role': 'jobs', 'connected_to': ['database']}}),
-            'topology_node_missing_name': ('septum_domain', {'action': 'topology', 'resolve_node': {'id': 'incomplete', 'layer': 'host', 'platform': 'Docker'}}),
             'unknown_tool': ('septum_locate_symbol', {'query': 'calculateTotal'}),
         }
         for key, (name, args) in cases.items():
             result['mcp'][key] = server.tool(name, args)
             if key == 'domain_catalog':
                 result['mcp'][key]['catalog_access_exists_after'] = (root / '.septum/catalog_access.json').exists()
-            if key in ('feature_release_owner', 'feature_get'):
-                result['mcp'][key]['session_exists_after'] = (root / '.septum/session.json').exists()
-        result['cli']['feature_status_after_get'] = cli(command, root, 'feature', 'status')
-        # Fixture-only recovery test: overwrite owner, then compare MCP and CLI force.
-        session_path = root / '.septum/session.json'
-        session = json.loads(session_path.read_text())
-        session['owner_id'] = 'contract-audit:other-owner'
-        session_path.write_text(json.dumps(session))
-        result['mcp']['feature_release_force'] = server.tool('septum_feature', {'action': 'release', 'force': True})
-        result['mcp']['feature_release_force']['session_exists_after'] = session_path.exists()
-        result['cli']['feature_clear_no_force'] = cli(command, root, 'feature', 'clear')
-        result['cli']['feature_clear_force'] = cli(command, root, 'feature', 'clear', '--force')
-        result['cli']['feature_clear_force']['session_exists_after'] = session_path.exists()
-        result['cli']['topology_resolve'] = cli(command, root, 'topology', 'resolve', 'host', 'Docker')
-        result['cli']['topology_node'] = cli(command, root, 'topology', 'add-node', 'cli-worker', 'host', 'Docker', '10.0.0.2')
-        result['cli']['topology_bad_layer'] = cli(command, root, 'topology', 'resolve', 'not-a-layer', 'demo')
-        result['cli']['topology_remove_node'] = cli(command, root, 'topology', 'remove-node', 'cli-worker')
-        result['cli']['topology_env_alias'] = cli(command, root, 'env')
-        # Explicit path is accepted by the implementation, absent from tools/list.
-        result['mcp']['workspace_hint'] = server.tool('septum_domain', {'workspace_path': str(root), 'domain': 'orders'})
+        # Exercise explicit workspace routing through the public map tool.
+        result['mcp']['workspace_hint'] = server.tool('septum_map', {'workspace_path': str(root), 'domain': 'orders'})
     finally:
         result['server_exit_code'] = server.close()
     c, m = result['cli'], result['mcp']
@@ -278,7 +243,7 @@ def main():
             if command:
                 print(f'Probing {name} CLI + MCP', flush=True)
                 evidence['runtimes'][name] = audit(command, setup(Path(temporary), name))
-        # Run existing handler/schema suites with cwd and session effects isolated.
+        # Run existing handler/schema suites with cwd and index effects isolated.
         unit_root = setup(Path(temporary), 'unit-tests')
         tests = ['bun', 'test', str(PROJECT / 'tests/unit/unified-5-tools.test.ts'),
                  str(PROJECT / 'tests/unit/schema-coercion.test.ts')]
@@ -292,8 +257,8 @@ def main():
     assert evidence['unit_tests']['exit_code'] == 0, evidence['unit_tests']['stderr']
     for name, runtime in evidence['runtimes'].items():
         assert runtime['server_exit_code'] == 0, (name, runtime['server_exit_code'])
-        assert len(runtime['tools_list']['tools']) == 5, name
-    print('PASS: probes completed, five tools per runtime, isolated handler/schema tests passed')
+        assert len(runtime['tools_list']['tools']) == 4, name
+    print('PASS: probes completed, four tools per runtime, isolated handler/schema tests passed')
 
 
 if __name__ == '__main__':

@@ -1,10 +1,5 @@
 import { parseArgs } from "node:util";
 import { SEPTUM_VERSION, checkRuntimeVersion, formatUpdateNotice, type RuntimeVersionMeta } from "../utils/version-check.ts";
-import { handleCheckCommand } from "./commands/check.ts";
-import { handleHookCommand } from "./commands/hook.ts";
-import { handleInitCommand } from "./commands/init.ts";
-import { handleServeCommand } from "./commands/serve.ts";
-import { handleSyncCommand } from "./commands/sync.ts";
 
 export async function runCLI(argv: string[]): Promise<void> {
   let parsed;
@@ -50,18 +45,21 @@ export async function runCLI(argv: string[]): Promise<void> {
   try {
     switch (command) {
       case "init": {
+        const { handleInitCommand } = await import("./commands/init.ts");
         const force = Boolean(flags.force);
         await handleInitCommand(force);
         break;
       }
 
       case "sync": {
+        const { handleSyncCommand } = await import("./commands/sync.ts");
         const json = Boolean(flags.json);
         await handleSyncCommand({ json });
         break;
       }
 
       case "check": {
+        const { handleCheckCommand } = await import("./commands/check.ts");
         const strict = Boolean(flags.strict);
         const staged = Boolean(flags.staged);
         const json = Boolean(flags.json);
@@ -70,11 +68,13 @@ export async function runCLI(argv: string[]): Promise<void> {
       }
 
       case "serve": {
+        const { handleServeCommand } = await import("./commands/serve.ts");
         await handleServeCommand();
         break;
       }
 
       case "hook": {
+        const { handleHookCommand } = await import("./commands/hook.ts");
         await handleHookCommand(argv.slice(2));
         break;
       }
