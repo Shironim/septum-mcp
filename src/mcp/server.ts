@@ -24,7 +24,6 @@ import { SEPTUM_VERSION, checkRuntimeVersion } from "../utils/version-check.ts";
 
 const TOOL_SCHEMAS = {
   septum_map: MapToolSchema,
-  septum_domain: MapToolSchema, // backward-compatible alias
   septum_symbol: SymbolToolSchema,
   septum_slice: SliceToolSchema,
   septum_boundary: BoundaryToolSchema,
@@ -109,6 +108,14 @@ function countLines(text: string): number {
   return count;
 }
 
+export const SEPTUM_SERVER_INSTRUCTIONS = `Septum is an AST-powered architectural boundary, selective context, and call graph engine.
+Guidelines for AI Coding Agents:
+1. SELECTIVE CONTEXT FIRST: Avoid reading whole files with read_file when analyzing implementations or finding symbols. Call septum_symbol(action: 'context') to retrieve exact implementations and bound type dependencies within a bounded 16 KB budget.
+2. DISCOVER ARCHITECTURE: Call septum_map(action: 'catalog', detail_level: 'compact') to inspect module boundaries, file locations, and allowed dependencies before introducing new files or cross-domain imports.
+3. PREVENT REGRESSIONS (BLAST RADIUS): Before altering method signatures or deleting public symbols, call septum_symbol(action: 'impact', query: '...') to check inbound callers across the dependency graph.
+4. TRACE EXECUTION FLOWS: To understand how API requests, CLI commands, or background jobs flow through layers, call septum_slice(query: '<route|handler>') instead of manually searching grep hits.
+5. PRE-FLIGHT BOUNDARY CHECK: Before adding a cross-module import, call septum_boundary(scope: 'file', proposed_imports: [...]). Call septum_boundary(scope: 'staged') before git commit to verify zero architectural violations.`;
+
 export async function runMCPServer(): Promise<void> {
   const manager = new WorkspaceManager();
 
@@ -121,6 +128,7 @@ export async function runMCPServer(): Promise<void> {
       capabilities: {
         tools: {},
       },
+      instructions: SEPTUM_SERVER_INSTRUCTIONS,
     }
   );
 
@@ -130,7 +138,7 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_map",
           description:
-            "Discover registered architecture, domain boundaries, allowed/forbidden dependency policies, and index state with catalog; register records new domain boundaries and triggers ingestion. Use septum_symbol for exact declarations and septum_boundary for policy decisions. Example: {action:'catalog',detail_level:'compact'}.",
+            "Understand codebase architecture, domain boundaries, and file inventories before touching code. When to use: exploring modules, checking allowed/forbidden dependency rules, or listing files in a domain without reading file contents. When NOT to use: do NOT use to read function source (use septum_symbol) or trace execution paths (use septum_slice). Example: {action:'catalog',domain:'core',detail_level:'compact'} or {action:'catalog'} for project-wide macro map.",
           inputSchema: {
             type: "object",
             properties: {
@@ -196,7 +204,7 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_symbol",
           description:
-            "Symbol location, implementation reading with bound local/import references (or bounded polyglot source inspection), and static caller impact hints. Action 'inspect' is an automatic alias to 'context'. Example: {action:'context',query:'submit',file_path:'src/submit.ts'}.",
+            "Locate declarations, read implementation source with bound dependencies, or check who calls a symbol before editing. When to use: (1) action='locate' to find where a symbol is declared, (2) action='context' (or 'inspect') to read a function implementation and bound type definitions without reading whole files (budgeted to 16 KB), (3) action='impact' before refactoring or deleting to inspect inbound callers and blast radius. When NOT to use: do NOT use for macro architecture overviews (use septum_map) or full route flow tracing (use septum_slice). Example: {action:'context',query:'handleOrder',file_path:'src/orders.ts'}.",
           inputSchema: {
             type: "object",
             properties: {
@@ -237,8 +245,7 @@ export async function runMCPServer(): Promise<void> {
               },
               include_source: {
                 type: "boolean",
-                default: false,
-                description: "Include a bounded source slice only when the indexed file fingerprint matches disk.",
+                description: "Explicit true selects bounded source; explicit false selects declaration details without source. Omit for deep TypeScript context or default polyglot source. Source hashes must match disk.",
               },
               source_start_line: {
                 type: "number",
@@ -249,8 +256,7 @@ export async function runMCPServer(): Promise<void> {
                 type: "number",
                 minimum: 1,
                 maximum: 200,
-                default: 120,
-                description: "Maximum source lines returned (capped at 200).",
+                description: "Select bounded source inspection with this line limit (capped at 200). Bounded mode uses 120 lines when omitted.",
               },
               include_dependencies: {
                 type: "boolean",
@@ -261,8 +267,8 @@ export async function runMCPServer(): Promise<void> {
                 type: "integer",
                 minimum: 2048,
                 maximum: 2097152,
-                default: 65536,
-                description: "For action='context': maximum UTF-8 bytes of the serialized MCP tool result, including evidence and continuation.",
+                default: 16384,
+                description: "For deep TypeScript context (including inspect alias): maximum UTF-8 bytes of the serialized MCP tool result, including evidence and continuation. Do not combine with bounded source options.",
               },
               continuation: {
                 type: "string",
@@ -285,7 +291,7 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_slice",
           description:
-            "Find partial static framework relationships from a route, handler or intent before choosing files. Ambiguous targets return candidates without a selected chain; narrow with METHOD /route and controller_file. Example: {query:'POST /orders',max_depth:5}.",
+            "Trace end-to-end call flow from an entrypoint (HTTP route, controller, queue job, event) down through services and repositories. When to use: investigating how a request or user action flows through the system, or finding which controller/service handles a feature. When NOT to use: do NOT use to locate symbol declarations (use septum_symbol action='locate') or audit import rules (use septum_boundary). Example: {query:'POST /orders/{id}/pay',max_depth:5} or {query:'OrderController@pay'}.",
           inputSchema: {
             type: "object",
             properties: {
@@ -316,7 +322,7 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_boundary",
           description:
-            "Audit architectural dependencies and validate proposed file imports against domain rules and circular dependency constraints. Use scope='file' before writing, scope='staged' before committing, or scope='domain'/'all' to audit codebase rules. Example: {scope:'file',file_path:'src/orders.ts',proposed_imports:['./shared']}.",
+            "Architectural firewall: validate proposed or staged imports against domain boundaries and circular dependency constraints. When to use: (1) scope='file' with proposed_imports BEFORE writing new import statements, (2) scope='staged' BEFORE git commit to prevent cross-domain leaks, (3) scope='all' or 'domain' for codebase audits. When NOT to use: do NOT use to read source code or locate symbols. Status 'approved' confirms zero violations; 'rejected' requires refactoring. Example: {scope:'file',file_path:'src/order/service.ts',proposed_imports:['../billing/repo']}.",
           inputSchema: {
             type: "object",
             properties: {
@@ -386,7 +392,7 @@ export async function runMCPServer(): Promise<void> {
     });
 
     if (!isWorkspaceInitialized(root)) {
-      if ((name === "septum_map" || name === "septum_domain") && (!record.action || record.action === "catalog")) {
+      if (name === "septum_map" && (!record.action || record.action === "catalog")) {
         const runtimeVersion = await checkRuntimeVersion();
         let agentGuidance =
           "Panggil tool 'septum_map(action: \"register\", name: \"core\", root: \"src\", ingest_now: true)' untuk mendaftarkan dan mengindeks domain utama secara otomatis, atau jalankan 'septum init' di terminal workspace.";
@@ -425,7 +431,7 @@ export async function runMCPServer(): Promise<void> {
           runtime_version: runtimeVersion,
         };
       }
-      const isRegistration = (name === "septum_map" || name === "septum_domain") && record.action === "register";
+      const isRegistration = name === "septum_map" && record.action === "register";
       if (!isRegistration) {
         return {
           isError: true,
@@ -444,18 +450,21 @@ export async function runMCPServer(): Promise<void> {
     const ctx = lease.context;
     await ctx.ready;
     extra?.signal?.throwIfAborted();
-    const isDomainRegistration = (name === "septum_map" || name === "septum_domain") && record.action === "register";
-    try { await ctx.watcher.flush(true, extra?.signal); }
+    const isDomainRegistration = name === "septum_map" && record.action === "register";
+    try { await ctx.watcher.flush(false, extra?.signal); }
     catch (error) { if (!isDomainRegistration || !(error instanceof DomainRootConflictError)) throw error; }
     if (ctx.repo.getMeta("sync_error") && !(isDomainRegistration && ctx.repo.getMeta("sync_error_code") === "DOMAIN_ROOT_CONFLICT")) {
       throw new Error(`Workspace index synchronization failed: ${ctx.repo.getMeta("sync_error")}`);
     }
     ctx.config = ConfigLoader.load(undefined, ctx.root);
+    // External policy writes do not emit source watcher events. Keep this cheap
+    // ownership gate independent of full reconciliation and target JIT refresh.
+    if (!isDomainRegistration) ctx.pipeline.assertDomainOwnership(ctx.config, ctx.root);
     ctx.evaluator.getResolver().setRepository(ctx.repo);
 
     const executeTool = async () => {
       // 4 Core Tools Handlers
-      if (name === "septum_map" || name === "septum_domain") {
+      if (name === "septum_map") {
         const parsed = MapToolSchema.safeParse(args ?? {});
         if (!parsed.success) {
           return {
@@ -522,21 +531,38 @@ export async function runMCPServer(): Promise<void> {
 
       let bytesOut = 0;
       let linesOut = 0;
+      let combinedText = "";
       if (Array.isArray(response?.content)) {
         for (const item of response.content) {
           if (typeof item.text === "string") {
             bytesOut += Buffer.byteLength(item.text, "utf8");
             linesOut += countLines(item.text);
+            if (combinedText.length < 1500) {
+              combinedText += item.text;
+            }
           }
         }
       }
 
+      const inputArgs = (args as Record<string, any>) ?? {};
+      const actionName = typeof inputArgs.action === "string" ? inputArgs.action : (typeof inputArgs.scope === "string" ? inputArgs.scope : undefined);
+      const estimatedTokens = Math.round(bytesOut / 4);
+      const bloatAlert = bytesOut >= SeptumTelemetry.BLOAT_BYTE_THRESHOLD;
+      const outputDigest = SeptumTelemetry.createOutputDigest(combinedText);
+
       SeptumTelemetry.recordToolCall({
         event: "tool_call_completed",
         tool: name,
+        action: actionName,
         duration_ms: durationMs,
-        input: (args as Record<string, any>) ?? {},
-        metrics: { bytes_out: bytesOut, lines_out: linesOut },
+        input: inputArgs,
+        metrics: {
+          bytes_out: bytesOut,
+          lines_out: linesOut,
+          estimated_tokens: estimatedTokens,
+        },
+        bloat_alert: bloatAlert,
+        output_digest: outputDigest,
         session: null,
         status: (response as { isError?: boolean } | undefined)?.isError ? "error" : "success",
       }, ctx.root);
@@ -545,12 +571,15 @@ export async function runMCPServer(): Promise<void> {
     } catch (err) {
       const durationMs = Math.round(performance.now() - startTime);
       const errorInstance = err instanceof Error ? err : new Error(String(err));
+      const inputArgs = (args as Record<string, any>) ?? {};
+      const actionName = typeof inputArgs.action === "string" ? inputArgs.action : (typeof inputArgs.scope === "string" ? inputArgs.scope : undefined);
 
       SeptumTelemetry.recordToolCall({
         event: "tool_call_failed",
         tool: name,
+        action: actionName,
         duration_ms: durationMs,
-        input: (args as Record<string, any>) ?? {},
+        input: inputArgs,
         session: null,
         status: "error",
         error: {

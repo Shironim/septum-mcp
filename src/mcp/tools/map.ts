@@ -24,7 +24,3 @@ export async function handleMapTool(
       return handleGetDomainCatalog(repo, config, args, workspaceRoot);
   }
 }
-
-// Backward-compatible alias
-export const handleDomainTool = handleMapTool;
-export type DomainToolArgs = MapToolArgs;

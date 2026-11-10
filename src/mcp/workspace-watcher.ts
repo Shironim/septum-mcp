@@ -71,9 +71,6 @@ export class WorkspaceWatcher {
     this.config = config;
     const seen = new Set<string>();
     const stack = [this.root];
-    const domainRoots = Object.values(config.domains || {})
-      .map(d => relative(this.root, resolve(this.root, d.root)).replace(/\\/g, '/').replace(/^\/|\/$/g, ''))
-      .filter(dr => dr !== '.' && dr !== '');
     try {
       while (stack.length) {
         const dir = stack.pop()!;
@@ -99,10 +96,8 @@ export class WorkspaceWatcher {
             const childDir = join(dir, entry.name);
             const childRel = relative(this.root, childDir).replace(/\\/g, '/');
             if (shouldIgnoreSourcePath(childRel, config.settings.ignore_patterns)) continue;
-            if (domainRoots.length > 0) {
-              const isRelevant = domainRoots.some(dr => childRel === dr || childRel.startsWith(dr + '/') || dr.startsWith(childRel + '/'));
-              if (!isRelevant) continue;
-            }
+            // Semantic inputs may live outside registered domain roots.
+            // The shared watch budget still bounds this workspace inventory.
             stack.push(childDir);
           }
         }
@@ -138,6 +133,10 @@ export class WorkspaceWatcher {
   }
 
   async flush(forceVerify = true, signal?: AbortSignal): Promise<void> {
+    if (this.closed) return;
+    // Let already-ready FS notifications arrive before inspecting pending work.
+    // MCP requests and native watcher events can be queued in the same turn.
+    await new Promise<void>(done => setImmediate(done));
     if (this.closed) return;
     signal?.throwIfAborted();
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }

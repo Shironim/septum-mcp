@@ -46,11 +46,11 @@ export async function handleLocateSymbol(
         query,
         message: `Workspace '${root}' belum terindeks dalam Septum catalog.`,
         suggested_action: {
-          tool: "septum_domain",
+          tool: "septum_map",
           params: { action: "register", name: "core", root: "src", ingest_now: true },
         },
         agent_guidance:
-          "Panggil tool 'septum_domain(action: \"register\", name: \"core\", root: \"src\", ingest_now: true)' untuk mendaftarkan dan mengindeks codebase ini, atau jalankan 'septum init' di terminal workspace.",
+          "Panggil tool 'septum_map(action: \"register\", name: \"core\", root: \"src\", ingest_now: true)' untuk mendaftarkan dan mengindeks codebase ini, atau jalankan 'septum init' di terminal workspace.",
       };
 
       return withSymbolEvidence(repo, root, { operation: "locate", requested: args.symbol_ref, diagnostics }, () => ({

@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
     def wait_symbols(root, expected):
         deadline = time.monotonic() + 5
         while True:
-            catalog = tool('septum_domain', {'action': 'catalog', 'domain': 'orders', 'workspace_path': str(root)})
+            catalog = tool('septum_map', {'action': 'catalog', 'detail_level': 'full', 'domain': 'orders', 'workspace_path': str(root)})
             names = {symbol['name'] for file in catalog['files'] for symbol in file['symbols']}
             if set(expected) <= names:
                 return
@@ -113,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         filtered_staged = tool('septum_boundary', {'scope': 'staged', 'domain': 'orders', 'workspace_path': str(a)})
         assert filtered_staged['scope'] == 'staged' and filtered_staged['status'] == 'rejected', \
             'Domain filter must not turn a staged audit into a working-tree audit'
-        tool('septum_domain', {'action': 'catalog', 'domain': 'orders', 'workspace_path': str(b)})
+        tool('septum_map', {'action': 'catalog', 'detail_level': 'full', 'domain': 'orders', 'workspace_path': str(b)})
         (b / 'src/orders/Order.ts').write_text('export function newOrder() {}\n')
         time.sleep(.04)
         (b / 'src/orders/Other.ts').write_text('export function newOther() {}\n')
@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         (b / 'src/orders/Other.ts').unlink()
         deadline = time.monotonic() + 5
         while True:
-            catalog = tool('septum_domain', {'action': 'catalog', 'domain': 'orders', 'workspace_path': str(b)})
+            catalog = tool('septum_map', {'action': 'catalog', 'detail_level': 'full', 'domain': 'orders', 'workspace_path': str(b)})
             if not any(file['path'].endswith('Other.ts') for file in catalog['files']):
                 break
             assert time.monotonic() < deadline, 'Deleted file remained indexed'
@@ -130,7 +130,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         unsupported.write_text('class Hello')
         deadline = time.monotonic() + 5
         while True:
-            catalog = tool('septum_domain', {'action': 'catalog', 'domain': 'orders', 'workspace_path': str(b)})
+            catalog = tool('septum_map', {'action': 'catalog', 'detail_level': 'full', 'domain': 'orders', 'workspace_path': str(b)})
             if 'src/orders/hello.kt' in catalog['index_status']['unsupported_files']:
                 break
             assert time.monotonic() < deadline, 'Unsupported source file was not recorded'
@@ -148,28 +148,18 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         (b / 'src/orders').rename(b / 'src/renamed-orders')
         deadline = time.monotonic() + 5
         while True:
-            catalog = tool('septum_domain', {'action': 'catalog', 'domain': 'orders', 'workspace_path': str(b)})
+            catalog = tool('septum_map', {'action': 'catalog', 'detail_level': 'full', 'domain': 'orders', 'workspace_path': str(b)})
             if not catalog['files']:
                 break
             assert time.monotonic() < deadline, 'Renamed directory left stale catalog files'
             time.sleep(.075)
         subprocess.run(['git', '-c', 'user.name=Regression', '-c', 'user.email=regression@example.invalid', 'commit', '-qm', 'fixture'], cwd=a, check=True, capture_output=True)
-        tool('septum_feature', {'action': 'lock', 'feature_key': 'deletion-test', 'domain': 'orders', 'allowed_touchpoints': ['src/orders/Order.ts'], 'workspace_path': str(a)})
         subprocess.run(['git', 'rm', '-q', 'src/orders/Other.ts'], cwd=a, check=True)
         deletion = tool('septum_boundary', {'scope': 'staged', 'workspace_path': str(a)})
-        assert deletion['status'] == 'rejected' and deletion['total_checked'] == 1, deletion
-        assert any(v['rule'] == 'touchpoint_violation' for v in deletion['violations']), deletion
-        for invalid_session in ['{broken', '{}', '{"feature_key":"f","domain":"orders","touchpoints":[null]}']:
-            (a / '.septum/session.json').write_text(invalid_session)
-            tool('septum_domain', {'action': 'catalog', 'workspace_path': str(a)})
-            rejected = request('tools/call', {'name': 'septum_boundary', 'arguments': {'file_path': 'src/orders/Order.ts', 'workspace_path': str(a)}})
-            assert rejected.get('isError'), rejected
-            ordinary_release = request('tools/call', {'name': 'septum_feature', 'arguments': {'action': 'release', 'workspace_path': str(a)}})
-            assert ordinary_release.get('isError'), ordinary_release
-            recovered = request('tools/call', {'name': 'septum_feature', 'arguments': {'action': 'release', 'force': True, 'workspace_path': str(a)}})
-            assert not recovered.get('isError'), recovered
-            assert not (a / '.septum/session.json').exists()
-        print('PASS: boundary scope validation, live rules, staged blobs with domain filters, multi-workspace edits, file/directory reconciliation, unsupported diagnostics, deletion-only touchpoints, corrupt-session recovery')
+        assert deletion['status'] == 'approved', deletion
+        assert not (a / '.septum/session.json').exists()
+        assert not (a / '.septum/catalog_access.json').exists()
+        print('PASS: boundary scope validation, live rules, staged blobs with domain filters, multi-workspace edits, file/directory reconciliation, unsupported diagnostics, deletion-only audit without feature sessions')
     finally:
         server.terminate()
         _, stderr = server.communicate(timeout=5)

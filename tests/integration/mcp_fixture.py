@@ -1,5 +1,6 @@
 """Bounded JSON-RPC transport shared by disposable Septum integration fixtures."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import selectors
@@ -8,8 +9,14 @@ import tempfile
 import time
 
 
+def snapshot(root):
+    return {str(file.relative_to(root)): hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in sorted(root.rglob('*')) if file.is_file() and '.septum' not in file.parts}
+
+
 class McpSession:
-    def __init__(self, command, root):
+    def __init__(self, command, root, records=None):
+        self.records = records
         self.root = Path(root)
         self.stderr = tempfile.TemporaryFile()
         self.server = subprocess.Popen(command + ['serve'], cwd=root,
@@ -43,6 +50,9 @@ class McpSession:
                 if response.get('id') == self.serial:
                     assert 'error' not in response, response
                     self.latencies_ms.append((time.monotonic() - started) * 1000)
+                    if self.records is not None:
+                        self.records.append({'method': method, 'params': params, 'result': response['result'],
+                                             'duration_ms': self.latencies_ms[-1]})
                     return response['result']
             if self.selector.select(max(0, deadline - time.monotonic())):
                 chunk = os.read(self.server.stdout.fileno(), 65536)

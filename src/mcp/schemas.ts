@@ -747,10 +747,10 @@ export const GetEnvironmentTopologySchema = z.preprocess(
 export type GetEnvironmentTopologyArgs = z.infer<typeof GetEnvironmentTopologySchema>;
 
 // =========================================================================
-// 5 UNIFIED TOOLS SCHEMAS & NORMALIZERS (Refactored Clean-Break MCP Engine)
+// 4 UNIFIED TOOLS SCHEMAS & NORMALIZERS
 // =========================================================================
 
-// 1. septum_map (Clean-Break rename from septum_domain)
+// 1. septum_map
 export function normalizeMapToolArgs(raw: unknown): unknown {
   const coerced = extractSingleStringFallback(raw, "domain", [
     "workspace_path",
@@ -829,8 +829,6 @@ export function normalizeMapToolArgs(raw: unknown): unknown {
   return obj;
 }
 
-export const normalizeDomainToolArgs = normalizeMapToolArgs;
-
 export const MapToolSchema = z.preprocess(
   normalizeMapToolArgs,
   z.object({
@@ -851,10 +849,6 @@ export const MapToolSchema = z.preprocess(
   })
 );
 export type MapToolArgs = z.infer<typeof MapToolSchema>;
-
-// Backward-compatible aliases
-export const DomainToolSchema = MapToolSchema;
-export type DomainToolArgs = MapToolArgs;
 
 // 2. septum_symbol
 export function normalizeSymbolToolArgs(raw: unknown): unknown {
@@ -892,6 +886,7 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
     filePath: "file_path",
     sourceStartLine: "source_start_line",
     sourceLineLimit: "source_line_limit",
+    semanticDepth: "semantic_depth",
   }) as Record<string, unknown>;
 
   if (obj.query !== undefined && obj.symbol === undefined) {
@@ -903,8 +898,9 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
   if (!obj.action) {
     if (obj.budget_bytes !== undefined || obj.continuation !== undefined) {
       obj.action = "context";
-    } else if (obj.include_dependencies !== undefined || obj.include_source !== undefined) {
-      obj.action = "inspect";
+    } else if (obj.include_dependencies !== undefined || obj.include_source !== undefined ||
+      obj.source_start_line !== undefined || obj.source_line_limit !== undefined) {
+      obj.action = "context";
     } else {
       obj.action = "locate";
     }
@@ -914,6 +910,7 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
     obj.query = (obj.symbol_ref as Record<string, unknown>).name;
     obj.symbol = obj.query;
   }
+  if (obj.action === "inspect") obj.action = "context";
   return obj;
 }
 
@@ -929,9 +926,10 @@ export const SymbolToolSchema = z.preprocess(
     limit: z.number().int().positive().optional(),
     workspace_path: z.string().optional(),
     file_path: z.string().min(1).optional(),
-    include_source: z.boolean().optional().default(false),
+    include_source: z.boolean().optional(),
     source_start_line: z.number().int().positive().optional(),
-    source_line_limit: z.number().int().positive().max(200).optional().default(120),
+    source_line_limit: z.number().int().positive().max(200).optional(),
+    semantic_depth: z.number().int().min(1).max(2).optional(),
     budget_bytes: z.number().int().min(2048).max(2 * 1024 * 1024).optional(),
     continuation: z.string().min(1).max(4096).optional(),
   }).superRefine((args, ctx) => {

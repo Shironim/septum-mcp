@@ -64,9 +64,12 @@ describe("Unified 4 MCP Tools Suite", () => {
       expect(parsed.query).toBe("OrderService");
     });
 
-    it("should accept inspect action as supported action", () => {
+    it("normalizes inspect to context without inventing manual source bounds", () => {
       const parsed = SymbolToolSchema.parse({ action: "inspect", query: "OrderService" });
-      expect(parsed.action).toBe("inspect");
+      expect(parsed.action).toBe("context");
+      expect(parsed.source_line_limit).toBeUndefined();
+      expect(SymbolToolSchema.parse({ action: "inspect", query: "OrderService", budget_bytes: 4096 }).action).toBe("context");
+      expect(SymbolToolSchema.parse({ query: "OrderService", source_line_limit: 1 }).action).toBe("context");
     });
 
     it("should execute locate and impact via handleSymbolTool", async () => {

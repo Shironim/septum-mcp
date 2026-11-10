@@ -22,10 +22,22 @@ export async function handleSymbolTool(
 
   switch (action) {
     case "context":
-      return retrieveContext(repo, config, args, symbolWorkspace(repo, workspaceRoot || args.workspace_path), signal);
-
     case "inspect": {
-      const symbol = args.symbol || args.query || "";
+      const symbol = args.symbol_ref?.name || args.symbol || args.query || "";
+      const candidates = repo.findSymbolsByName(symbol, {
+        domain: args.domain, filePath: args.file_path, reference: args.symbol_ref,
+      });
+      const targetPath = candidates.length === 1 ? candidates[0]!.file_path : args.symbol_ref?.file_path || args.file_path;
+      const bounded = args.include_source !== undefined || args.source_start_line !== undefined || args.source_line_limit !== undefined;
+      if (!bounded && (!targetPath || /\.(?:ts|mts|cts)$/.test(targetPath))) {
+        return retrieveContext(repo, config, args, symbolWorkspace(repo, workspaceRoot || args.workspace_path), signal);
+      }
+      if (args.continuation !== undefined || args.budget_bytes !== undefined) {
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          status: "invalid_context_options",
+          message: "budget_bytes and continuation apply to deep TypeScript context. For bounded source use source_start_line and source_line_limit.",
+        }) }] };
+      }
       return handleGetSymbol(
         repo,
         config,
@@ -36,9 +48,10 @@ export async function handleSymbolTool(
           file_path: args.file_path,
           symbol_ref: args.symbol_ref,
           include_dependencies: args.include_dependencies,
-          include_source: args.include_source,
+          include_source: args.include_source ?? true,
           source_start_line: args.source_start_line,
           source_line_limit: args.source_line_limit,
+          semantic_depth: args.semantic_depth,
           workspace_path: args.workspace_path,
         },
         workspaceRoot

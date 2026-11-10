@@ -1,5 +1,6 @@
 import type { ValidatedSeptumConfig } from "../../core/config/schema.ts";
 import type { SeptumRepository } from "../../core/database/repository.ts";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { computeContentHash } from "../../core/ingestion/hasher.ts";
 import { isPathContained } from "../../core/resolver/path-resolver.ts";
@@ -118,6 +119,28 @@ function inspectSymbol(
             } else {
               const endLine = Math.min(details.exact_range.end_line, startLine + limit - 1, lineStarts.length);
               const truncated = endLine < details.exact_range.end_line;
+              const sliceText = source.slice(lineStarts[startLine - 1], lineEnds[endLine - 1]);
+              const lineCount = endLine - startLine + 1;
+
+              // 1-hop Transitive Delegator Expansion (Hollow Slicing Prevention)
+              let delegatedImpl: {
+                symbol: string;
+                file_path: string;
+                start_line: number;
+                end_line: number;
+                text: string;
+              } | undefined;
+
+              if (lineCount <= 15 || args.semantic_depth === 2) {
+                delegatedImpl = resolveDelegatorImplementation(
+                  repo,
+                  root,
+                  source,
+                  sliceText,
+                  details
+                );
+              }
+
               payload.source_slice = {
                 status: "current",
                 file_path: details.file_path,
@@ -125,9 +148,10 @@ function inspectSymbol(
                 current_content_hash: currentHash,
                 start_line: startLine,
                 end_line: endLine,
-                text: source.slice(lineStarts[startLine - 1], lineEnds[endLine - 1]),
+                text: sliceText,
                 truncated,
-                related_dependency_analysis: "omitted_to_keep_source_read_bounded",
+                related_dependency_analysis: delegatedImpl ? "delegated_implementation_expanded" : "omitted_to_keep_source_read_bounded",
+                ...(delegatedImpl ? { delegated_implementation: delegatedImpl } : {}),
                 ...(truncated ? { next_start_line: endLine + 1 } : {}),
               };
             }
@@ -184,4 +208,120 @@ function inspectSymbol(
       },
     ],
   };
+}
+
+function resolveDelegatorImplementation(
+  repo: SeptumRepository,
+  root: string,
+  sourceCode: string,
+  sliceText: string,
+  details: any
+): { symbol: string; file_path: string; start_line: number; end_line: number; text: string } | undefined {
+  // 1. Check for PHP/TS delegator call patterns:
+  //    $this->property->execute(...) or ->handle(...)
+  //    this.property.execute(...) or .handle(...)
+  //    ClassName::execute(...) or ClassName::handle(...)
+  const phpPropMatch = /\$this->([a-zA-Z0-9_]+)\s*->\s*([a-zA-Z0-9_]+)\s*\(/i.exec(sliceText);
+  const tsPropMatch = /\bthis\.([a-zA-Z0-9_]+)\s*\.\s*([a-zA-Z0-9_]+)\s*\(/i.exec(sliceText);
+  const staticMatch = /([A-Z][a-zA-Z0-9_]*(?:Action|Service|Handler|UseCase))::([a-zA-Z0-9_]+)\s*\(/i.exec(sliceText);
+
+  let targetClassName: string | undefined;
+  let targetMethodName: string | undefined;
+
+  if (phpPropMatch) {
+    const propName = phpPropMatch[1];
+    targetMethodName = phpPropMatch[2];
+
+    const ctorPropRegex = new RegExp(
+      `(?:protected|private|public)\\s+(?:readonly\\s+)?(?:\\\\?[A-Za-z0-9_\\\\]+\\\\)?([A-Z][A-Za-z0-9_]*)\\s+\\\$${propName}\\b`,
+      "i"
+    );
+    const ctorMatch = ctorPropRegex.exec(sourceCode);
+    if (ctorMatch) {
+      targetClassName = ctorMatch[1];
+    } else {
+      targetClassName = propName.charAt(0).toUpperCase() + propName.slice(1);
+    }
+  } else if (tsPropMatch) {
+    const propName = tsPropMatch[1];
+    targetMethodName = tsPropMatch[2];
+    const tsPropRegex = new RegExp(`(?:private|protected|public|readonly)\\s+${propName}\\s*:\\s*([A-Z][A-Za-z0-9_]*)`, "i");
+    const tsMatch = tsPropRegex.exec(sourceCode);
+    if (tsMatch) {
+      targetClassName = tsMatch[1];
+    } else {
+      targetClassName = propName.charAt(0).toUpperCase() + propName.slice(1);
+    }
+  } else if (staticMatch) {
+    targetClassName = staticMatch[1];
+    targetMethodName = staticMatch[2];
+  }
+
+  if (!targetClassName || !targetMethodName) return undefined;
+
+  const candidateQueries = [
+    `${targetClassName}::${targetMethodName}`,
+    `${targetClassName}@${targetMethodName}`,
+    targetMethodName,
+  ];
+
+  let targetSymbol: any = undefined;
+  for (const q of candidateQueries) {
+    const matches = repo.findSymbolsByName(q);
+    const exact = matches.find(m => m.name.includes(targetClassName!) && (m.name.endsWith(`::${targetMethodName}`) || m.name.endsWith(`@${targetMethodName}`) || m.name === targetMethodName));
+    if (exact) {
+      targetSymbol = exact;
+      break;
+    }
+    if (q !== targetMethodName && matches.length === 1) {
+      targetSymbol = matches[0];
+      break;
+    }
+  }
+
+  if (!targetSymbol) {
+    const classMatches = repo.findSymbolsByName(targetClassName);
+    if (classMatches.length >= 1) {
+      const cls = classMatches[0];
+      const fileSymbols = repo.getSymbolsByFileId(cls.file_id);
+      const methodSym = fileSymbols.find(s => s.kind === "method" && (s.name.endsWith(`::${targetMethodName}`) || s.name.endsWith(`@${targetMethodName}`) || s.name === targetMethodName));
+      if (methodSym) {
+        targetSymbol = { ...methodSym, file_path: cls.file_path };
+      }
+    }
+  }
+
+  if (!targetSymbol || !targetSymbol.file_path) return undefined;
+
+  if (targetSymbol.file_path === details.file_path && targetSymbol.line_start === details.exact_range.start_line) {
+    return undefined;
+  }
+
+  try {
+    const targetFullPath = resolve(root, targetSymbol.file_path);
+    if (!existsSync(targetFullPath)) return undefined;
+    const targetSource = readSourceFile(targetFullPath);
+    const targetStarts = [0];
+    const targetEnds: number[] = [];
+    for (const match of targetSource.matchAll(/\r\n|\n|\r/g)) {
+      targetEnds.push(match.index!);
+      targetStarts.push(match.index! + match[0].length);
+    }
+    targetEnds.push(targetSource.length);
+
+    const tStart = targetSymbol.line_start;
+    const tEnd = Math.min(targetSymbol.line_end, targetStarts.length);
+    if (tStart > targetStarts.length || tEnd < tStart) return undefined;
+
+    const targetText = targetSource.slice(targetStarts[tStart - 1], targetEnds[tEnd - 1]);
+    return {
+      symbol: targetSymbol.name,
+      file_path: targetSymbol.file_path,
+      start_line: tStart,
+      end_line: tEnd,
+      text: targetText,
+    };
+  } catch {
+    return undefined;
+  }
 }

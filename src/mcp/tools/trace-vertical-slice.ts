@@ -80,10 +80,16 @@ export function handleTraceVerticalSlice(
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(payload, null, 2),
+        text: JSON.stringify(payload),
       },
     ],
-    metadata: payload,
+    metadata: {
+      status: payload.status,
+      found: payload.found,
+      confidence: payload.confidence,
+      query: payload.query,
+      chain_length: payload.chain.length,
+    },
   };
   });
 }

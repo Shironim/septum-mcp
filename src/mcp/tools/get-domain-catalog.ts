@@ -184,7 +184,11 @@ export function handleGetDomainCatalog(
     ...(args.detail_level === "full" ? { relationships: repo.getImportRelationships(targetRoot).filter(edge => catalog.files.some(file => file.path === edge.source.file)) } : {}),
     parser_capabilities: parserCapabilities,
     runtime_version: runtimeVersion,
-    index_status: indexStatus,
+    index_status: args.detail_level === "full" ? indexStatus : {
+      runtime_version: runtimeVersion,
+      sync_state: indexStatus.sync_state,
+      sync_needed: indexStatus.sync_needed,
+    },
   };
   if (runtimeVersion.update_available) {
     catalogPayload.agent_instruction = `Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Recommend running '${runtimeVersion.upgrade_command}' and reloading the MCP server if schema/features differ.`;

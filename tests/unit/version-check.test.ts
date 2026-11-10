@@ -15,7 +15,7 @@ import {
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
-import { handleDomainTool } from "../../src/mcp/tools/domain.ts";
+import { handleMapTool } from "../../src/mcp/tools/map.ts";
 
 describe("Septum Version & Update Notification Suite", () => {
   const tmpCacheDir = path.join(os.tmpdir(), `septum-version-test-${Date.now()}`);
@@ -176,20 +176,20 @@ describe("Septum Version & Update Notification Suite", () => {
     });
   });
 
-  describe("MCP septum_domain catalog injection", () => {
+  describe("MCP septum_map catalog injection", () => {
     it("attaches runtime_version and update notice to agent_instruction in macroMap", async () => {
       const db = new SeptumDatabase(":memory:");
       const repo = new SeptumRepository(db.raw);
       const config = ConfigLoader.load(undefined, process.cwd());
 
       // Register a mock domain so macroMap branch is triggered
-      await handleDomainTool(repo, config, {
+      await handleMapTool(repo, config, {
         action: "register",
         domain: "billing",
         root: "src/billing",
       });
 
-      const result = await handleDomainTool(repo, config, {
+      const result = await handleMapTool(repo, config, {
         action: "catalog",
       });
 
