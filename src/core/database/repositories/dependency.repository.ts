@@ -341,23 +341,44 @@ export class DependencyRepository {
     }
 
     // 1. Look up target symbol in symbols joined with files and optionally domains
-    let targetSymRows: Array<{ name: string; file_path: string }>;
+    let targetSymRows: Array<{
+      name: string;
+      kind: string;
+      line_start: number;
+      line_end: number;
+      file_path: string;
+      domain_name?: string | null;
+    }>;
     if (targetMethod) {
       let methodSql = `
-        SELECT s.name, s.signature, f.path AS file_path
+        SELECT s.name, s.kind, s.signature, s.line_start, s.line_end, f.path AS file_path, dom.name AS domain_name
         FROM symbols s
         JOIN files f ON s.file_id = f.id
+        LEFT JOIN domains dom ON f.domain_id = dom.id
       `;
       const methodParams: any[] = [];
       if (options.domain) {
-        methodSql += ` JOIN domains dom ON f.domain_id = dom.id WHERE LOWER(dom.name) = LOWER(?) AND `;
+        methodSql += ` WHERE LOWER(dom.name) = LOWER(?) AND `;
         methodParams.push(options.domain);
       } else {
         methodSql += ` WHERE `;
       }
       methodSql += ` (s.name = ? OR s.name = ? OR (s.name = ? AND s.kind = 'method')) `;
       methodParams.push(trimmed, `${targetContainer}::${targetMethod}`, targetMethod);
-      targetSymRows = this.db.query<{ name: string; signature: string; file_path: string }, any[]>(methodSql).all(...methodParams)
+      targetSymRows = this.db
+        .query<
+          {
+            name: string;
+            kind: string;
+            signature: string;
+            line_start: number;
+            line_end: number;
+            file_path: string;
+            domain_name?: string | null;
+          },
+          any[]
+        >(methodSql)
+        .all(...methodParams)
         .filter(row => {
           if (row.name !== targetMethod) return true;
           // Go indexes bare method names; the receiver in its signature proves identity.
@@ -380,20 +401,33 @@ export class DependencyRepository {
       }
     } else {
       let containerSql = `
-        SELECT s.name, f.path AS file_path
+        SELECT s.name, s.kind, s.line_start, s.line_end, f.path AS file_path, dom.name AS domain_name
         FROM symbols s
         JOIN files f ON s.file_id = f.id
+        LEFT JOIN domains dom ON f.domain_id = dom.id
       `;
       const containerParams: any[] = [];
       if (options.domain) {
-        containerSql += ` JOIN domains dom ON f.domain_id = dom.id WHERE LOWER(dom.name) = LOWER(?) AND `;
+        containerSql += ` WHERE LOWER(dom.name) = LOWER(?) AND `;
         containerParams.push(options.domain);
       } else {
         containerSql += ` WHERE `;
       }
       containerSql += ` (s.name = ? OR s.name = ? OR s.name LIKE ? OR s.name LIKE ?) `;
       containerParams.push(trimmed, targetContainer, `${targetContainer}::%`, `%::${targetContainer}`);
-      targetSymRows = this.db.query<{ name: string; file_path: string }, any[]>(containerSql).all(...containerParams);
+      targetSymRows = this.db
+        .query<
+          {
+            name: string;
+            kind: string;
+            line_start: number;
+            line_end: number;
+            file_path: string;
+            domain_name?: string | null;
+          },
+          any[]
+        >(containerSql)
+        .all(...containerParams);
 
       if (targetSymRows.length === 0) {
         return {
@@ -431,6 +465,20 @@ export class DependencyRepository {
     const definingFiles = new Set<string>(
       targetSymRows.map((r) => r.file_path.replace(/\\/g, "/"))
     );
+    const targetSpansByFile = new Map<string, Array<{ start: number; end: number; kind: string }>>();
+    const domainByFile = new Map<string, string>();
+    for (const r of targetSymRows) {
+      const normPath = r.file_path.replace(/\\/g, "/");
+      if (r.domain_name) domainByFile.set(normPath, r.domain_name);
+      // For container queries (which also match `ClassName::%` members), keep the primary declaration span(s)
+      const isMemberOfQueriedContainer = !targetMethod && r.name.includes("::") && !trimmed.includes("::");
+      if (!isMemberOfQueriedContainer) {
+        const list = targetSpansByFile.get(normPath) || [];
+        list.push({ start: r.line_start, end: r.line_end, kind: r.kind });
+        targetSpansByFile.set(normPath, list);
+      }
+    }
+
     const definingFileStems = Array.from(
       new Set(
         Array.from(definingFiles)
@@ -491,6 +539,7 @@ export class DependencyRepository {
     const containerWordRegex = new RegExp(`\\b${escapeRegExp(targetContainer)}\\b`);
     const depRows = rawDepRows.filter((row) => {
       const normCallerFile = String(row.file).replace(/\\/g, "/");
+      if (row.domain_name) domainByFile.set(normCallerFile, String(row.domain_name));
       if (definingFiles.has(normCallerFile)) return false;
 
       const stmt = String(row.import_statement || "");
@@ -519,27 +568,67 @@ export class DependencyRepository {
       return false;
     });
 
+    // 2b. Discover same-directory / same-package files for languages with implicit package/namespace resolution (.go, .php, .java, .cs)
+    const implicitPackageFiles = new Set<string>();
+    const implicitLangDirs = new Set<string>();
+    for (const df of definingFiles) {
+      if (/\.(go|php|java|cs)$/i.test(df)) {
+        const dir = posix.dirname(df);
+        implicitLangDirs.add(dir === "." ? "" : dir);
+      }
+    }
+    if (implicitLangDirs.size > 0) {
+      const dirClauses: string[] = [];
+      const dirParams: string[] = [];
+      for (const dir of implicitLangDirs) {
+        if (dir === "") {
+          dirClauses.push("f.path NOT LIKE '%/%'");
+        } else {
+          dirClauses.push("(f.path LIKE ? AND SUBSTR(f.path, LENGTH(?) + 2) NOT LIKE '%/%')");
+          dirParams.push(`${dir}/%`, dir);
+        }
+      }
+      const pkgRows = this.db
+        .query<{ path: string; domain_name: string | null }, string[]>(
+          `SELECT f.path, dom.name AS domain_name
+           FROM files f
+           LEFT JOIN domains dom ON f.domain_id = dom.id
+           WHERE ${dirClauses.join(" OR ")}`
+        )
+        .all(...dirParams);
+      for (const r of pkgRows) {
+        const norm = r.path.replace(/\\/g, "/");
+        if (r.domain_name) domainByFile.set(norm, r.domain_name);
+        if (!definingFiles.has(norm) && /\.(go|php|java|cs)$/i.test(norm)) {
+          implicitPackageFiles.add(norm);
+        }
+      }
+    }
+
     // 3. Batch-load all symbols for candidate caller files in ONE query (zero N+1)
     const uniqueCallerFiles = Array.from(new Set(depRows.map((r) => String(r.file))));
+    const allSymbolLookupFiles = Array.from(
+      new Set([...uniqueCallerFiles, ...definingFiles, ...implicitPackageFiles])
+    );
     const callerSymbolsByFile = new Map<
       string,
-      Array<{ name: string; kind: string; line_start: number; line_end: number }>
+      Array<{ name: string; kind: string; signature: string; line_start: number; line_end: number }>
     >();
 
-    if (uniqueCallerFiles.length > 0) {
-      const placeholders = uniqueCallerFiles.map(() => "?").join(",");
+    if (allSymbolLookupFiles.length > 0) {
+      const placeholders = allSymbolLookupFiles.map(() => "?").join(",");
       const allCallerSyms = this.db
         .query<
-          { name: string; kind: string; line_start: number; line_end: number; path: string },
+          { name: string; kind: string; signature: string; line_start: number; line_end: number; path: string },
           string[]
         >(
-          `SELECT s.name, s.kind, s.line_start, s.line_end, f.path
+          `SELECT s.name, s.kind, s.signature, s.line_start, s.line_end, f.path
            FROM symbols s
            JOIN files f ON s.file_id = f.id
            WHERE f.path IN (${placeholders})
            ORDER BY (s.line_end - s.line_start) ASC`
         )
-        .all(...uniqueCallerFiles);
+        .all(...allSymbolLookupFiles);
 
       for (const sym of allCallerSyms) {
         const list = callerSymbolsByFile.get(sym.path) || [];
@@ -551,7 +640,7 @@ export class DependencyRepository {
     const findEnclosingSymbol = (
       filePath: string,
       lineNum: number
-    ): { name: string; kind: string } | undefined => {
+    ): { name: string; kind: string; signature: string } | undefined => {
       const syms = callerSymbolsByFile.get(filePath);
       if (!syms) return undefined;
       return syms.find((s) => lineNum >= s.line_start && lineNum <= s.line_end);
@@ -601,6 +690,7 @@ export class DependencyRepository {
                     caller: callerName,
                     line: lineNum,
                     kind: enclosing?.kind || "call",
+                    domain: domainByFile.get(filePath),
                   });
                 }
               }
@@ -609,6 +699,145 @@ export class DependencyRepository {
         } catch {
           // Ignore read errors
         }
+      }
+    }
+
+    // 4b. Scan same-file (definingFiles outside target declaration range) and same-package/namespace files
+    const isLineInsideTargetSpan = (filePath: string, lineNum: number): boolean => {
+      const spans = targetSpansByFile.get(filePath);
+      if (!spans || spans.length === 0) return false;
+      return spans.some((span) => lineNum >= span.start && lineNum <= span.end);
+    };
+
+    const targetIsFunctionOnly =
+      !targetMethod &&
+      targetSymRows.every((r) => r.kind === "function" || r.kind === "method");
+    const escapedMethod = targetMethod ? escapeRegExp(targetMethod) : "";
+    const escapedContainer = escapeRegExp(targetContainer);
+    const sameFileMethodCallRegex = targetMethod
+      ? new RegExp(
+          `(?:\\$this->|self::|static::|\\bthis\\.|\\bself\\.|\\b${escapedContainer}::)${escapedMethod}\\s*\\(`
+        )
+      : null;
+    const goReceiverMethodCallRegex = targetMethod
+      ? new RegExp(`\\b[A-Za-z_]\\w*\\.${escapedMethod}\\s*\\(`)
+      : null;
+    const fnCallRegex = !targetMethod
+      ? new RegExp(`(?:^|[^.\\w$:])${escapedContainer}\\s*\\(`)
+      : null;
+    const fnDeclRegex = !targetMethod
+      ? new RegExp(`\\b(?:function|func|def|fn)\\s+${escapedContainer}\\b`)
+      : null;
+    const classUsageRegex = !targetMethod
+      ? new RegExp(
+          `(?:\\bnew\\s+${escapedContainer}\\b|\\b${escapedContainer}::|&?\\b${escapedContainer}\\s*\\{|\\*?\\b${escapedContainer}\\b)`
+        )
+      : null;
+
+    // Same-file call-site scan (outside target symbol's own line_start..line_end)
+    for (const filePath of definingFiles) {
+      try {
+        const fullPath = options.workspaceRoot ? resolve(options.workspaceRoot, filePath) : filePath;
+        if (options.workspaceRoot) assertPathContained(fullPath, options.workspaceRoot, "Inbound caller source");
+        if (probeSourcePath(fullPath) !== "file") continue;
+        const content = readSourceFile(fullPath);
+        const lines = content.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+          const lineNum = i + 1;
+          if (isLineInsideTargetSpan(filePath, lineNum)) continue;
+          const line = lines[i];
+          const trimmedLine = line.trim();
+          if (!trimmedLine || trimmedLine.startsWith("//") || trimmedLine.startsWith("#") || trimmedLine.startsWith("*")) {
+            continue;
+          }
+          const enclosing = findEnclosingSymbol(filePath, lineNum);
+          let matched = false;
+          if (targetMethod) {
+            if (sameFileMethodCallRegex?.test(line)) {
+              matched = true;
+            } else if (/\.go$/i.test(filePath) && goReceiverMethodCallRegex?.test(line) && enclosing) {
+              const recv = enclosing.signature.match(/^func\s*\(\s*(?:[A-Za-z_]\w*\s+)?\*?([A-Za-z_]\w*)(?:\[[^\]]+\])?\s*\)/);
+              if (recv?.[1] === targetContainer) matched = true;
+            }
+          } else if (targetIsFunctionOnly) {
+            if (fnCallRegex?.test(line) && !fnDeclRegex?.test(line)) {
+              matched = true;
+            }
+          } else if (enclosing && classUsageRegex?.test(line)) {
+            matched = true;
+          }
+
+          if (matched) {
+            const callerName = enclosing ? enclosing.name : `${filePath}:${lineNum}`;
+            const key = `${filePath}:${lineNum}:${callerName}`;
+            if (!callersMap.has(key)) {
+              callersMap.set(key, {
+                file: filePath,
+                caller: callerName,
+                line: lineNum,
+                kind: enclosing?.kind || "call",
+                domain: domainByFile.get(filePath),
+              });
+            }
+          }
+        }
+      } catch {
+        // Ignore read errors
+      }
+    }
+
+    // Same-package / same-namespace call-site scan for .go, .php, .java, .cs files without explicit import
+    const explicitCallerSet = new Set(uniqueCallerFiles);
+    for (const filePath of implicitPackageFiles) {
+      if (explicitCallerSet.has(filePath)) continue;
+      try {
+        const fullPath = options.workspaceRoot ? resolve(options.workspaceRoot, filePath) : filePath;
+        if (options.workspaceRoot) assertPathContained(fullPath, options.workspaceRoot, "Inbound caller source");
+        if (probeSourcePath(fullPath) !== "file") continue;
+        const content = readSourceFile(fullPath);
+        if (!containerWordRegex.test(content)) continue;
+        const lines = content.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+          const lineNum = i + 1;
+          const line = lines[i];
+          const trimmedLine = line.trim();
+          if (!trimmedLine || trimmedLine.startsWith("//") || trimmedLine.startsWith("#") || trimmedLine.startsWith("*")) {
+            continue;
+          }
+          let matched = false;
+          if (targetMethod) {
+            if (
+              line.includes(`->${targetMethod}(`) ||
+              line.includes(`::${targetMethod}(`) ||
+              line.includes(`.${targetMethod}(`)
+            ) {
+              matched = true;
+            }
+          } else if (targetIsFunctionOnly) {
+            if (fnCallRegex?.test(line) && !fnDeclRegex?.test(line)) {
+              matched = true;
+            }
+          } else if (classUsageRegex?.test(line) && !/\b(?:class|interface|trait|enum|type|struct)\s+/.test(line)) {
+            matched = true;
+          }
+
+          if (matched) {
+            const enclosing = findEnclosingSymbol(filePath, lineNum);
+            const callerName = enclosing ? enclosing.name : `${filePath}:${lineNum}`;
+            const key = `${filePath}:${lineNum}:${callerName}`;
+            if (!callersMap.has(key)) {
+              callersMap.set(key, {
+                file: filePath,
+                caller: callerName,
+                line: lineNum,
+                kind: enclosing?.kind || "call",
+                domain: domainByFile.get(filePath),
+              });
+            }
+          }
+        }
+      } catch {
+        // Ignore read errors
       }
     }
 
