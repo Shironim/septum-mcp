@@ -10,6 +10,7 @@ import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
 import { CallGraphTracer } from "../../src/core/resolver/call-graph-tracer.ts";
 import { VerticalSliceTracer } from "../../src/core/resolver/vertical-slice-tracer.ts";
 import { shouldIgnoreSourcePath } from "../../src/core/resources/ignore.ts";
+import { SEPTUM_POST_WRITE_SCRIPT } from "../../src/cli/templates/hooks.ts";
 
 describe("Septum MCP Server Improvements Regression Suite", () => {
   let tempDir: string;
@@ -257,6 +258,180 @@ class PenjualanController {
       expect(loaded.settings.enforcement).toBe("strict");
       expect(loaded.settings.ignore_patterns).toContain("custom_ignore/**");
       expect(loaded.domains.custom_domain).toBeDefined();
+    });
+  });
+
+  // 6. Polyglot Delegator Expansion (Python & Go)
+  describe("Item 6: Polyglot 1-Hop Delegator Expansion (Python & Go)", () => {
+    it("expands 1-hop delegated implementation for Python self.<prop>.<method>(", async () => {
+      mkdirSync(join(tempDir, "app", "controllers"), { recursive: true });
+      mkdirSync(join(tempDir, "app", "services"), { recursive: true });
+
+      const pyController = [
+        "from app.services.order_service import OrderService",
+        "",
+        "class OrderController:",
+        "    def __init__(self, order_service: OrderService):",
+        "        self.order_service = order_service",
+        "",
+        "    def submit(self, payload: dict):",
+        "        return self.order_service.create_order(payload)",
+      ].join("\n");
+
+      const pyService = [
+        "class OrderService:",
+        "    def create_order(self, payload: dict):",
+        "        # Python core order persistence logic",
+        "        return {'status': 'created', 'payload': payload}",
+      ].join("\n");
+
+      writeFileSync(join(tempDir, "app", "controllers", "order_controller.py"), pyController);
+      writeFileSync(join(tempDir, "app", "services", "order_service.py"), pyService);
+
+      const config = ConfigLoader.getDefaultConfig();
+      config.domains = {
+        app: { root: "app", allowed_dependencies: [], forbidden_dependencies: [], archetypes: {} },
+      };
+
+      const pipeline = new IngestionPipeline(repo, tempDir);
+      await pipeline.run(config);
+
+      const result = handleGetSymbol(
+        repo,
+        config,
+        {
+          symbol: "OrderController::submit",
+          include_source: true,
+        },
+        tempDir
+      );
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.source_slice?.status).toBe("current");
+      expect(parsed.source_slice?.related_dependency_analysis).toBe("delegated_implementation_expanded");
+      expect(parsed.source_slice?.delegated_implementation?.symbol).toContain("OrderService::create_order");
+      expect(parsed.source_slice?.delegated_implementation?.text).toContain("Python core order persistence logic");
+    });
+
+    it("expands 1-hop delegated implementation for Go receiver.<prop>.<Method>(", async () => {
+      mkdirSync(join(tempDir, "internal", "orders"), { recursive: true });
+
+      const goHandler = [
+        "package orders",
+        "",
+        "type OrderHandler struct {",
+        "    orderService *OrderService",
+        "}",
+        "",
+        "func (h *OrderHandler) Create(id string) error {",
+        "    return h.orderService.ProcessOrder(id)",
+        "}",
+      ].join("\n");
+
+      const goService = [
+        "package orders",
+        "",
+        "type OrderService struct {}",
+        "",
+        "func (s *OrderService) ProcessOrder(id string) error {",
+        "    // Go core order processing logic",
+        "    return nil",
+        "}",
+      ].join("\n");
+
+      writeFileSync(join(tempDir, "internal", "orders", "handler.go"), goHandler);
+      writeFileSync(join(tempDir, "internal", "orders", "service.go"), goService);
+
+      const config = ConfigLoader.getDefaultConfig();
+      config.domains = {
+        orders: { root: "internal/orders", allowed_dependencies: [], forbidden_dependencies: [], archetypes: {} },
+      };
+
+      const pipeline = new IngestionPipeline(repo, tempDir);
+      await pipeline.run(config);
+
+      const result = handleGetSymbol(
+        repo,
+        config,
+        {
+          symbol: "OrderHandler::Create",
+          include_source: true,
+        },
+        tempDir
+      );
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.source_slice?.status).toBe("current");
+      expect(parsed.source_slice?.related_dependency_analysis).toBe("delegated_implementation_expanded");
+      expect(parsed.source_slice?.delegated_implementation?.file_path).toBe("internal/orders/service.go");
+      expect(parsed.source_slice?.delegated_implementation?.text).toContain("Go core order processing logic");
+    });
+  });
+
+  // 7. Same-File & Same-Package Impact Detection
+  describe("Item 7: Same-File and Same-Package Inbound Callers in getSymbolImpact", () => {
+    it("detects same-file callers outside target declaration and same-package Go/PHP callers without explicit imports", async () => {
+      mkdirSync(join(tempDir, "internal", "billing"), { recursive: true });
+
+      const goService = [
+        "package billing",
+        "",
+        "type InvoiceService struct {}",
+        "",
+        "func (s *InvoiceService) CalculateTax(amount int) int {",
+        "    return amount / 10",
+        "}",
+        "",
+        "func (s *InvoiceService) BuildInvoice(amount int) int {",
+        "    return amount + s.CalculateTax(amount)",
+        "}",
+      ].join("\n");
+
+      const goHandler = [
+        "package billing",
+        "",
+        "type InvoiceHandler struct {",
+        "    svc *InvoiceService",
+        "}",
+        "",
+        "func (h *InvoiceHandler) HandleCheckout(amount int) int {",
+        "    return h.svc.CalculateTax(amount)",
+        "}",
+      ].join("\n");
+
+      writeFileSync(join(tempDir, "internal", "billing", "service.go"), goService);
+      writeFileSync(join(tempDir, "internal", "billing", "handler.go"), goHandler);
+
+      const config = ConfigLoader.getDefaultConfig();
+      config.domains = {
+        billing: { root: "internal/billing", allowed_dependencies: [], forbidden_dependencies: [], archetypes: {} },
+      };
+
+      const pipeline = new IngestionPipeline(repo, tempDir);
+      await pipeline.run(config);
+
+      const impact = repo.getSymbolImpact("InvoiceService::CalculateTax", { workspaceRoot: tempDir });
+      expect(impact.found_in_index).toBe(true);
+      const callerFiles = impact.inbound_callers.map((c) => c.file);
+      expect(callerFiles).toContain("internal/billing/service.go");
+      expect(callerFiles).toContain("internal/billing/handler.go");
+
+      const sameFileCaller = impact.inbound_callers.find((c) => c.file === "internal/billing/service.go");
+      expect(sameFileCaller?.line).toBe(10);
+      expect(sameFileCaller?.domain).toBe("billing");
+
+      const samePkgCaller = impact.inbound_callers.find((c) => c.file === "internal/billing/handler.go");
+      expect(samePkgCaller?.line).toBe(8);
+      expect(samePkgCaller?.domain).toBe("billing");
+    });
+  });
+
+  // 8. Post-Write Hook Coalescing Lockfile
+  describe("Item 8: Post-Write Hook Coalescing Lockfile", () => {
+    it("includes non-blocking sync.lock and sync.pending coalescing in SEPTUM_POST_WRITE_SCRIPT", () => {
+      expect(SEPTUM_POST_WRITE_SCRIPT).toContain(".septum/sync.lock");
+      expect(SEPTUM_POST_WRITE_SCRIPT).toContain(".septum/sync.pending");
+      expect(SEPTUM_POST_WRITE_SCRIPT).toContain('mkdir "$LOCK_DIR"');
     });
   });
 });
