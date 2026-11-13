@@ -37,6 +37,8 @@ export interface ToolPayload {
   Path?: string;
   ReplacementContent?: string;
   CodeContent?: string;
+  new_string?: string;
+  content?: string;
   Content?: string;
   Replacement?: string;
 }
