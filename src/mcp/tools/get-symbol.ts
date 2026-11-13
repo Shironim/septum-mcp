@@ -210,6 +210,14 @@ function inspectSymbol(
   };
 }
 
+function toPascalCase(identifier: string): string {
+  return identifier
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
+}
+
 function resolveDelegatorImplementation(
   repo: SeptumRepository,
   root: string,
@@ -217,13 +225,19 @@ function resolveDelegatorImplementation(
   sliceText: string,
   details: any
 ): { symbol: string; file_path: string; start_line: number; end_line: number; text: string } | undefined {
-  // 1. Check for PHP/TS delegator call patterns:
+  // 1. Check for PHP/TS/Python/Go delegator call patterns:
   //    $this->property->execute(...) or ->handle(...)
   //    this.property.execute(...) or .handle(...)
+  //    self.property.execute(...) (Python)
+  //    receiver.property.Execute(...) (Go)
   //    ClassName::execute(...) or ClassName::handle(...)
   const phpPropMatch = /\$this->([a-zA-Z0-9_]+)\s*->\s*([a-zA-Z0-9_]+)\s*\(/i.exec(sliceText);
   const tsPropMatch = /\bthis\.([a-zA-Z0-9_]+)\s*\.\s*([a-zA-Z0-9_]+)\s*\(/i.exec(sliceText);
+  const pySelfMatch = /\bself\.([a-zA-Z0-9_]+)\s*\.\s*([a-zA-Z0-9_]+)\s*\(/i.exec(sliceText);
   const staticMatch = /([A-Z][a-zA-Z0-9_]*(?:Action|Service|Handler|UseCase))::([a-zA-Z0-9_]+)\s*\(/i.exec(sliceText);
+  const goRecvSigMatch = /^func\s*\(\s*([a-zA-Z_]\w*)\s+\*?([A-Za-z_]\w*)(?:\[[^\]]+\])?\s*\)/m.exec(
+    details?.signature || sliceText
+  );
 
   let targetClassName: string | undefined;
   let targetMethodName: string | undefined;
@@ -240,7 +254,7 @@ function resolveDelegatorImplementation(
     if (ctorMatch) {
       targetClassName = ctorMatch[1];
     } else {
-      targetClassName = propName.charAt(0).toUpperCase() + propName.slice(1);
+      targetClassName = toPascalCase(propName);
     }
   } else if (tsPropMatch) {
     const propName = tsPropMatch[1];
@@ -250,7 +264,35 @@ function resolveDelegatorImplementation(
     if (tsMatch) {
       targetClassName = tsMatch[1];
     } else {
-      targetClassName = propName.charAt(0).toUpperCase() + propName.slice(1);
+      targetClassName = toPascalCase(propName);
+    }
+  } else if (pySelfMatch) {
+    const propName = pySelfMatch[1];
+    targetMethodName = pySelfMatch[2];
+    // Check `self.prop = param` in `__init__` or direct `prop: TypeName` type annotation
+    const assignMatch = new RegExp(`\\bself\\.${propName}\\s*=\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\b`).exec(sourceCode);
+    const paramName = assignMatch ? assignMatch[1] : propName;
+    const typeHintRegex = new RegExp(`\\b(?:self\\.)?${paramName}\\s*:\\s*(?:[a-zA-Z0-9_]+\\.)?([A-Z][A-Za-z0-9_]*)\\b`);
+    const pyMatch = typeHintRegex.exec(sourceCode);
+    if (pyMatch) {
+      targetClassName = pyMatch[1];
+    } else {
+      targetClassName = toPascalCase(propName);
+    }
+  } else if (goRecvSigMatch) {
+    const recvVar = goRecvSigMatch[1];
+    const goPropRegex = new RegExp(`\\b${recvVar}\\.([a-zA-Z_]\\w*)\\s*\\.\\s*([a-zA-Z_]\\w*)\\s*\\(`);
+    const goCallMatch = goPropRegex.exec(sliceText);
+    if (goCallMatch) {
+      const propName = goCallMatch[1];
+      targetMethodName = goCallMatch[2];
+      const fieldTypeRegex = new RegExp(`\\b${propName}\\s+\\*?(?:[a-zA-Z0-9_]+\\.)?([A-Z][A-Za-z0-9_]*)\\b`);
+      const fieldMatch = fieldTypeRegex.exec(sourceCode);
+      if (fieldMatch) {
+        targetClassName = fieldMatch[1];
+      } else {
+        targetClassName = toPascalCase(propName);
+      }
     }
   } else if (staticMatch) {
     targetClassName = staticMatch[1];
@@ -268,7 +310,15 @@ function resolveDelegatorImplementation(
   let targetSymbol: any = undefined;
   for (const q of candidateQueries) {
     const matches = repo.findSymbolsByName(q);
-    const exact = matches.find(m => m.name.includes(targetClassName!) && (m.name.endsWith(`::${targetMethodName}`) || m.name.endsWith(`@${targetMethodName}`) || m.name === targetMethodName));
+    const exact = matches.find(
+      (m) =>
+        (m.name.includes(targetClassName!) ||
+          m.symbol_ref?.container === targetClassName ||
+          m.symbol_ref?.receiver === targetClassName) &&
+        (m.name.endsWith(`::${targetMethodName}`) ||
+          m.name.endsWith(`@${targetMethodName}`) ||
+          m.name === targetMethodName)
+    );
     if (exact) {
       targetSymbol = exact;
       break;
