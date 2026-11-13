@@ -64,16 +64,46 @@ fi
 # Sync always belongs to the workspace containing this generated wrapper.
 cd "$ROOT_DIR" || exit 1
 
-# Trigger background incremental sync
-if command -v bun >/dev/null 2>&1 && [ -f "$ROOT_DIR/bin/septum.ts" ]; then
-  bun run "$ROOT_DIR/bin/septum.ts" sync >/dev/null 2>&1 &
-elif command -v septum >/dev/null 2>&1; then
-  septum sync >/dev/null 2>&1 &
-elif [ -f "$ROOT_DIR/node_modules/.bin/septum" ]; then
-  "$ROOT_DIR/node_modules/.bin/septum" sync >/dev/null 2>&1 &
-elif command -v bunx >/dev/null 2>&1; then
-  bunx septum sync >/dev/null 2>&1 &
+LOCK_DIR="$ROOT_DIR/.septum/sync.lock"
+PENDING_FILE="$ROOT_DIR/.septum/sync.pending"
+
+# Mark workspace as needing sync so an active lock holder coalesces burst edits
+: > "$PENDING_FILE" 2>/dev/null || true
+
+# Recover stale lock if holder PID is no longer alive
+if [ -d "$LOCK_DIR" ] && [ -f "$LOCK_DIR/pid" ]; then
+  LOCK_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+  if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  fi
 fi
+
+# Non-blocking lock acquisition: if another background sync is active, exit 0
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  exit 0
+fi
+
+run_septum_sync() {
+  if command -v bun >/dev/null 2>&1 && [ -f "$ROOT_DIR/bin/septum.ts" ]; then
+    bun run "$ROOT_DIR/bin/septum.ts" sync >/dev/null 2>&1
+  elif command -v septum >/dev/null 2>&1; then
+    septum sync >/dev/null 2>&1
+  elif [ -f "$ROOT_DIR/node_modules/.bin/septum" ]; then
+    "$ROOT_DIR/node_modules/.bin/septum" sync >/dev/null 2>&1
+  elif command -v bunx >/dev/null 2>&1; then
+    bunx septum sync >/dev/null 2>&1
+  fi
+}
+
+# Trigger coalesced background incremental sync
+(
+  trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+  while [ -f "$PENDING_FILE" ]; do
+    rm -f "$PENDING_FILE" 2>/dev/null || true
+    run_septum_sync
+  done
+) >/dev/null 2>&1 &
+echo "$!" > "$LOCK_DIR/pid" 2>/dev/null || true
 
 exit 0
 `;
