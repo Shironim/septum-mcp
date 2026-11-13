@@ -99,13 +99,11 @@ Implemented in [hook.ts](../../src/cli/commands/hook.ts):
      ```
    * **Exit Code:** Returns exit code `1` (Unix standard) or `2` (Claude Code / Cursor hook standard).
 
-### B. Post-Write Hook (`runPostWriteHook`)
+### B. Post-Write Hook (`SEPTUM_POST_WRITE_SCRIPT`)
 After a tool call successfully writes compliant code to disk:
-* The hook executes:
-  ```sh
-  septum sync >/dev/null 2>&1 &
-  ```
-* Synchronization runs as a detached background process (non-blocking). The AST index in `.septum/septum.db` updates incrementally without pausing agent execution.
+* The hook touches `.septum/sync.pending` and attempts an atomic, non-blocking lock acquisition via `mkdir .septum/sync.lock` (recovering automatically if a previous holder PID is no longer alive).
+* If another background sync is already active, the hook exits `0` immediately to prevent a process stampede during rapid multi-file agent bursts.
+* The active lock holder drains `.septum/sync.pending` in a detached background loop (`septum sync >/dev/null 2>&1 &`), ensuring the AST index in `.septum/septum.db` converges to the latest disk state with zero blocking latency.
 
 ---
 

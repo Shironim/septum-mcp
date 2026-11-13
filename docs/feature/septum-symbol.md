@@ -52,41 +52,38 @@ AI Coding Agents performing code modifications frequently struggle with 3 critic
     "end_line": 78,
     "total_lines": 27
   },
-  "complexity_smell": {
-    "is_high_complexity": false,
-    "threshold": 120,
-    "total_lines": 27
-  },
   "sibling_methods": ["index", "store", "show", "cancel"]
 }
 ```
+*(Note: If a symbol exceeds the 300-line threshold, `complexity_smell` is emitted with `is_high_complexity: true` and `threshold: 300`.)*
 
 ---
 
 ## 3. Sub-Operation 2: `action: "context"` (Bounded Slicing & DTO Extraction)
 
 ### Internal Mechanics & Algorithms
-1. **Bounded Source Slicing:**
-   Extracts only the requested symbol lines (default limit: 120 lines, max: 200 lines) within a strict memory budget (16 KB) to conserve the agent's context window.
-2. **Anti-Hollow Slicing (1-Hop Transitive Delegator Expansion):**
-   If a method is merely a one-line delegate to an injected dependency:
+`action: "context"` (or alias `"inspect"`) automatically routes between two specialized engines depending on target language and options:
+1. **In-Memory TypeScript Compiler Host (`.ts`, `.mts`, `.cts` when bounded line options are omitted):**
+   Runs the `referenced-typescript-declarations/v4` policy ([context.ts](../../src/core/retrieval/context.ts)) within a strict byte budget (`budget_bytes`, default: 16 KB), returning `items` (`source`, `type_contract`, `relationship`, `selection`, `diagnostic`) and pagination `continuation` tokens (see [symbol-context-contract.md](./symbol-context-contract.md)).
+2. **Bounded Source Slicing (Polyglot files or when `include_source` / `source_line_limit` is specified):**
+   Extracts only the requested symbol lines (default limit: 120 lines, max: 200 lines) via [get-symbol.ts](../../src/mcp/tools/get-symbol.ts).
+3. **Anti-Hollow Slicing (1-Hop Transitive Delegator Expansion):**
+   If a polyglot/bounded method ($\le 15$ lines, or `semantic_depth: 2`) is a thin delegate to an injected dependency across PHP (`$this->prop->method(`), TypeScript/JS (`this.prop.method(`), Python (`self.prop.method(`), Go (`recv.prop.Method(`), or static calls (`Class::method(`):
    ```php
    public function calculate(OrderRequest $request) {
        return $this->orderService->calculateTotal($request->validated());
    }
    ```
-   Septum inspects Constructor DI parameters, identifies `OrderService`, and **automatically embeds the target method's implementation** (`delegated_implementation`) in the same response without requiring a second tool call.
-3. **In-Memory TypeScript DTO / Contract Extraction:**
-   In TypeScript projects, Septum runs an in-memory AST compiler host to project interface and type contracts referenced in the function signature.
+   Septum inspects constructor/field/type-hint DI bindings, identifies `OrderService`, and **automatically embeds the target method's implementation** (`delegated_implementation`) in the same response without requiring a second tool call.
 4. **Dependency & Outbound Call Resolution:**
-   Lists injected services (`dependencies_injected`) and external method invocations (`outbound_calls`).
+   When `include_source: false` (signature/contract inspection mode), lists injected services (`dependencies_injected`) and resolved external method invocations (`outbound_calls`, `resolved_outbound_calls`).
 
-### Input & Output Schema
+### Input & Output Schema (Bounded Polyglot Mode)
 ```json
 // Request
 {
   "action": "context",
-  "symbol": "OrderController::calculateTotal"
+  "query": "OrderController::calculateTotal"
 }
 
 // Response
@@ -99,21 +96,13 @@ AI Coding Agents performing code modifications frequently struggle with 3 critic
     "end_line": 78,
     "total_lines": 27
   },
-  "dependencies_injected": ["OrderService", "PaymentGateway"],
-  "outbound_calls": ["OrderService.calculateTotal"],
-  "resolved_outbound_calls": [
-    {
-      "symbol": "OrderService.calculateTotal",
-      "target_file": "app/Services/OrderService.php",
-      "is_resolved": true
-    }
-  ],
   "source_slice": {
     "status": "current",
     "file_path": "app/Http/Controllers/OrderController.php",
     "start_line": 52,
     "end_line": 78,
     "text": "public function calculateTotal(OrderRequest $request): JsonResponse {\n    $total = $this->orderService->calculateTotal($request->validated());\n    return response()->json(['total' => $total]);\n}",
+    "related_dependency_analysis": "delegated_implementation_expanded",
     "delegated_implementation": {
       "symbol": "OrderService::calculateTotal",
       "file_path": "app/Services/OrderService.php",
@@ -130,8 +119,8 @@ AI Coding Agents performing code modifications frequently struggle with 3 critic
 ## 4. Sub-Operation 3: `action: "impact"` (Blast Radius & Inbound Callers)
 
 ### Internal Mechanics & Algorithms
-1. **Inverse Dependency Traversal:**
-   Scans the repository for all files that import or reference the file declaring the target symbol.
+1. **Inverse Dependency, Same-File & Same-Package Traversal:**
+   Scans the repository for all files that import the file declaring the target symbol, plus same-file callers (outside the target symbol's own declaration line span) and same-package/namespace files in `.go`, `.php`, `.java`, and `.cs` that invoke the target without explicit import statements.
 2. **Batch Enclosing Symbol Resolution (Zero N+1 Query):**
    Septum loads symbols from calling files in a single batch SQLite query to resolve callers: *“Which method encloses line 115?”* Output provides concrete caller method identifiers rather than plain line numbers.
 3. **Method-Level Invocation Verification:**
@@ -149,7 +138,7 @@ AI Coding Agents performing code modifications frequently struggle with 3 critic
 // Request
 {
   "action": "impact",
-  "symbol": "OrderService::cancelOrder"
+  "query": "OrderService::cancelOrder"
 }
 
 // Response
