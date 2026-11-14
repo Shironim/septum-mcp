@@ -28,7 +28,7 @@ def run(binary):
             target.write_text(source)
         with McpSession(command, root) as session:
             tools = session.request('tools/list', {})['tools']
-            assert len(tools) == 5
+            assert {tool['name'] for tool in tools} == {'septum_map', 'septum_symbol', 'septum_slice', 'septum_boundary'}
             for name, directory in corpus['domains'].items():
                 session.tool('septum_map', {'action': 'register', 'domain': name, 'root': directory, 'ingest_now': False})
             session.tool('septum_map', {'action': 'register', 'domain': 'app', 'root': 'app', 'ingest_now': True})
@@ -37,10 +37,10 @@ def run(binary):
             relationships = []
             for domain in corpus['domains']:
                 catalog = session.tool('septum_map', {'action': 'catalog', 'domain': domain, 'detail_level': 'full'})
-                relationships += catalog.get('relationships', [])
-                for edge in catalog.get('relationships', []):
-                    if edge['resolution']['status'] == 'resolved':
-                        actual.update((edge['source']['file'], file, edge['kind']) for target in edge['resolution']['targets'] for file in target['files'])
+                actual.update((edge['from'], edge['to'], edge['relation']) for edge in catalog.get('dependencies', []))
+            for file in {'app/main.ts', corpus['dynamic_source']}:
+                evidence = session.tool('septum_map', {'action': 'catalog', 'file_filter': file, 'include_evidence': True})
+                relationships += evidence.get('evidence', [])
             expected = {(e['source'], e['target'], e['kind']) for e in corpus['edges']}
             partition_scores = {}
             for partition in ['development', 'holdout']:
@@ -59,7 +59,7 @@ def run(binary):
                 (root / selection['file']).write_text(corpus['files'][selection['file']] + '// changed\n')
                 stale = session.tool('septum_symbol', {'action': 'inspect', 'symbol_ref': ref, 'include_source': True})
                 checks['stale_source_refused'] = stale.get('status') == 'stale_reference' or stale.get('source_slice', {}).get('status') == 'stale'
-            decoy = session.tool('septum_symbol', {'action':'inspect','query':'run','file_path':'app/main.ts','include_dependencies':True})
+            decoy = session.tool('septum_symbol', {'action':'inspect','query':'run','file_path':'app/main.ts','context_mode':'source','include_source':False,'include_dependencies':True})
             checks['import_only_is_not_call'] = decoy.get('outbound_calls') == [] and not decoy.get('resolved_outbound_calls') and all(e['kind'] == 'imports' for e in relationships if e['source']['file'] == 'app/main.ts') and any(e['source']['file'] == 'app/main.ts' for e in relationships)
             checks['dynamic_unresolved_reported'] = any(e['source']['file'] == corpus['dynamic_source'] and e['resolution']['reason'] == 'dynamic_target' and e['resolution']['status'] == 'unresolved' for e in relationships)
             route = session.tool('septum_slice', {'query': corpus['route']})
@@ -69,9 +69,9 @@ def run(binary):
             partial = session.tool('septum_boundary', {'scope': 'file', 'file_path': 'app/unknown.kt'})
             checks['partial_index_not_approved'] = partial.get('status') == 'unknown'
             metrics = session.metrics()
-            contracts = macro.get('parser_capabilities', {}).get('analysis_contracts')
+            contracts = {'navigation_schema': macro.get('schema')}
         return {'mode': 'binary' if binary else 'source', 'binary_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest() if binary else None,
-                'analysis_contracts': contracts, 'reconnect_required_for_foundation': not contracts or contracts.get('foundation_revision') != '1',
+                'analysis_contracts': contracts, 'reconnect_required_for_foundation': contracts['navigation_schema'] != 'navigation/v1',
                 'tasks': checks, 'task_denominator': len(checks), 'tasks_passed': sum(checks.values()),
                 'edge_denominator': len(expected), 'matched_edges': len(actual & expected), 'false_positive_edges': sorted(actual - expected), 'omitted_edges': sorted(expected - actual),
                 'partitions': partition_scores, 'metrics': metrics, 'eof_exit': 0,

@@ -59,7 +59,12 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         deadline = time.monotonic() + 5
         while True:
             catalog = tool('septum_map', {'action': 'catalog', 'detail_level': 'full', 'domain': 'orders', 'workspace_path': str(root)})
-            names = {symbol['name'] for file in catalog['files'] for symbol in file['symbols']}
+            names = set()
+            for file in catalog['files']:
+                for symbol in expected:
+                    located = tool('septum_symbol', {'action': 'locate', 'query': symbol, 'file_path': file['path'], 'workspace_path': str(root)})
+                    if located.get('found') and located.get('exact_symbol', {}).get('name') == symbol:
+                        names.add(symbol)
             if set(expected) <= names:
                 return
             assert time.monotonic() < deadline, (expected, names)
@@ -131,7 +136,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         deadline = time.monotonic() + 5
         while True:
             catalog = tool('septum_map', {'action': 'catalog', 'detail_level': 'full', 'domain': 'orders', 'workspace_path': str(b)})
-            if 'src/orders/hello.kt' in catalog['index_status']['unsupported_files']:
+            if catalog['health']['unsupported_files'] > 0:
                 break
             assert time.monotonic() < deadline, 'Unsupported source file was not recorded'
             time.sleep(.075)

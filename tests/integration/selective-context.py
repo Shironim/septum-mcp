@@ -131,7 +131,7 @@ def run(command, root):
             assert evidence['source_version']['observed_hash'] == reference['indexed_content_hash']
             assert evidence['completeness'] == 'partial' and evidence['analysis_freshness'] == 'unavailable'
         assert [(item['name'], item['source']['file_path']) for item in full['items'] if item['kind'] == 'source'] == [
-            ('submit', 'src/target.ts'), ('Order', 'src/contract.ts'), ('validate', 'src/validator.ts')]
+        ('submit', 'src/target.ts'), ('validate', 'src/validator.ts'), ('Order', 'src/contract.ts')]
         assert full['freshness'] == 'current' and full['completeness'] == 'complete'
         arithmetic = tool({'action': 'context', 'query': 'total', 'file_path': 'src/order.ts'})
         assert arithmetic['policy'] == 'referenced-typescript-declarations/v4'

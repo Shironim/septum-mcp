@@ -30,23 +30,24 @@ with tempfile.TemporaryDirectory(prefix='septum-capabilities-') as temporary:
     root = Path(temporary)
     (root / 'src').mkdir()
     (root / 'package.json').write_text('{"name":"septum-capability-fixture","private":true}')
+    (root / 'septum.config.json').write_text(json.dumps({'domains': {'src': {'root': 'src'}}}))
     for file, source in FIXTURES.items():
         (root / 'src' / file).write_text(source)
     with McpSession(COMMAND, root) as session:
         request, tool = session.request, session.tool
         listed = request('tools/list', {})['tools']
-        assert len(listed) == 5
+        assert {tool['name'] for tool in listed} == {'septum_map', 'septum_symbol', 'septum_slice', 'septum_boundary'}
         assert 'symbol_ref' in next(t for t in listed if t['name'] == 'septum_symbol')['inputSchema']['properties']
         tool('septum_map', {'action': 'register', 'domain': 'src', 'root': 'src', 'ingest_now': True})
-        catalog = tool('septum_map', {'action': 'catalog', 'domain': 'src', 'detail_level': 'full'})
+        catalog = tool('septum_map', {'action': 'catalog', 'domain': 'src', 'detail_level': 'full', 'include_capabilities': True})
         assert catalog['index_status']['sync_state'] == 'complete', catalog
-        assert 'src/sample.kt' in catalog['index_status']['unsupported_files'], catalog
+        assert catalog['health']['unsupported_files'] == 1, catalog
         indexed = {file['path']: file for file in catalog['files']}
         for file in FIXTURES:
             if file.endswith('.kt'):
                 assert 'src/' + file not in indexed
             else:
-                assert indexed['src/' + file]['symbols'], (file, catalog)
+                assert indexed['src/' + file]['symbol_count'] > 0, (file, catalog)
         languages = {language['id']: language for language in catalog['parser_capabilities']['languages']}
         assert languages['kotlin']['method'] == 'unsupported'
         assert languages['csharp']['method'] == 'tree-sitter'
@@ -73,7 +74,8 @@ with tempfile.TemporaryDirectory(prefix='septum-capabilities-') as temporary:
         rust = tool('septum_symbol', {'action': 'locate', 'query': 'app::billing::Invoice::save'})
         assert rust['found'] and rust['container_name'] == 'app::billing::Invoice' and rust['sibling_methods'] == ['own'], rust
         full = tool('septum_map', {'action': 'catalog', 'domain': 'src', 'detail_level': 'full'})
-        refs = [r for f in full['files'] for r in f['declarations'] if r['name'] == 'Overload.save']
+        selected_declarations = tool('septum_symbol', {'action': 'locate', 'query': 'Overload.save', 'file_path': 'src/Overload.java'})
+        refs = [candidate['symbol_ref'] for candidate in selected_declarations['candidates']]
         assert len(refs) == 2
         assert tool('septum_symbol', {'action': 'inspect', 'symbol_ref': refs[0]})['symbol_ref'] == refs[0]
         invalid = request('tools/call', {'name': 'septum_symbol', 'arguments': {'action': 'inspect', 'symbol_ref': {**ref, 'end_line': 0}, 'workspace_path': str(root)}})
