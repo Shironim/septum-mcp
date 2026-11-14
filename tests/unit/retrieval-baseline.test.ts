@@ -137,7 +137,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
     expect(context.freshness).toBe("current");
     expect(context.completeness_scope).toContain("directly imported TypeScript files");
     expect(context.items.filter((item: any) => item.kind === "source").map((item: any) => [item.name, item.source.file_path]))
-      .toEqual([["submit", "src/submit.ts"], ["Order", "src/contract.ts"], ["validate", "src/rules/validator.ts"]]);
+      .toEqual([["submit", "src/submit.ts"], ["validate", "src/rules/validator.ts"], ["Order", "src/contract.ts"]]);
     expect(context.items.filter((item: any) => item.kind === "relationship").every((item: any) => item.relationship.kind === "imports")).toBe(true);
     expect(context.output_bytes).toBe(Buffer.byteLength(JSON.stringify(result), "utf8"));
     expect(context.output_bytes).toBeLessThanOrEqual(context.budget_bytes);
@@ -361,7 +361,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
     await pipeline.run(config);
     const context = await tool({ action: "context", query: "submit", file_path: "src/submit.ts" });
     expect(context.items[0].source.text).toBe("export function submit(order: Order) {\r\n  return validate(order); // 😀\r\n}");
-    expect(context.items.filter((item: any) => item.kind === "source").map((item: any) => item.name)).toEqual(["submit", "Order", "validate"]);
+    expect(context.items.filter((item: any) => item.kind === "source").map((item: any) => item.name)).toEqual(["submit", "validate", "Order"]);
     put("src/contract.ts", "export interface Order extends " + Array.from({ length: 300 }, (_, i) => `Contract${i}`).join(", ") + " {}\n" + Array.from({ length: 300 }, (_, index) => `export interface Contract${index} { value: number }`).join("\n"));
     await pipeline.run(config);
     const bounded = await tool({ action: "context", query: "submit", file_path: "src/submit.ts", budget_bytes: 2 * 1024 * 1024 });

@@ -4,7 +4,7 @@ import type { SymbolReference } from "../../types/index.ts";
 import { computeContentHash } from "../ingestion/hasher.ts";
 import { collectSourceSkipsSync, probeSourcePath, readSourceFile } from "../resources/source-files.ts";
 import { assertPathContained } from "../resolver/path-resolver.ts";
-import { PARSER_FINGERPRINT } from "../parser/language-capabilities.ts";
+import { getOperationCapabilities, PARSER_FINGERPRINT } from "../parser/language-capabilities.ts";
 
 /** Content-bound declaration identity, shared across operations; not a continuation token. */
 export function symbolTargetId(workspace: string, ref: SymbolReference): string {
@@ -88,7 +88,7 @@ export function withSymbolEvidence<T extends TextResult>(repo: SeptumRepository,
     payload.summary = `${payload.summary} | ${note}`;
     payload.message = `${payload.message} | ${note}`;
   }
-  const enriched = { ...payload, retrieval: leanRetrieval };
+  const enriched = { ...payload, ...(target ? { capabilities: getOperationCapabilities(target.file_path) } : {}), retrieval: leanRetrieval };
   return {
     ...result,
     content: [{ ...result.content[0]!, text: JSON.stringify(enriched, null, 2) }, ...result.content.slice(1)],

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, renameSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface SeptumToolCallMetrics {
@@ -28,6 +28,7 @@ export interface SeptumToolCallEvent {
     domain?: string | null;
   } | null;
   status: "success" | "error";
+  outcome?: string;
   error?: {
     code?: string;
     message: string;
@@ -77,9 +78,16 @@ export class SeptumTelemetry {
     event: SeptumToolCallEvent,
     workspaceRoot: string = process.cwd()
   ): void {
+    const debug = process.env.SEPTUM_DEBUG_TELEMETRY === "1";
+    const input = Object.fromEntries(Object.entries(event.input).filter(([key, value]) =>
+      ["include_source", "include_dependencies", "limit", "max_depth", "budget_bytes", "source_line_limit", "semantic_depth", "ingest_now", "staged"].includes(key) && (typeof value === "number" || typeof value === "boolean") ||
+      ["action", "scope", "detail_level", "context_mode"].includes(key) && typeof value === "string" && ["locate", "context", "inspect", "impact", "catalog", "register", "file", "staged", "all", "domain", "compact", "full", "deep", "source"].includes(value)));
     const payload: SeptumToolCallEvent = {
       timestamp: event.timestamp || new Date().toISOString(),
       ...event,
+      input: debug ? event.input : input,
+      output_digest: debug ? event.output_digest : undefined,
+      error: event.error && !debug ? { message: "Tool execution failed; inspect the tool response for details.", code: event.error.code } : event.error,
     };
 
     const jsonLine = JSON.stringify(payload);

@@ -1,3 +1,4 @@
+import { pageContext, response, budgetedResponse, type ContextItem, type SourceItem } from "./context-page.ts";
 import ts from "typescript";
 import { bindContextFile, type ContextValue } from "./typescript-references.ts";
 import { resolve } from "node:path";
@@ -25,35 +26,6 @@ export interface ContextQuery {
   domain?: string;
   budget_bytes?: number;
   continuation?: string;
-}
-type SourceItem = {
-  kind: "source";
-  name: string;
-  reason: "target_implementation" | "direct_import_declaration" | "local_dependency";
-  source: { file_path: string; indexed_content_hash: string; start_line: number; end_line: number; text: string };
-  fragment?: { start_utf16: number; end_utf16: number; total_utf16: number; declaration_start_line: number; declaration_end_line: number };
-};
-type DiagnosticItem = { kind: "diagnostic"; reason: string; file_path?: string; detail?: string };
-type ContextItem = SourceItem | DiagnosticItem | { kind: "relationship"; reason: "target_file_import"; relationship: ImportRelationship } |
-  { kind: "type_contract"; name: string; file_path: string; indexed_content_hash: string; start_line: number; end_line: number;
-    projection: "public_instance_signatures"; text: string; inferred_types: "unknown" | "explicit"; fragment?: SourceItem["fragment"] } |
-  { kind: "selection"; reason: "known_call_arguments"; file_path: string; start_line: number; arguments: ContextValue[]; pruned_branches: number };
-
-function response(payload: object) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
-}
-function budgetedResponse(payload: Record<string, unknown>, budget: number) {
-  let bytes = 0;
-  for (;;) {
-    const result = response({ ...payload, output_bytes: bytes });
-    const measured = Buffer.byteLength(JSON.stringify(result), "utf8");
-    if (bytes === measured) {
-      if (measured > budget) return response({ status: "budget_too_small", minimum_budget_bytes: measured,
-        message: "Required response metadata exceeds this budget; retry with a larger budget." });
-      return result;
-    }
-    bytes = measured;
-  }
 }
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -213,7 +185,12 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
             start_line: start, end_line: end, projection: "public_instance_signatures", text: contract.text,
             inferred_types: contract.inferred ? "unknown" : "explicit" });
           addDiagnostic("type_only_class_bodies_omitted", path, "Instance signature projection; constructors, private/static members, bodies and initializers omitted. Inferred types use unknown.");
-        } else addSource(path, file.text, { name, line_start: start, line_end: end }, reason);
+        } else {
+          const before = items.length;
+          addSource(path, file.text, { name, line_start: start, line_end: end }, reason);
+          const item = items[before];
+          if (item?.kind === "source") item.selection_role = ts.isTypeAliasDeclaration(node) || ts.isInterfaceDeclaration(node) ? "contract" : "implementation";
+        }
       }
       expansionQueue.push({ path, node, depth, reason, typeOnlyClass, arguments: argumentFacts });
     };
@@ -314,7 +291,8 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
     }
     else addDiagnostic("target_ast_declaration_not_found", target.file_path);
     // Source precedes provenance so file-level import records cannot crowd out helpers.
-    items.sort((a, b) => Number(b.kind === "source") - Number(a.kind === "source"));
+    const priority = (item: ContextItem) => item.kind === "source" ? item.reason === "target_implementation" ? 0 : item.selection_role === "contract" ? 2 : 1 : item.kind === "type_contract" ? 2 : 3;
+    items.sort((a, b) => priority(a) - priority(b));
     for (const edge of referencedEdges) add({ kind: "relationship", reason: "target_file_import", relationship: edge });
     return items;
   });
@@ -326,76 +304,17 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
   if (cursor && (cursor.snapshot !== snapshot || cursor.offset >= collected.value.length)) {
     return response({ status: "stale_continuation", message: "Input/index identity changed or the page is invalid; restart retrieval." });
   }
-  const start = cursor?.offset ?? 0;
-  const sourceOffset = cursor?.source_offset ?? 0;
-  const all = collected.value;
-  const current = all[start];
-  const currentText = current?.kind === "source" ? current.source.text : current?.kind === "type_contract" ? current.text : undefined;
-  if (sourceOffset && (currentText === undefined || sourceOffset >= currentText.length ||
-    currentText.charCodeAt(sourceOffset - 1) >= 0xd800 && currentText.charCodeAt(sourceOffset - 1) <= 0xdbff ||
-    currentText[sourceOffset - 1] === "\r" && currentText[sourceOffset] === "\n"))
-    return response({ status: "invalid_continuation", message: "Source fragment offset is outside the selected declaration." });
-  const envelope = (items: ContextItem[], end: number, nextSourceOffset = 0) => ({
-    status: incomplete || end < all.length || start > 0 || sourceOffset > 0 ? "partial" : "success", policy: CONTEXT_POLICY, workspace: root, target: target.symbol_ref,
-    target_id: symbolTargetId(root, target.symbol_ref),
-    query_id: queryId, snapshot_id: snapshot, freshness,
-    freshness_scope: "returned source hashes checked against index during response preparation",
-    completeness: incomplete || end < all.length || start > 0 || sourceOffset > 0 ? "partial" : "complete",
-    completeness_scope: "target and bound local/referenced declarations in directly imported TypeScript files and up to three import edges",
-    capability_limits: "static references, not calls",
-    task_sufficiency: "unknown",
-    input_count: collected.inputs.length, selected_source_bytes_read: sourceBytes,
-    dependency_depth: 3, items,
-    accounting: { total: all.length, returned: items.length, offset: start, omitted_before: start,
-      omitted_after: all.length - end, source_offset: sourceOffset, next_source_offset: nextSourceOffset,
-      omitted_by_capacity: capacityOmissions, unexpanded_dependency_files: unexpandedFiles },
-    ...(end < all.length && (end > start || nextSourceOffset > sourceOffset) ? { continuation: Buffer.from(JSON.stringify({ query: queryId, snapshot, offset: end,
-      ...(nextSourceOffset ? { source_offset: nextSourceOffset } : {}) })).toString("base64url") } : {}),
-    budget_bytes: budget,
+  return pageContext({
+    items: collected.value, start: cursor?.offset ?? 0, sourceOffset: cursor?.source_offset ?? 0,
+    budget, incomplete,
+    accounting: { omitted_by_capacity: capacityOmissions, unexpanded_dependency_files: unexpandedFiles },
+    base: {
+      policy: CONTEXT_POLICY, context_mode: "deep", workspace: root, target: target.symbol_ref,
+      target_id: symbolTargetId(root, target.symbol_ref), query_id: queryId, snapshot_id: snapshot, freshness,
+      freshness_scope: "returned source hashes checked against index during response preparation",
+      completeness_scope: "target and bound local/referenced declarations in directly imported TypeScript files and up to three import edges",
+      capability_limits: "static references, not calls", task_sufficiency: "unknown",
+      input_count: collected.inputs.length, selected_source_bytes_read: sourceBytes, dependency_depth: 3,
+    },
   });
-  let end = start;
-  const page: ContextItem[] = [];
-  let result = budgetedResponse(envelope([], start), budget);
-  for (; end < all.length; end++) {
-    const item = all[end]!;
-    const offset = end === start ? sourceOffset : 0;
-    const text = item.kind === "source" ? item.source.text : item.kind === "type_contract" ? item.text : undefined;
-    const fragment = (stop: number): ContextItem => {
-      if (text === undefined || (item.kind !== "source" && item.kind !== "type_contract")) return item;
-      const location = item.kind === "source" ? item.source : item;
-      const portion = text.slice(offset, stop);
-      const identity = { start_utf16: offset, end_utf16: stop, total_utf16: text.length,
-        declaration_start_line: location.start_line, declaration_end_line: location.end_line };
-      if (item.kind === "type_contract") return { ...item, text: portion, fragment: identity };
-      const line = item.source.start_line + (text.slice(0, offset).match(/\r\n|\r|\n/g)?.length ?? 0);
-      const lastLine = line + (portion.match(/\r\n|\r|\n/g)?.length ?? 0) - (/\r\n$|[\r\n]$/.test(portion) ? 1 : 0);
-      return { ...item, source: { ...item.source, text: portion, start_line: line, end_line: Math.max(line, lastLine) }, fragment: identity };
-    };
-    const whole = offset ? fragment(text!.length) : item;
-    const next = budgetedResponse(envelope([...page, whole], end + 1), budget);
-    if (JSON.parse(next.content[0]!.text).status === "budget_too_small") {
-      if (text !== undefined) {
-        let low = offset + 1, high = text.length - 1;
-        while (low <= high) {
-          const middle = Math.floor((low + high) / 2);
-          let stop = middle;
-          // Keep UTF-16 surrogate pairs and CRLF boundaries intact.
-          if (stop > offset && ((text.charCodeAt(stop - 1) >= 0xd800 && text.charCodeAt(stop - 1) <= 0xdbff) || text[stop - 1] === "\r" && text[stop] === "\n")) stop--;
-          if (stop === offset && offset + 2 < text.length) stop = offset + 2;
-          const partial = stop > offset ? budgetedResponse(envelope([...page, fragment(stop)], end, stop), budget) : undefined;
-          if (partial && JSON.parse(partial.content[0]!.text).status !== "budget_too_small") {
-            result = partial; low = middle + 1;
-          } else high = middle - 1;
-        }
-      }
-      break;
-    }
-    page.push(whole);
-    result = next;
-  }
-  if (end === start && all.length > start && !JSON.parse(result.content[0]!.text).continuation) {
-    return budgetedResponse({ ...envelope([], start), status: "budget_too_small", completeness: "partial",
-      message: "Response metadata and the next item fragment do not fit. Increase budget_bytes; no source was silently omitted." }, budget);
-  }
-  return result;
 }

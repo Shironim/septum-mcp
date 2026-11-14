@@ -6,13 +6,18 @@ import { SeptumTelemetry } from "../src/core/telemetry/telemetry.ts";
 describe("SeptumTelemetry Engine", () => {
   const testDir = join(import.meta.dir, "temp-telemetry-test");
   const logFile = join(testDir, ".septum", "septum.log");
+  let debugSetting: string | undefined;
 
   beforeEach(() => {
+    debugSetting = process.env.SEPTUM_DEBUG_TELEMETRY;
+    delete process.env.SEPTUM_DEBUG_TELEMETRY;
     rmSync(testDir, { recursive: true, force: true });
     mkdirSync(join(testDir, ".septum"), { recursive: true });
   });
 
   afterEach(() => {
+    if (debugSetting === undefined) delete process.env.SEPTUM_DEBUG_TELEMETRY;
+    else process.env.SEPTUM_DEBUG_TELEMETRY = debugSetting;
     rmSync(testDir, { recursive: true, force: true });
   });
 
@@ -60,7 +65,9 @@ describe("SeptumTelemetry Engine", () => {
 
     expect(last.event).toBe("tool_call_failed");
     expect(last.status).toBe("error");
-    expect(last.error.message).toBe("Route not registered");
+    expect(last.error.code).toBe("NOT_FOUND");
+    expect(last.error.message).not.toContain("Route not registered");
+    expect(last.input).toEqual({});
   });
 
   it("rotates log file when size reaches 2MB threshold", () => {
@@ -82,7 +89,7 @@ describe("SeptumTelemetry Engine", () => {
     expect(existsSync(logFile)).toBe(true);
   });
 
-  it("records output_digest, estimated_tokens, and bloat alerts for output inspection", () => {
+  it("keeps size metrics and omits raw source previews by default", () => {
     const rawOutput = "export interface OrderDTO { id: string; amount: number; }\n".repeat(400); // ~24KB
     const digest = SeptumTelemetry.createOutputDigest(rawOutput);
 
@@ -112,8 +119,18 @@ describe("SeptumTelemetry Engine", () => {
     expect(last.metrics.bytes_out).toBeGreaterThan(16384);
     expect(last.metrics.estimated_tokens).toBeGreaterThan(4000);
     expect(last.bloat_alert).toBe(true);
-    expect(last.output_digest.sample_preview).toBeDefined();
-    expect(last.output_digest.sample_preview).toContain("OrderDTO");
+    expect(last.output_digest).toBeUndefined();
+    expect(readFileSync(logFile, "utf8")).not.toContain("OrderDTO");
+  });
+
+  it("retains raw diagnostics only when debug telemetry is explicitly enabled", () => {
+    process.env.SEPTUM_DEBUG_TELEMETRY = "1";
+    SeptumTelemetry.recordToolCall({ event: "tool_call_completed", tool: "septum_symbol", duration_ms: 1,
+      input: { query: "debug-target" }, output_digest: { sample_preview: "debug-source" }, status: "success", outcome: "partial" }, testDir);
+    const event = JSON.parse(readFileSync(logFile, "utf8"));
+    expect(event.input.query).toBe("debug-target");
+    expect(event.output_digest.sample_preview).toBe("debug-source");
+    expect(event.outcome).toBe("partial");
   });
 
   it("createOutputDigest creates concise bounded summaries for empty or long texts", () => {
