@@ -1,5 +1,5 @@
 import { BoundaryEvaluator } from "../../core/boundary/evaluator.ts";
-import { ConfigLoader } from "../../core/config/loader.ts";
+import { ConfigLoader, resolveDatabasePath } from "../../core/config/loader.ts";
 import { SeptumDatabase } from "../../core/database/client.ts";
 import { SeptumRepository } from "../../core/database/repository.ts";
 import type { BoundaryViolation } from "../../types/index.ts";
@@ -7,7 +7,6 @@ import { IngestionPipeline } from "../../core/ingestion/pipeline.ts";
 import { auditStagedFiles } from "../../core/boundary/staged-auditor.ts";
 import { resolveWorkspaceRoot } from "../../core/resolver/path-resolver.ts";
 import { ModuleResolver } from "../../core/resolver/module-resolver.ts";
-import { join, isAbsolute } from "node:path";
 
 export interface CheckCommandOptions {
   strict?: boolean;
@@ -33,7 +32,7 @@ export async function handleCheckCommand(
   const workspaceRoot = resolveWorkspaceRoot(process.cwd());
   const config = ConfigLoader.load(undefined, workspaceRoot);
   if (options.strict) config.settings.enforcement = "strict";
-  const db = new SeptumDatabase(isAbsolute(config.settings.db_path) ? config.settings.db_path : join(workspaceRoot, config.settings.db_path));
+  const db = new SeptumDatabase(resolveDatabasePath(workspaceRoot, config.settings.db_path));
   const repo = new SeptumRepository(db.raw);
   const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(workspaceRoot, repo));
 

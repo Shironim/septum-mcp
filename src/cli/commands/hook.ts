@@ -1,7 +1,10 @@
+import { normalizeHookEdit } from "../hook-payload.ts";
+import { assertPathContained } from "../../core/resolver/path-resolver.ts";
+import { readSourceFile } from "../../core/resources/source-files.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { BoundaryEvaluator } from "../../core/boundary/evaluator.ts";
-import { ConfigLoader } from "../../core/config/loader.ts";
+import { ConfigLoader, resolveDatabasePath } from "../../core/config/loader.ts";
 import { SeptumDatabase } from "../../core/database/client.ts";
 import { SeptumRepository } from "../../core/database/repository.ts";
 import { ASTParserEngine } from "../../core/parser/tree-sitter.ts";
@@ -89,8 +92,8 @@ function blockHook(db: SeptumDatabase | null, reason: string): never {
 async function runPreWriteHook(): Promise<void> {
   const callerRoot = process.cwd();
   const workspaceRoot = path.resolve(process.env.SEPTUM_HOOK_ROOT || callerRoot);
-  // If .septum/septum.db does not exist, pass through
-  const dbPath = path.resolve(workspaceRoot, ".septum", "septum.db");
+  const config = ConfigLoader.load(undefined, workspaceRoot);
+  const dbPath = resolveDatabasePath(workspaceRoot, config.settings.db_path);
   if (!fs.existsSync(dbPath)) {
     process.exit(0);
   }
@@ -109,49 +112,23 @@ async function runPreWriteHook(): Promise<void> {
     process.exit(0);
   }
 
-  const toolInput: Record<string, any> =
-    payload.tool_input ||
-    payload.arguments ||
-    payload.toolCall?.args ||
-    (payload as Record<string, any>) ||
-    {};
-  const payloadTarget: string | undefined =
-    toolInput.TargetFile ||
-    toolInput.file_path ||
-    toolInput.filePath ||
-    toolInput.path ||
-    toolInput.Path ||
-    payload.TargetFile ||
-    payload.file_path ||
-    payload.filePath ||
-    payload.path ||
-    payload.Path;
-  const targetFile = payloadTarget ? path.relative(workspaceRoot, path.resolve(callerRoot, payloadTarget)).replace(/\\/g, "/") : undefined;
-  const chunkContent = Array.isArray(toolInput.ReplacementChunks)
-    ? toolInput.ReplacementChunks.map((c: any) => c?.ReplacementContent || "").join("\n")
-    : "";
-  const content: string =
-    toolInput.ReplacementContent ||
-    toolInput.CodeContent ||
-    toolInput.new_string ||
-    toolInput.content ||
-    toolInput.Content ||
-    toolInput.Replacement ||
-    payload.ReplacementContent ||
-    payload.CodeContent ||
-    payload.new_string ||
-    payload.content ||
-    payload.Content ||
-    payload.Replacement ||
-    chunkContent ||
-    "";
-
-  if (!targetFile) {
+  let edit;
+  try {
+    edit = normalizeHookEdit(payload, target => {
+      const file = path.resolve(callerRoot, target);
+      assertPathContained(file, workspaceRoot, "Hook source");
+      return readSourceFile(file);
+    });
+    if (edit) assertPathContained(path.resolve(callerRoot, edit.target), workspaceRoot, "Hook target");
+  } catch (error) { blockHook(null, error instanceof Error ? error.message : String(error)); }
+  if (!edit) {
+    process.stdout.write(JSON.stringify({ decision: "allow", coverage: "unknown", reason: "Unsupported hook payload; no source candidate was evaluated." }) + "\n");
     process.exit(0);
   }
+  const targetFile = path.relative(workspaceRoot, path.resolve(callerRoot, edit.target)).replace(/\\/g, "/");
+  const content = edit.content;
 
-  const config = ConfigLoader.load(undefined, workspaceRoot);
-  const db = new SeptumDatabase(path.resolve(workspaceRoot, config.settings.db_path));
+  const db = new SeptumDatabase(dbPath);
   const repo = new SeptumRepository(db.raw);
   const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(workspaceRoot, repo));
 
@@ -192,7 +169,7 @@ async function runPreWriteHook(): Promise<void> {
 
     // If running in Antigravity or standard JSON IPC mode, emit allow decision
     try {
-      process.stdout.write(JSON.stringify({ decision: "allow" }) + "\n");
+      process.stdout.write(JSON.stringify({ decision: "allow", coverage: edit.coverage, evaluated: sourceDomain ? "proposed_imports" : "unmapped_domain" }) + "\n");
     } catch {
       // ignore
     }
@@ -201,7 +178,7 @@ async function runPreWriteHook(): Promise<void> {
     db.close();
     const message = err instanceof Error ? err.message : String(err);
     console.error(`\x1b[31m[Septum Hook Error]\x1b[0m ${message}`);
-    process.exit(1);
+    process.exit(configuredExitCode);
   }
 }
 

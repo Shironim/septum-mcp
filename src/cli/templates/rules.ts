@@ -23,7 +23,7 @@ An embedded database (\`.septum/septum.db\`) maintains the Single Source of Trut
 | Post-edit audit before git commit | \`septum_boundary({ scope: "staged" })\` | Verifies Git index snapshot against domain rules without interference from unstaged files; use \`scope: "all"\` for full audits. |
 
 ## 3. Protocol & Execution Principles (Selective Context & Map First)
-- **Map First, Inspect Selectively:** Survey domain topology using \`septum_map({ action: "catalog", domain: "<domain_name>", detail_level: "compact" })\` before opening specific files. Review imported modules (\`connections.imports_from\`) and consumer count (\`connections.imported_by_count\`).
+- **Map First, Inspect Selectively:** Survey domain topology using \`septum_map({ action: "catalog", domain: "<domain_name>" })\`. Read \`dependencies\` as directed import edges, \`entrypoints\` as static catalog hints, and \`health\` for uncertainty. Follow \`next\` or use \`septum_symbol\` for signatures and implementation. \`full\` expands navigation, not declaration detail.
 - **Inspect Contracts Over Bodies:** When discovering service interfaces, call \`septum_symbol\` with \`action: "context"\` or \`include_source: false\` to inspect method signatures and injected dependencies without code bloat.
 - **No Blind Probing:** Never read a 1,000-line controller or service file from line 1. Slice it via \`septum_slice\` or extract the target symbol slice via \`septum_symbol\`.
 - **Pre-Refactor Impact Verification:** Always inspect \`inbound_callers\` with \`septum_symbol({ action: "impact", query: "ClassNameOrFunction" })\` before modifying method parameters or public function contracts.
