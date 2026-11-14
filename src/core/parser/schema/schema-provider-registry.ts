@@ -28,7 +28,7 @@ export class SchemaProviderRegistry {
       if (provider.canHandle(projectRoot)) {
         try {
           const res = provider.resolveEntitySchema(projectRoot, entitySymbol, entityFilePath);
-          if (res && !(res instanceof Promise)) {
+          if (res) {
             return res;
           }
         } catch {

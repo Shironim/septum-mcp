@@ -37,6 +37,21 @@ export function getLanguageCapability(filePath: string): LanguageDefinition | un
   return LANGUAGE_CAPABILITIES.find(language => language.extensions.some(ext => lower.endsWith(ext)));
 }
 
+export function getOperationCapabilities(filePath: string) {
+  const language = getLanguageCapability(filePath);
+  const declarations = language?.extractor ? "partial" : "unsupported";
+  return {
+    language: language?.id ?? "unknown",
+    declarations,
+    import_resolution: language && ["typescript", "javascript", "php", "python", "go", "frontend"].includes(language.id) ? "partial" : "unsupported",
+    source_context: declarations,
+    deep_context: /\.(?:ts|mts|cts)$/.test(filePath) ? "bounded_references" : "unsupported",
+    caller_analysis: language?.extractor ? "lexical_heuristic" : "unsupported",
+    runtime_dispatch: "unverified",
+    limits: language?.limits ?? "No registered language extractor.",
+  };
+}
+
 export function grammarFileForKey(keyOrPath: string): string | null {
   const key = keyOrPath.trim().toLowerCase();
   if (key.endsWith(".wasm")) return key;
@@ -61,6 +76,7 @@ export function getParserCapabilities(full: boolean) {
       coverage: l.extractor ? "partial" : "none",
       grammars: [...new Set(l.extensions.map(grammarFileForKey).filter(Boolean))],
       limits: l.limits,
+      operations: getOperationCapabilities(`source${l.extensions[0]}`),
       evidence: l.method === "tree-sitter" ? "tests/unit/language-capabilities.test.ts; tests/unit/parser-recovery.test.ts" : "tests/unit/language-capabilities.test.ts",
     })),
   } : {

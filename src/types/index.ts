@@ -236,6 +236,33 @@ export interface DomainCatalogResponse {
   agent_hint?: string;
 }
 
+/** Navigation facts omit source, signatures and declaration identities. */
+export interface NavigationFile {
+  path: string;
+  domain: string;
+  archetype: ArchetypeKind;
+  symbol_count: number;
+  anchor: string | null;
+}
+export interface NavigationQuery {
+  domain?: string;
+  name?: string;
+  file_filter?: string;
+  archetype_filter?: string;
+  archetype?: string;
+  detail_level?: "compact" | "full";
+  file_offset?: number;
+  file_limit?: number;
+  include_evidence?: boolean;
+  include_capabilities?: boolean;
+}
+export interface NavigationEntrypoint {
+  method: string;
+  target: string;
+  file: string | null;
+  handler: string;
+}
+
 export interface ExecutionChainNode {
   relationship?: { kind: "imports" | "declares" | "member_of" | "calls" | "route_binding" | "schema_binding"; derivation: "source" | "inferred"; source?: { file: string; line: number; statement?: string }; reason: string };
 
@@ -393,6 +420,7 @@ export interface InboundCaller {
   caller: string;
   line: number;
   kind?: string;
+  caller_kind?: string;
   domain?: string;
 }
 

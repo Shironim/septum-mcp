@@ -30,5 +30,5 @@ export interface StackSchemaProvider {
     projectRoot: string,
     entitySymbol: string,
     entityFilePath?: string
-  ): Promise<SchemaMetadata | null> | SchemaMetadata | null;
+  ): SchemaMetadata | null;
 }
