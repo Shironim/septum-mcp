@@ -129,7 +129,8 @@ describe("shared import resolution contract", () => {
   expect(resolve("fmt","cmd/main.go").status).toBe("external"); expect(resolve("myapp2/internal/orders","cmd/main.go").status).toBe("unresolved"); expect(resolve("example.com/external/api","cmd/main.go").status).toBe("external");
  });
  it("marks Go workspaces/replaces and conditional file sets explicitly", () => {
-  put("go.mod","module myapp\nreplace example.com/a => ../a\n"); expect(resolve("myapp/a","main.go").status).toBe("unsupported");
+  put("go.mod","module myapp\nreplace example.com/a => ../a\n"); expect(resolve("myapp/a","main.go").reason).toBe("go_package_missing");
+  expect(resolve("fmt","main.go").status).toBe("external");
   put("go.mod","module myapp\n"); put("a/a_linux.go","package a\nfunc A() {}"); expect(resolve("myapp/a","main.go").coverage).toBe("conditional");
   put("a/go.mod","module nested\n"); expect(resolve("myapp/a","main.go").status).toBe("unsupported");
  });

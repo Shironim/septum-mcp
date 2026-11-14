@@ -31,8 +31,8 @@ export class ModuleResolver {
     this.repo = repo;
   }
 
-  public resolveImport(target: string, sourceFile: string) {
-    return new ImportResolver(this.projectRoot, this.repo?.getAllDomains?.().map(domain => domain.root_path) ?? []).resolve(target, sourceFile);
+  public resolveImport(target: string, sourceFile: string, statement?: string) {
+    return new ImportResolver(this.projectRoot, this.repo?.getAllDomains?.().map(domain => domain.root_path) ?? []).resolve(target, sourceFile, statement);
   }
 
   public setRepository(repo: SeptumRepository): void {
@@ -113,11 +113,12 @@ export class ModuleResolver {
   public resolveTargetDomain(
     targetStatement: string,
     sourceFilePath: string | undefined,
-    config: ValidatedSeptumConfig
+    config: ValidatedSeptumConfig,
+    statement?: string
   ): string | null {
     assertUniqueDomainRoots(config.domains, this.projectRoot);
     if (sourceFilePath && (fs.existsSync(path.resolve(this.projectRoot,sourceFilePath)) || this.repo?.getMeta?.("workspace_root"))) {
-      const resolution = this.resolveImport(targetStatement,sourceFilePath);
+      const resolution = this.resolveImport(targetStatement,sourceFilePath,statement);
       if (resolution.status !== "resolved" || resolution.coverage === "conditional") return null;
       const domains = [...new Set(resolution.targets.flatMap(target => target.files.map(file => this.matchDomainByPath(file,config))).filter((d): d is string => !!d))];
       return domains.length === 1 ? domains[0]! : null;

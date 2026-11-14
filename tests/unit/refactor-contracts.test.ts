@@ -135,7 +135,7 @@ test("boundary canonicalization retains whether imports were supplied and their 
 });
 
 test("language capability separates declarations from resolver and dispatch support", () => {
-  expect(getOperationCapabilities("main.rs")).toMatchObject({ declarations: "partial", import_resolution: "unsupported", deep_context: "unsupported", runtime_dispatch: "unverified" });
+  expect(getOperationCapabilities("main.rs")).toMatchObject({ declarations: "partial", import_resolution: "partial", deep_context: "unsupported", runtime_dispatch: "unverified" });
   expect(getOperationCapabilities("main.ts").deep_context).toBe("bounded_references");
   expect(getOperationCapabilities("main.tsx").deep_context).toBe("unsupported");
   expect(getOperationCapabilities("main.kt").declarations).toBe("unsupported");

@@ -80,7 +80,7 @@ export class BoundaryEvaluator {
     const resolved = new Set(evidence?.filter(edge => edge.freshness === "current" && edge.resolution.status === "resolved" && edge.resolution.coverage !== "conditional").map(edge => key(edge.source.file, edge.source.line, edge.resolution.source.target)));
     for (const dep of allDependencies) {
       if (evidence && !resolved.has(key(dep.source_file, dep.line_number, dep.target))) continue;
-      const targetDomain = this.resolveTargetDomain(dep.target, config, dep.source_file);
+      const targetDomain = this.resolveTargetDomain(dep.target, config, dep.source_file, dep.statement);
       if (!targetDomain || targetDomain === dep.source_domain) {
         continue;
       }
@@ -170,9 +170,9 @@ export class BoundaryEvaluator {
       registerKnownFile(d.source_file);
     }
 
-    const resolveTargetFile = (sourceFile: string, rawTarget: string): string | null => {
+    const resolveTargetFile = (sourceFile: string, rawTarget: string, statement?: string): string | null => {
       if (this.repo.getMeta?.("workspace_root") || existsSync(resolve(this.resolver.getProjectRoot(), sourceFile))) {
-        const result = this.resolver.resolveImport(rawTarget,sourceFile);
+        const result = this.resolver.resolveImport(rawTarget,sourceFile,statement);
         const files = result.targets.flatMap(target => target.files);
         return result.status === "resolved" && result.coverage !== "conditional" && files.length === 1 ? files[0]! : null;
       }
@@ -218,11 +218,11 @@ export class BoundaryEvaluator {
 
     for (const dep of allDependencies) {
       if (this.repo.getMeta?.("workspace_root")) {
-        const result = this.resolver.resolveImport(dep.target,dep.source_file);
+        const result = this.resolver.resolveImport(dep.target,dep.source_file,dep.statement);
         if (result.status !== "resolved" || result.coverage === "conditional") continue;
       } else if (dep.is_external) continue;
 
-      const targetDomain = this.resolveTargetDomain(dep.target, config, dep.source_file);
+      const targetDomain = this.resolveTargetDomain(dep.target, config, dep.source_file, dep.statement);
 
       // 1. Domain-to-domain edge (exclude virtual/top-level aggregator "root" domain and type-only imports)
       if (
@@ -255,7 +255,7 @@ export class BoundaryEvaluator {
         continue;
       }
 
-      const targetFile = resolveTargetFile(dep.source_file, dep.target);
+      const targetFile = resolveTargetFile(dep.source_file, dep.target, dep.statement);
       if (targetFile && targetFile !== dep.source_file) {
         let outMap = fileGraph.get(dep.source_file);
         if (!outMap) {
@@ -352,7 +352,8 @@ export class BoundaryEvaluator {
   public checkProposedChanges(
     sourceFilePath: string,
     proposedImports: string[],
-    config: ValidatedSeptumConfig
+    config: ValidatedSeptumConfig,
+    importStatements?: string[]
   ): BoundaryViolation[] {
     const violations: BoundaryViolation[] = [];
     const sourceDomain = this.resolveSourceDomain(sourceFilePath, config);
@@ -378,8 +379,8 @@ export class BoundaryEvaluator {
     const forbidden = sourceDomainConfig.forbidden_dependencies ?? [];
     const allowed = sourceDomainConfig.allowed_dependencies ?? [];
 
-    for (const statement of proposedImports) {
-      const targetDomain = this.resolveTargetDomain(statement, config, sourceFilePath);
+    for (const [index, statement] of proposedImports.entries()) {
+      const targetDomain = this.resolveTargetDomain(statement, config, sourceFilePath, importStatements?.[index]);
       if (!targetDomain || targetDomain === sourceDomain) {
         continue;
       }
@@ -417,8 +418,9 @@ export class BoundaryEvaluator {
   public resolveTargetDomain(
     targetStatement: string,
     config: ValidatedSeptumConfig,
-    sourceFilePath?: string
+    sourceFilePath?: string,
+    statement?: string
   ): string | null {
-    return this.resolver.resolveTargetDomain(targetStatement, sourceFilePath, config);
+    return this.resolver.resolveTargetDomain(targetStatement, sourceFilePath, config, statement);
   }
 }

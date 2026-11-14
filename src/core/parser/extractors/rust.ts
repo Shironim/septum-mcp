@@ -68,6 +68,9 @@ export class RustExtractor implements CodeExtractor {
         const body = node.childForFieldName("body");
         if (name && body) {
           for (const child of body.namedChildren) processItem(child, qualify(name.text));
+        } else if (name) {
+          dependencies.push({ target: `mod:${name.text}`, statement: node.text.trim(),
+            line_number: node.startPosition.row + 1, is_external: false, imported_symbols: [name.text] });
         }
         return;
       }

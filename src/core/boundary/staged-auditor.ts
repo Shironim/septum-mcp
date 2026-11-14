@@ -11,6 +11,7 @@ import { ASTParserEngine } from "../parser/tree-sitter.ts";
 import type { SeptumRepository } from "../database/repository.ts";
 import { computeContentHash } from "../ingestion/hasher.ts";
 import { PARSER_FINGERPRINT } from "../parser/language-capabilities.ts";
+import { isResolutionInput } from "../resolver/interpretation-inputs.ts";
 
 export async function auditStagedFiles(
   evaluator: BoundaryEvaluator,
@@ -37,7 +38,7 @@ export async function auditStagedFiles(
       // Only source and interpretation inputs need bytes in the parser snapshot.
       // Keep the complete path inventory so omitted assets cannot masquerade as source.
       indexedPaths.push(file!);
-      const needed = ASTParserEngine.isSourceFile(file!) || /\.(?:json|jsonc|toml|ya?ml)$/i.test(file!) || /(?:^|\/)(?:go\.mod|go\.work|Cargo\.lock|artisan|requirements\.txt)$/.test(file!);
+      const needed = ASTParserEngine.isSourceFile(file!) || isResolutionInput(file!);
       if (!needed) continue;
       const size = Number(sizeText);
       totalBytes += size;
@@ -85,7 +86,7 @@ export async function auditStagedFiles(
     const resolutionIssues: ImportResolution[] = [];
     const stagedDependencies: ReturnType<SeptumRepository["getAllDependenciesWithDomains"]> = [];
     const parser = new ASTParserEngine();
-    const interpretationChanged = [...files, ...deleted].some(file => /(?:\.(?:json|jsonc|toml)|(?:^|\/)(?:go\.mod|go\.work|Cargo\.lock))$/i.test(file));
+    const interpretationChanged = [...files, ...deleted].some(isResolutionInput);
     const changed = new Set(files);
     const sourceFiles = indexedPaths.filter(inside).map(file => (prefix ? relative(prefix, file) : file).replace(/\\/g, "/"));
     for (const file of sourceFiles) {
@@ -104,8 +105,8 @@ export async function auditStagedFiles(
       })();
       for (const dependency of dependencies) {
         stagedDependencies.push({ source_file: file, source_domain: evaluator.resolveSourceDomain(file, config)!, target: dependency.target, statement: dependency.statement, line_number: dependency.line_number, is_external: dependency.is_external });
-        const found = evaluator.checkProposedChanges(file, [dependency.target], config).map(violation => ({ ...violation, line: dependency.line_number }));
-        const resolution = evaluator.getResolver().resolveImport(dependency.target,file);
+        const found = evaluator.checkProposedChanges(file, [dependency.target], config, [dependency.statement]).map(violation => ({ ...violation, line: dependency.line_number }));
+        const resolution = evaluator.getResolver().resolveImport(dependency.target,file,dependency.statement);
         if (found.length === 0 && (!["resolved","external"].includes(resolution.status) || resolution.coverage === "conditional")) {
           resolutionIssues.push(resolution);
         }

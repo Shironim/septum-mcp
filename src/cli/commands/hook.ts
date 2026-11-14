@@ -148,7 +148,8 @@ async function runPreWriteHook(): Promise<void> {
       const boundaryViolations = evaluator.checkProposedChanges(
         targetFile,
         proposedImports,
-        config
+        config,
+        parsed.dependencies.map(d => d.statement)
       );
 
       if (boundaryViolations.length > 0) {

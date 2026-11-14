@@ -1,25 +1,21 @@
 import * as fs from "node:fs";
+import { resolvePython } from "./languages/python.ts";
+import { resolveGo } from "./languages/go.ts";
+import { resolveRuby } from "./languages/ruby.ts";
+import { resolveRust } from "./languages/rust.ts";
+import { resolveJava, resolveCSharp } from "./languages/managed.ts";
+import type { ResolutionIO } from "./languages/shared.ts";
 import * as path from "node:path";
 import { builtinModules } from "node:module";
 import { computeContentHash } from "../ingestion/hasher.ts";
 import { readSourceFile, probeSourcePath, readSourceDirectory } from "../resources/source-files.ts";
 import type { ImportResolution, ResolutionTarget } from "../../types/index.ts";
 
-export const RESOLVER_REVISION = "4";
+export const RESOLVER_REVISION = "5";
 const GO_STDLIB = new Set("archive bufio builtin bytes cmp compress container context crypto database debug embed encoding errors expvar flag fmt go hash html image index io iter log maps math mime net os path plugin reflect regexp runtime slices sort strconv strings structs sync syscall testing text time unicode unique unsafe".split(" "));
 
 const PYTHON_STDLIB = new Set("abc argparse array ast asyncio atexit base64 bdb binascii bisect builtins bz2 calendar cgi cgitb chunk cmath cmd code codecs codeop collections colorsys compileall concurrent configparser contextlib contextvars copy copyreg cProfile crypt csv ctypes curses dataclasses datetime dbm decimal difflib dis distutils doctest email encodings ensurepip enum errno faulthandler fcntl filecmp fileinput fnmatch fractions ftplib functools gc getopt getpass gettext glob graphlib gzip hashlib heapq hmac html http idlelib imaplib imghdr imp importlib inspect io ipaddress itertools json keyword lib2to3 linecache locale logging lzma mailbox mailcap marshal math mimetypes mmap modulefinder msilib msvcrt multiprocessing netrc nntplib numbers operator optparse os ossaudiodev pathlib pdb pickle pickletools pipes pkgutil platform plistlib poplib posix posixpath pprint profile pstats pty pwd py_compile pyclbr pydoc queue quopri random re readline reprlib resource rlcompleter runpy sched secrets select selectors shelve shlex shutil signal site smtpd smtplib sndhdr socket socketserver spwd sqlite3 ssl stat statistics string stringprep struct subprocess sunau symbol symtable sys sysconfig syslog tabnanny tarfile telnetlib tempfile termios test textwrap threading time timeit tkinter token tokenize tomllib trace traceback tracemalloc tty turtle turtledemo types typing unicodedata unittest urllib uu uuid venv warnings wave weakref webbrowser winreg winsound wsgiref xdrlib xml xmlrpc zipapp zipfile zipimport zlib zoneinfo".split(" "));
 
-const PYTHON_DIST_TO_MODULE_MAP: Record<string, string[]> = {
-  pillow: ["pil"],
-  pyyaml: ["yaml"],
-  python_dotenv: ["dotenv"],
-  scikit_learn: ["sklearn"],
-  beautifulsoup4: ["bs4"],
-  opencv_python: ["cv2"],
-  protobuf: ["google"],
-  typing_extensions: ["typing_extensions"],
-};
 
 const PHP_STDLIB = new Set([
   "stdClass", "Exception", "ErrorException", "Error", "TypeError", "ValueError", "ArgumentCountError",
@@ -41,8 +37,10 @@ export class ImportResolver {
   private root: string;
   constructor(root: string, private packageRoots: string[] = []) { this.root = path.resolve(root); }
 
-  public resolve(target: string, sourceFile: string): ImportResolution {
+  public resolve(target: string, sourceFile: string, statement?: string): ImportResolution {
     const manifests: Record<string, string> = {};
+    const contents = new Map<string, string | undefined>();
+    let bytesRead = 0;
     const result: ImportResolution = {
       status: "unresolved", targets: [], reason: "target_not_found", coverage: "partial",
       resolver_revision: RESOLVER_REVISION, config_revision: "", source: { file: sourceFile, target },
@@ -53,8 +51,13 @@ export class ImportResolver {
     });
     const read = (file: string): string | undefined => {
       this.assertContained(file);
+      if (contents.has(file)) return contents.get(file);
       if (probeSourcePath(file) === "missing") { manifests[path.relative(this.root, file)] = "missing"; return undefined; }
-      const text = readSourceFile(file); manifests[path.relative(this.root, file)] = computeContentHash(text); return text;
+      const text = readSourceFile(file);
+      bytesRead += Buffer.byteLength(text, "utf8");
+      if (bytesRead > 16 * 1024 * 1024) throw new Error("resolution_source_byte_limit");
+      contents.set(file, text);
+      manifests[path.relative(this.root, file)] = computeContentHash(text); return text;
     };
     const json = (file: string): any => {
       const raw = read(file); if (raw === undefined) return {};
@@ -95,43 +98,13 @@ export class ImportResolver {
       if (target.startsWith("dynamic:")) return finish("unresolved", "dynamic_target");
       const source = path.resolve(this.root, sourceFile); this.assertContained(source);
       const ext = path.extname(source).toLowerCase();
-      if (ext === ".go") {
-        let dir = path.dirname(source), modDir: string | undefined, mod = "";
-        while (true) {
-          if (read(path.join(dir, "go.work")) !== undefined) return finish("unsupported", "go_work_not_supported");
-          const text = read(path.join(dir, "go.mod"));
-          if (text !== undefined && !modDir) { modDir = dir; mod = text; }
-          if (dir === this.root) break;
-          dir = path.dirname(dir);
-        }
-        if (!modDir) return finish("unsupported", "go_mod_missing");
-        if (/^\s*replace\b/m.test(mod)) return finish("unsupported", "go_replace_not_supported");
-        const moduleName = mod.match(/^\s*module\s+([^\s]+)\s*$/m)?.[1]?.replace(/^"|"$/g, "");
-        if (!moduleName) return finish("unsupported", "malformed_go_mod");
-        if (target === moduleName || target.startsWith(moduleName + "/")) {
-          const packageDir = path.resolve(modDir, target.slice(moduleName.length).replace(/^\//, "")); this.assertContained(packageDir);
-          let parent = packageDir;
-          while (parent !== modDir) {
-            if (!parent.startsWith(modDir + path.sep)) return finish("unsupported", "outside_module");
-            if (read(path.join(parent, "go.mod")) !== undefined) return finish("unsupported", "nested_go_mod");
-            parent = path.dirname(parent);
-          }
-          if (!fs.existsSync(packageDir) || !fs.statSync(packageDir).isDirectory()) return finish("unresolved", "go_package_missing");
-          const names = fs.readdirSync(packageDir).filter(name => name.endsWith(".go") && !name.endsWith("_test.go")).sort();
-          const packageFiles: string[] = [];
-          for (const name of names) {
-            const file = path.join(packageDir, name); this.assertContained(file);
-            const content = readSourceFile(file);
-            if (/^\s*\/\/\s*(?:go:build|\+build)\b/m.test(content) || /_(?:linux|windows|darwin|freebsd|amd64|arm64|386|arm)\.go$/.test(name)) result.coverage = "conditional";
-            packageFiles.push(path.relative(this.root, file).replace(/\\/g, "/"));
-          }
-          return packageFiles.length ? finish("resolved", "go_module_package", [{ kind: "package", files: packageFiles }]) : finish("unresolved", "go_package_empty");
-        }
-        if (GO_STDLIB.has(target.split("/")[0]!)) return finish("external", "go_standard_library");
-        const requirements = [...mod.matchAll(/^\s*(?:require\s+)?([A-Za-z0-9._~/-]+)\s+v[^\s]+/gm)].map(m => m[1]!);
-        if (requirements.some(name => target === name || target.startsWith(name + "/"))) return finish("external", "go_required_module");
-        return finish("unresolved", "go_module_not_declared");
-      }
+      const io: ResolutionIO = { root: this.root, read, check: file => this.assertContained(file), finish };
+      if (ext === ".go") return resolveGo(io, target, sourceFile, GO_STDLIB);
+      if (ext === ".py") return resolvePython(io, target, sourceFile, this.packageRoots, PYTHON_STDLIB);
+      if (ext === ".rb") return resolveRuby(io, target, sourceFile, statement);
+      if (ext === ".rs") return resolveRust(io, target, sourceFile);
+      if (ext === ".java") return resolveJava(io, target, sourceFile, statement);
+      if (ext === ".cs") return resolveCSharp(io, target, sourceFile, statement);
       if (ext === ".php") {
         let rawTarget = target.trim();
         const useMatch = rawTarget.match(/^use\s+(?:function\s+|const\s+)?([^;\s]+)(?:\s+as\s+[^;\s]+)?\s*;?$/i);
@@ -249,124 +222,6 @@ export class ImportResolver {
         }
 
         return finish("unresolved", "php_namespace_not_mapped");
-      }
-      if (ext === ".py") {
-        if (target.startsWith(".")) {
-          const dotsMatch = target.match(/^\.+/);
-          const dotCount = dotsMatch ? dotsMatch[0].length : 0;
-          const remainder = target.slice(dotCount);
-          let baseDir = path.dirname(source);
-          for (let i = 1; i < dotCount; i++) {
-            baseDir = path.dirname(baseDir);
-          }
-          this.assertContained(baseDir);
-          const fsSubpath = remainder ? remainder.split(".").join(path.sep) : "";
-          const targetDirOrFile = fsSubpath ? path.resolve(baseDir, fsSubpath) : baseDir;
-          this.assertContained(targetDirOrFile);
-
-          const candidates: string[] = [];
-          if (fsSubpath) {
-            const pyFile = targetDirOrFile + ".py";
-            if (fs.existsSync(pyFile) && fs.statSync(pyFile).isFile()) {
-              candidates.push(path.relative(this.root, pyFile).replace(/\\/g, "/"));
-            }
-          }
-          const initFile = path.join(targetDirOrFile, "__init__.py");
-          if (fs.existsSync(initFile) && fs.statSync(initFile).isFile()) {
-            candidates.push(path.relative(this.root, initFile).replace(/\\/g, "/"));
-          }
-          return resolvedFiles(candidates, "python_relative_module");
-        }
-
-        const parts = target.split(".");
-        const topPackage = parts[0]!;
-        const fsSubpath = parts.join(path.sep);
-
-        const searchRoots: string[] = [];
-        const srcDir = path.resolve(this.root, "src");
-        if (fs.existsSync(srcDir) && fs.statSync(srcDir).isDirectory()) {
-          searchRoots.push(srcDir);
-        }
-        searchRoots.push(this.root);
-        const callerDir = path.dirname(source);
-        if (callerDir !== this.root && callerDir !== srcDir) {
-          searchRoots.push(callerDir);
-        }
-        for (const pkgRoot of this.packageRoots) {
-          const abs = path.resolve(this.root, pkgRoot);
-          if (!searchRoots.includes(abs) && fs.existsSync(abs)) {
-            searchRoots.push(abs);
-          }
-        }
-
-        const localCandidates: string[] = [];
-        for (const sRoot of searchRoots) {
-          const candidateFile = path.resolve(sRoot, fsSubpath + ".py");
-          if (candidateFile.startsWith(this.root + path.sep) && fs.existsSync(candidateFile) && fs.statSync(candidateFile).isFile()) {
-            localCandidates.push(path.relative(this.root, candidateFile).replace(/\\/g, "/"));
-          }
-          const candidateInit = path.resolve(sRoot, fsSubpath, "__init__.py");
-          if (candidateInit.startsWith(this.root + path.sep) && fs.existsSync(candidateInit) && fs.statSync(candidateInit).isFile()) {
-            localCandidates.push(path.relative(this.root, candidateInit).replace(/\\/g, "/"));
-          }
-        }
-
-        const unique = [...new Set(localCandidates)].sort();
-        if (unique.length > 0) {
-          return finish(
-            unique.length === 1 ? "resolved" : "ambiguous",
-            unique.length === 1 ? "python_local_module" : "multiple_python_candidates",
-            unique.map(file => ({ kind: "file", files: [file] }))
-          );
-        }
-
-        if (PYTHON_STDLIB.has(topPackage)) {
-          return finish("external", "python_standard_library");
-        }
-
-        const declaredPackages = new Set<string>();
-        const reqText = read(path.join(this.root, "requirements.txt"));
-        if (reqText) {
-          for (const rawLine of reqText.split(/\r?\n/)) {
-            const line = rawLine.replace(/#.*$/, "").trim();
-            if (!line || line.startsWith("-")) continue;
-            const match = line.match(/^([A-Za-z0-9_.-]+)/);
-            if (match) declaredPackages.add(match[1].toLowerCase().replace(/[-_.]/g, "_"));
-          }
-        }
-        const pyprojectText = read(path.join(this.root, "pyproject.toml"));
-        if (pyprojectText) {
-          for (const rawLine of pyprojectText.split(/\r?\n/)) {
-            const line = rawLine.replace(/#.*$/, "").trim();
-            const matchArray = line.match(/^["']([A-Za-z0-9_.-]+)(?:[><=~!^;].*)?["']/);
-            if (matchArray) {
-              declaredPackages.add(matchArray[1].toLowerCase().replace(/[-_.]/g, "_"));
-              continue;
-            }
-            const matchKey = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*(?:\{|"[^"]*"|'[^']*'|\d)/);
-            if (matchKey && !["python", "version", "name", "description"].includes(matchKey[1].toLowerCase())) {
-              declaredPackages.add(matchKey[1].toLowerCase().replace(/[-_.]/g, "_"));
-            }
-          }
-        }
-        const pipfileText = read(path.join(this.root, "Pipfile"));
-        if (pipfileText) {
-          for (const rawLine of pipfileText.split(/\r?\n/)) {
-            const line = rawLine.replace(/#.*$/, "").trim();
-            const match = line.match(/^([A-Za-z0-9_.-]+)\s*=/);
-            if (match) declaredPackages.add(match[1].toLowerCase().replace(/[-_.]/g, "_"));
-          }
-        }
-
-        const normalizedTop = topPackage.toLowerCase().replace(/[-_.]/g, "_");
-        const isDeclared = declaredPackages.has(normalizedTop) ||
-          Object.entries(PYTHON_DIST_TO_MODULE_MAP).some(([dist, mods]) => declaredPackages.has(dist) && mods.includes(normalizedTop));
-
-        if (isDeclared) {
-          return finish("external", "python_manifest_dependency");
-        }
-
-        return finish("unresolved", "python_module_not_declared");
       }
       if (!/\.(?:[cm]?[jt]sx?|vue|astro|svelte)$/.test(ext)) return finish("unsupported", "language_resolver_unavailable");
       const extensions = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".d.ts", ".json"];

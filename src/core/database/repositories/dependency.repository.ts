@@ -172,7 +172,7 @@ export class DependencyRepository {
         try { assertPathContained(dep.source_file, root, "Import source"); freshness.set(dep.source_file, computeContentHash(readSourceFile(resolve(root,dep.source_file))) === hashes.get(dep.source_file) ? "current" : "stale"); }
         catch { freshness.set(dep.source_file,"unavailable"); }
       }
-      const resolution = resolver.resolve(dep.target,dep.source_file);
+      const resolution = resolver.resolve(dep.target,dep.source_file,dep.statement);
       const current = freshness.get(dep.source_file)!;
       if (current !== "current") { resolution.status = "unresolved"; resolution.reason = `source_${current}`; resolution.targets = []; }
       const targetDomains = resolution.targets.flatMap(target => target.files.map(file => domains.find(domain => {

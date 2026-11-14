@@ -4,6 +4,7 @@ import type { ValidatedSeptumConfig } from '../core/config/schema.ts';
 import type { SeptumRepository } from '../core/database/repository.ts';
 import type { IngestionPipeline } from '../core/ingestion/pipeline.ts';
 import { ASTParserEngine } from '../core/parser/tree-sitter.ts';
+import { isResolutionInput } from '../core/resolver/interpretation-inputs.ts';
 import { shouldIgnoreSourcePath } from '../core/resources/ignore.ts';
 import { RESOURCE_LIMITS } from '../core/resources/limits.ts';
 import { SerialWorkQueue } from '../core/resources/work-queue.ts';
@@ -117,7 +118,7 @@ export class WorkspaceWatcher {
     if (isAbsolute(rel) || rel === '..' || rel.startsWith('../') || shouldIgnoreSourcePath(norm, this.config.settings.ignore_patterns)) return;
     let directory = this.watches.has(target);
     try { directory ||= lstatSync(target).isDirectory(); } catch { /* deletion */ }
-    if (directory || /(^|\/)(septum\.config\.json|package\.json|composer\.json|nest-cli\.json|go\.mod|tsconfig\.json|artisan)$/.test(norm)) {
+    if (directory || isResolutionInput(norm)) {
       this.reconcile = true;
       this.pending.clear();
     } else if (ASTParserEngine.isSourceFile(norm)) {
