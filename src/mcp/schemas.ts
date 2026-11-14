@@ -38,46 +38,6 @@ export function extractSingleStringFallback(
   return raw;
 }
 
-export function normalizeFeatureContextArgs(raw: unknown): unknown {
-  const coerced = extractSingleStringFallback(raw, "feature_key");
-  if (typeof coerced !== "object" || coerced === null || Array.isArray(coerced)) return coerced;
-  const obj = { ...(coerced as Record<string, unknown>) };
-
-  const aliases: Record<string, string> = {
-    feature: "feature_key",
-    featureKey: "feature_key",
-    feature_name: "feature_key",
-    featureName: "feature_key",
-    feat: "feature_key",
-    name: "feature_key",
-    key: "feature_key",
-    task: "feature_key",
-    task_name: "feature_key",
-    target: "feature_key",
-    context: "feature_key",
-    slug: "feature_key",
-    workspace: "workspace_path",
-    workspacePath: "workspace_path",
-    project_root: "workspace_path",
-    projectRoot: "workspace_path",
-  };
-
-  for (const [alias, target] of Object.entries(aliases)) {
-    if (obj[alias] !== undefined && obj[target] === undefined) {
-      obj[target] = obj[alias];
-    }
-  }
-
-  // Populate feature as backward-compatible alias
-  if (obj.feature_key !== undefined && obj.feature === undefined) {
-    obj.feature = obj.feature_key;
-  } else if (obj.feature !== undefined && obj.feature_key === undefined) {
-    obj.feature_key = obj.feature;
-  }
-
-  return obj;
-}
-
 export function normalizeBoundaryArgs(raw: unknown): unknown {
   if (Array.isArray(raw) && raw.length > 1 && raw.every((item) => typeof item === "string")) {
     raw = { file_paths: raw };
@@ -130,6 +90,7 @@ export function normalizeBoundaryArgs(raw: unknown): unknown {
     project_root: "workspace_path",
     projectRoot: "workspace_path",
   };
+  obj.proposed_imports_supplied ??= ["proposed_imports", "proposedImports", "imports", "to_file", "toFile"].some(key => Object.prototype.hasOwnProperty.call(obj, key));
   for (const [alias, target] of Object.entries(aliases)) {
     if (obj[alias] !== undefined && obj[target] === undefined) {
       obj[target] = obj[alias];
@@ -237,27 +198,14 @@ export const GetDomainCatalogSchema = z.preprocess(
     archetype: z.string().optional(),
     detail_level: z.enum(["compact", "full"]).optional().default("compact"),
     file_filter: z.string().optional(),
+    file_offset: z.number().int().nonnegative().optional(),
+    file_limit: z.number().int().min(1).max(100).optional(),
+    include_evidence: z.boolean().optional(),
+    include_capabilities: z.boolean().optional(),
     workspace_path: z.string().optional(),
   })
 );
 export type GetDomainCatalogArgs = z.infer<typeof GetDomainCatalogSchema>;
-
-export const GetFeatureContextSchema = z.preprocess(
-  normalizeFeatureContextArgs,
-  z.object({
-    feature_key: z.string().optional(),
-    feature: z.string().optional(),
-    workspace_path: z.string().optional(),
-  })
-);
-export type GetFeatureContextArgs = z.infer<typeof GetFeatureContextSchema>;
-
-export const ClearFeatureContextSchema = z
-  .object({
-    workspace_path: z.string().optional(),
-  })
-  .passthrough();
-export type ClearFeatureContextArgs = z.infer<typeof ClearFeatureContextSchema>;
 
 export function normalizeLocateSymbolArgs(raw: unknown): unknown {
   const coerced = extractSingleStringFallback(raw, "query", [
@@ -271,6 +219,8 @@ export function normalizeLocateSymbolArgs(raw: unknown): unknown {
     "domain",
     "domain_name",
     "domainName",
+    "file_path",
+    "filePath",
   ]);
   if (typeof coerced !== "object" || coerced === null || Array.isArray(coerced)) return coerced;
   const obj = withAliases(coerced, {
@@ -331,6 +281,8 @@ export function normalizeGetSymbolArgs(raw: unknown): unknown {
     "domain",
     "domain_name",
     "domainName",
+    "file_path",
+    "filePath",
   ]);
   if (typeof coerced !== "object" || coerced === null || Array.isArray(coerced)) return coerced;
   const obj = withAliases(coerced, {
@@ -474,6 +426,7 @@ export const CheckBoundarySchema = z.preprocess(
     file_path: z.string().trim().min(1, "file_path cannot be blank").optional(),
     file_paths: z.array(z.string().trim().min(1, "file_paths cannot contain blank paths")).optional(),
     proposed_imports: z.array(z.string()).optional().default([]),
+    proposed_imports_supplied: z.boolean().optional().default(false),
     scope: z.enum(["file", "all", "staged", "domain"]).optional(),
     domain: z.string().trim().min(1, "domain cannot be blank").optional(),
     staged: z.boolean().optional(),
@@ -506,34 +459,6 @@ export const CheckBoundarySchema = z.preprocess(
   })
 );
 export type CheckBoundaryArgs = z.infer<typeof CheckBoundarySchema>;
-
-export const GetSymbolHotspotsSchema = z.preprocess(
-  (args) =>
-    withAliases(args, {
-      domain_name: "domain",
-      domainName: "domain",
-      max: "limit",
-      nesting: "min_nesting",
-      minNesting: "min_nesting",
-      lines: "min_lines",
-      minLines: "min_lines",
-      sortBy: "sort_by",
-      workspace: "workspace_path",
-      workspacePath: "workspace_path",
-      project_root: "workspace_path",
-      projectRoot: "workspace_path",
-    }),
-  z.object({
-    min_lines: z.number().int().nonnegative().optional(),
-    min_nesting: z.number().int().positive().optional(),
-    kind: z.string().optional(),
-    domain: z.string().optional(),
-    limit: z.number().int().positive().optional().default(30),
-    sort_by: z.enum(["lines", "nesting", "risk_score"]).optional(),
-    workspace_path: z.string().optional(),
-  })
-);
-export type GetSymbolHotspotsArgs = z.infer<typeof GetSymbolHotspotsSchema>;
 
 export function normalizeRegisterDomainArgs(raw: unknown): unknown {
   const coerced = extractSingleStringFallback(raw, "domain", [
@@ -590,161 +515,6 @@ export const RegisterDomainSchema = z.preprocess(
   })
 );
 export type RegisterDomainArgs = z.infer<typeof RegisterDomainSchema>;
-
-export function normalizeRegisterFeatureArgs(raw: unknown): unknown {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
-  const obj = { ...(raw as Record<string, unknown>) };
-
-  const aliases: Record<string, string> = {
-    feature: "feature_key",
-    featureKey: "feature_key",
-    feature_name: "feature_key",
-    featureName: "feature_key",
-    feat: "feature_key",
-    name: "feature_key",
-    key: "feature_key",
-    domain_name: "domain",
-    domainName: "domain",
-    touchpoints: "allowed_touchpoints",
-    allowedTouchpoints: "allowed_touchpoints",
-    touchpoint: "allowed_touchpoints",
-    files: "allowed_touchpoints",
-    allowed_files: "allowed_touchpoints",
-    reuseSymbols: "reuse_symbols",
-    reuse: "reuse_symbols",
-    symbols: "reuse_symbols",
-    inputContract: "input_contract",
-    outputContract: "output_contract",
-    workspace: "workspace_path",
-    workspacePath: "workspace_path",
-    project_root: "workspace_path",
-    projectRoot: "workspace_path",
-  };
-
-  for (const [alias, target] of Object.entries(aliases)) {
-    if (obj[alias] !== undefined && obj[target] === undefined) {
-      obj[target] = obj[alias];
-    }
-  }
-
-  // Symmetrical contract: feature_key <-> feature
-  if (obj.feature_key !== undefined && obj.feature === undefined) {
-    obj.feature = obj.feature_key;
-  } else if (obj.feature !== undefined && obj.feature_key === undefined) {
-    obj.feature_key = obj.feature;
-  }
-
-  // Symmetrical contract: domain <-> domain_name
-  if (obj.domain !== undefined && obj.domain_name === undefined) {
-    obj.domain_name = obj.domain;
-  } else if (obj.domain_name !== undefined && obj.domain === undefined) {
-    obj.domain = obj.domain_name;
-  }
-
-  // Array coercion for allowed_touchpoints
-  if (typeof obj.allowed_touchpoints === "string") {
-    obj.allowed_touchpoints = [obj.allowed_touchpoints];
-  } else if (!Array.isArray(obj.allowed_touchpoints) && obj.allowed_touchpoints !== undefined) {
-    obj.allowed_touchpoints = [];
-  }
-
-  // Array coercion for reuse_symbols
-  if (typeof obj.reuse_symbols === "string") {
-    obj.reuse_symbols = [obj.reuse_symbols];
-  }
-
-  return obj;
-}
-
-export const RegisterFeatureSchema = z.preprocess(
-  normalizeRegisterFeatureArgs,
-  z.object({
-    feature_key: z.string().min(1, "Feature key is required"),
-    feature: z.string().optional(),
-    domain: z.string().min(1, "Domain name is required"),
-    domain_name: z.string().optional(),
-    description: z.string().optional(),
-    allowed_touchpoints: z.array(z.string()).default([]),
-    reuse_symbols: z.array(z.string()).optional(),
-    input_contract: z.record(z.unknown()).optional(),
-    output_contract: z.record(z.unknown()).optional(),
-    workspace_path: z.string().optional(),
-  })
-);
-export type RegisterFeatureArgs = z.infer<typeof RegisterFeatureSchema>;
-
-function normalizeTopologyArgs(raw: unknown): unknown {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
-  const obj = withAliases(raw, {
-    workspace: "workspace_path",
-    workspacePath: "workspace_path",
-    project_root: "workspace_path",
-    projectRoot: "workspace_path",
-  }) as Record<string, unknown>;
-  if (obj.resolve_node !== undefined && obj.resolveNode === undefined) {
-    obj.resolveNode = obj.resolve_node;
-  }
-  if (obj.resolve_layer !== undefined && obj.resolve === undefined) {
-    obj.resolve = obj.resolve_layer;
-  }
-  if (obj.resolveLayer !== undefined && obj.resolve === undefined) {
-    obj.resolve = obj.resolveLayer;
-  }
-  if (typeof obj.resolveNode === "object" && obj.resolveNode !== null) {
-    obj.resolveNode = withAliases(obj.resolveNode, {
-      canonicalTag: "canonical_tag",
-      domainOrIp: "domain_or_ip",
-      connectedTo: "connected_to",
-      nodeId: "id",
-      node_id: "id",
-      nodeName: "name",
-      node_name: "name",
-    });
-  }
-  return obj;
-}
-
-export const GetEnvironmentTopologySchema = z.preprocess(
-  (args) => normalizeTopologyArgs(args),
-  z.object({
-    resolve: z
-      .object({
-        layer: z.enum(["edge", "gateway", "host", "runtime", "storage", "telemetry"]),
-        platform: z.string().min(1, "platform name cannot be empty"),
-        constraints: z.array(z.string()).optional(),
-      })
-      .optional(),
-    resolveNode: z
-      .object({
-        id: z.string().min(1, "Node id cannot be empty"),
-        layer: z.enum(["edge", "gateway", "host", "runtime", "storage", "telemetry"]),
-        name: z.string().min(1, "Node name cannot be empty"),
-        platform: z.string().min(1, "Platform cannot be empty"),
-        canonical_tag: z
-          .enum([
-            "shared_hosting",
-            "vps",
-            "docker",
-            "serverless",
-            "kubernetes",
-            "managed_db",
-            "cdn_edge",
-            "paas",
-            "static_cdn",
-            "unspecified",
-          ])
-          .optional(),
-        domain_or_ip: z.string().optional(),
-        role: z.string().optional(),
-        constraints: z.array(z.string()).optional(),
-        connected_to: z.array(z.string()).optional(),
-      })
-      .optional(),
-    refresh: z.boolean().optional().default(false),
-    workspace_path: z.string().optional(),
-  })
-);
-export type GetEnvironmentTopologyArgs = z.infer<typeof GetEnvironmentTopologySchema>;
 
 // =========================================================================
 // 4 UNIFIED TOOLS SCHEMAS & NORMALIZERS
@@ -839,6 +609,10 @@ export const MapToolSchema = z.preprocess(
     archetype_filter: z.string().optional(),
     archetype: z.string().optional(),
     file_filter: z.string().optional(),
+    file_offset: z.number().int().nonnegative().optional(),
+    file_limit: z.number().int().min(1).max(100).optional(),
+    include_evidence: z.boolean().optional(),
+    include_capabilities: z.boolean().optional(),
     root: z.string().optional(),
     description: z.string().optional(),
     allowed_dependencies: z.array(z.string()).optional(),
@@ -862,6 +636,8 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
     "domain",
     "domain_name",
     "domainName",
+    "file_path",
+    "filePath",
     "limit",
   ]);
   if (typeof coerced !== "object" || coerced === null || Array.isArray(coerced)) return coerced;
@@ -896,7 +672,7 @@ export function normalizeSymbolToolArgs(raw: unknown): unknown {
   }
 
   if (!obj.action) {
-    if (obj.budget_bytes !== undefined || obj.continuation !== undefined) {
+    if (obj.budget_bytes !== undefined || obj.continuation !== undefined || obj.context_mode !== undefined) {
       obj.action = "context";
     } else if (obj.include_dependencies !== undefined || obj.include_source !== undefined ||
       obj.source_start_line !== undefined || obj.source_line_limit !== undefined) {
@@ -930,6 +706,7 @@ export const SymbolToolSchema = z.preprocess(
     source_start_line: z.number().int().positive().optional(),
     source_line_limit: z.number().int().positive().max(200).optional(),
     semantic_depth: z.number().int().min(1).max(2).optional(),
+    context_mode: z.enum(["deep", "source"]).optional(),
     budget_bytes: z.number().int().min(2048).max(2 * 1024 * 1024).optional(),
     continuation: z.string().min(1).max(4096).optional(),
   }).superRefine((args, ctx) => {
@@ -938,6 +715,12 @@ export const SymbolToolSchema = z.preprocess(
     }
     if (args.action !== "context" && (args.budget_bytes !== undefined || args.continuation !== undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["action"], message: "budget_bytes and continuation are supported only for context." });
+    }
+    if (args.context_mode !== undefined && args.action !== "context") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["context_mode"], message: "context_mode requires action='context' or its inspect alias." });
+    }
+    if (args.context_mode === "deep" && (args.include_source !== undefined || args.source_start_line !== undefined || args.source_line_limit !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["context_mode"], message: "Deep context does not accept bounded source options." });
     }
   })
 );
@@ -950,4 +733,14 @@ export type SliceToolArgs = TraceVerticalSliceArgs;
 // 4. septum_boundary
 export const BoundaryToolSchema = CheckBoundarySchema;
 export type BoundaryToolArgs = CheckBoundaryArgs;
+
+export function parseToolRequest(name: string, args: unknown) {
+  switch (name) {
+    case "septum_map": return { name, args: MapToolSchema.parse(args ?? {}) } as const;
+    case "septum_symbol": return { name, args: SymbolToolSchema.parse(args ?? {}) } as const;
+    case "septum_slice": return { name, args: SliceToolSchema.parse(args ?? {}) } as const;
+    case "septum_boundary": return { name, args: BoundaryToolSchema.parse(args ?? {}) } as const;
+    default: throw new Error(`Unknown tool: '${name}'`);
+  }
+}
 

@@ -200,8 +200,8 @@ describe("Septum Version & Update Notification Suite", () => {
       const parsed = JSON.parse(result.content[0].text);
       expect(parsed.runtime_version).toBeDefined();
       expect(parsed.index_status).toBeDefined();
-      expect(parsed.index_status.runtime_version).toBeDefined();
-      expect(parsed.agent_instruction).toBeDefined();
+      expect(parsed.schema).toBe("navigation/v1");
+      expect(parsed.next).toBeDefined();
     });
   });
 

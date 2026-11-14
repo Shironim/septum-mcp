@@ -21,15 +21,44 @@ export async function handleLocateSymbol(
   workspaceRoot?: string
 ) {
   const query = (args.query || args.symbol || args.symbol_ref?.name || "").toString().trim();
+  const root = symbolWorkspace(repo, workspaceRoot || args.workspace_path);
+  const diagnostics: string[] = [];
+  const limit = args.limit ?? 10;
+
   if (!query) {
+    if (args.file_path) {
+      const normalizedPath = args.file_path.replace(/\\/g, "/").replace(/^\.\//, "");
+      const file = repo.getFileByPath(normalizedPath);
+      const allSymbols = file ? repo.getSymbolsByFileId(file.id) : [];
+      const sliced = allSymbols.slice(0, limit).map((s) => ({
+        name: s.name,
+        file_path: normalizedPath,
+        kind: s.kind,
+        signature: s.signature,
+        start_line: s.line_start,
+        end_line: s.line_end,
+      }));
+      const filePayload = {
+        status: sliced.length > 0 ? "success" : "not_found",
+        found: sliced.length > 0,
+        query: null,
+        file_path: normalizedPath,
+        candidates: sliced,
+        total_candidates: allSymbols.length,
+        omitted_candidates: Math.max(0, allSymbols.length - sliced.length),
+        summary: sliced.length > 0
+          ? `[FOUND] Listed ${sliced.length} of ${allSymbols.length} declarations in ${normalizedPath}.`
+          : `[NOT FOUND] No indexed declarations found in '${normalizedPath}'.`,
+      };
+      return withSymbolEvidence(repo, root, { operation: "locate", requested: args.symbol_ref, diagnostics }, () => ({
+        content: [{ type: "text" as const, text: JSON.stringify(filePayload, null, 2) }],
+        metadata: filePayload,
+      }));
+    }
     throw new Error(
       "Missing required argument: 'query' (e.g. 'OrderController::calculateTotal' or error log snippet)"
     );
   }
-
-  const root = symbolWorkspace(repo, workspaceRoot || args.workspace_path);
-  const diagnostics: string[] = [];
-  const limit = args.limit ?? 10;
 
   // 1. Guarded Lazy Ingestion on Empty Catalog / Cold Start
   if (repo.countFiles() === 0 && pipeline) {
@@ -129,9 +158,14 @@ export async function handleLocateSymbol(
     summary += ` | ⚠️ High-Complexity Smell: spans ${exactLineCount} lines (> 300L)`;
   }
 
+  const allCandidates = result.candidates || [];
+  const boundedCandidates = allCandidates.slice(0, limit);
   const payload = {
     status: result.status ?? (result.found ? "success" : "not_found"),
-    candidates: result.candidates,
+    candidates: result.candidates ? boundedCandidates : undefined,
+    ...(allCandidates.length > boundedCandidates.length
+      ? { total_candidates: allCandidates.length, omitted_candidates: allCandidates.length - boundedCandidates.length }
+      : {}),
     symbol_ref: result.symbol_ref,
     visibility_semantics: "legacy_normalized",
     found: result.found,

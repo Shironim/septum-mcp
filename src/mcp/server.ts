@@ -1,3 +1,4 @@
+import { buildUnindexedCatalog } from "./tools/get-domain-catalog.ts";
 import { WorkspaceManager, resolveServerWorkspace, isWorkspaceInitialized, type WorkspaceLease } from "./workspace-manager.ts";
 import { RESOURCE_LIMITS } from "../core/resources/limits.ts";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -15,19 +16,9 @@ import { handleBoundaryTool } from "./tools/boundary.ts";
 import { DomainRootConflictError } from "../core/config/domain-ownership.ts";
 
 import {
-  MapToolSchema,
-  SymbolToolSchema,
-  SliceToolSchema,
-  BoundaryToolSchema,
+  parseToolRequest,
 } from "./schemas.ts";
 import { SEPTUM_VERSION, checkRuntimeVersion } from "../utils/version-check.ts";
-
-const TOOL_SCHEMAS = {
-  septum_map: MapToolSchema,
-  septum_symbol: SymbolToolSchema,
-  septum_slice: SliceToolSchema,
-  septum_boundary: BoundaryToolSchema,
-};
 
 export function extractPathHint(args: unknown): string | undefined {
   if (!args) return undefined;
@@ -118,6 +109,7 @@ Guidelines for AI Coding Agents:
 
 export async function runMCPServer(): Promise<void> {
   const manager = new WorkspaceManager();
+  void checkRuntimeVersion().catch(() => {});
 
   const server = new Server(
     {
@@ -138,7 +130,7 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_map",
           description:
-            "Understand codebase architecture, domain boundaries, and file inventories before touching code. When to use: exploring modules, checking allowed/forbidden dependency rules, or listing files in a domain without reading file contents. When NOT to use: do NOT use to read function source (use septum_symbol) or trace execution paths (use septum_slice). Example: {action:'catalog',domain:'core',detail_level:'compact'} or {action:'catalog'} for project-wide macro map.",
+            "Navigate architecture: workspace domains and cross-domain import adjacency, domain/file neighborhoods, static entrypoints and coverage. Output schema navigation/v1. Signatures, member lists and source belong to septum_symbol; full expands navigation only. Use file_filter to focus, include_evidence for one file's import details, or septum_slice for static handler relationships. Example: {action:'catalog',domain:'mcp'}.",
           inputSchema: {
             type: "object",
             properties: {
@@ -156,7 +148,7 @@ export async function runMCPServer(): Promise<void> {
                 type: "string",
                 enum: ["compact", "full"],
                 default: "compact",
-                description: "Catalog detail level: 'compact' (default, token-efficient summary with file connections) or 'full' (includes full signatures).",
+                description: "Navigation extent: compact selects up to 40 files, full up to 100. Neither includes signatures or source; use septum_symbol for declaration inspection.",
               },
               archetype_filter: {
                 type: "string",
@@ -166,6 +158,10 @@ export async function runMCPServer(): Promise<void> {
                 type: "string",
                 description: "Optional substring filter to inspect specific file(s) within the domain.",
               },
+              file_offset: { type: "integer", minimum: 0, description: "Start of the catalog file page; copy next_file_offset from pagination." },
+              file_limit: { type: "integer", minimum: 1, maximum: 100, description: "Optional navigation selection limit. Small scopes return together; pagination appears only when files remain." },
+              include_evidence: { type: "boolean", description: "Opt in to up to 20 raw import-evidence records; requires file_filter matching exactly one file." },
+              include_capabilities: { type: "boolean", description: "Opt in to language/parser capabilities; omitted from navigation by default." },
               root: {
                 type: "string",
                 description: "Root directory path for domain registration (action='register').",
@@ -257,6 +253,10 @@ export async function runMCPServer(): Promise<void> {
                 minimum: 1,
                 maximum: 200,
                 description: "Select bounded source inspection with this line limit (capped at 200). Bounded mode uses 120 lines when omitted.",
+              },
+              context_mode: {
+                type: "string", enum: ["deep", "source"],
+                description: "Explicit context mode. deep selects referenced TypeScript declarations; source selects bounded source inspection. Omit for legacy automatic selection.",
               },
               include_dependencies: {
                 type: "boolean",
@@ -372,11 +372,10 @@ export async function runMCPServer(): Promise<void> {
     let lease: WorkspaceLease | undefined;
     try {
     extra?.signal?.throwIfAborted();
-    const schema = TOOL_SCHEMAS[name as keyof typeof TOOL_SCHEMAS];
-    if (!schema) throw new Error(`Unknown tool: '${name}'`);
-    const validated = schema.safeParse(args ?? {});
-    if (!validated.success) throw new Error(`[Septum Validation Error] Invalid arguments for ${name}: ${validated.error.message}`);
-    const record = (validated.data ?? {}) as Record<string, any>;
+    let parsed;
+    try { parsed = parseToolRequest(name, args); }
+    catch (error) { throw new Error(`[Septum Validation Error] Invalid arguments for ${name}: ${error instanceof Error ? error.message : String(error)}`); }
+    const record = parsed.args;
     const raw = (args ?? {}) as Record<string, any>;
     const workspacePath = record.workspace_path ?? raw.workspace_path ?? raw.workspacePath ?? raw.workspace ?? raw.project_root ?? raw.projectRoot;
     const knownRoots = manager.activeRoots;
@@ -392,34 +391,9 @@ export async function runMCPServer(): Promise<void> {
     });
 
     if (!isWorkspaceInitialized(root)) {
-      if (name === "septum_map" && (!record.action || record.action === "catalog")) {
+      if (name === "septum_map" && (!("action" in record) || !record.action || record.action === "catalog")) {
         const runtimeVersion = await checkRuntimeVersion();
-        let agentGuidance =
-          "Panggil tool 'septum_map(action: \"register\", name: \"core\", root: \"src\", ingest_now: true)' untuk mendaftarkan dan mengindeks domain utama secara otomatis, atau jalankan 'septum init' di terminal workspace.";
-        if (runtimeVersion.update_available) {
-          agentGuidance += ` Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Recommend running '${runtimeVersion.upgrade_command}' and reloading the MCP server if schema/features differ.`;
-        }
-        const diagnostic: Record<string, any> = {
-          status: "NOT_INDEXED",
-          total_domains: 0,
-          runtime_version: runtimeVersion,
-          message: `Workspace '${root}' belum diinisialisasi dengan Septum. Jalankan 'septum init' terlebih dahulu di terminal workspace.`,
-          suggested_action: {
-            tool: "septum_map",
-            params: {
-              action: "register",
-              name: "core",
-              root: "src",
-              ingest_now: true,
-            },
-          },
-          agent_guidance: agentGuidance,
-          ...(runtimeVersion.update_available
-            ? {
-                agent_instruction: `Update available: v${runtimeVersion.server_version} -> v${runtimeVersion.latest_version}. Recommend running '${runtimeVersion.upgrade_command}' and reloading the MCP server if schema/features differ.`,
-              }
-            : {}),
-        };
+        const diagnostic = buildUnindexedCatalog(root, runtimeVersion);
         return {
           content: [
             {
@@ -431,7 +405,7 @@ export async function runMCPServer(): Promise<void> {
           runtime_version: runtimeVersion,
         };
       }
-      const isRegistration = name === "septum_map" && record.action === "register";
+      const isRegistration = name === "septum_map" && "action" in record && record.action === "register";
       if (!isRegistration) {
         return {
           isError: true,
@@ -446,12 +420,13 @@ export async function runMCPServer(): Promise<void> {
     }
 
     extra?.signal?.throwIfAborted();
-    lease = manager.acquire(root);
+    const isDomainRegistration = parsed.name === "septum_map" && parsed.args.action === "register";
+    lease = manager.acquire(root, { deferDiscovery: isDomainRegistration });
     const ctx = lease.context;
     await ctx.ready;
     extra?.signal?.throwIfAborted();
-    const isDomainRegistration = name === "septum_map" && record.action === "register";
-    try { await ctx.watcher.flush(false, extra?.signal); }
+    const registrationBeforeDiscovery = isDomainRegistration && Object.keys(ctx.config.domains).length === 0 && ctx.repo.getAllDomains().length === 0;
+    try { if (!registrationBeforeDiscovery) await ctx.watcher.flush(false, extra?.signal); }
     catch (error) { if (!isDomainRegistration || !(error instanceof DomainRootConflictError)) throw error; }
     if (ctx.repo.getMeta("sync_error") && !(isDomainRegistration && ctx.repo.getMeta("sync_error_code") === "DOMAIN_ROOT_CONFLICT")) {
       throw new Error(`Workspace index synchronization failed: ${ctx.repo.getMeta("sync_error")}`);
@@ -463,65 +438,11 @@ export async function runMCPServer(): Promise<void> {
     ctx.evaluator.getResolver().setRepository(ctx.repo);
 
     const executeTool = async () => {
-      // 4 Core Tools Handlers
-      if (name === "septum_map") {
-        const parsed = MapToolSchema.safeParse(args ?? {});
-        if (!parsed.success) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `[Septum Validation Error] Invalid arguments for ${name}: ${parsed.error.message}`,
-              },
-            ],
-          };
-        }
-        return await handleMapTool(ctx.repo, ctx.config, parsed.data, ctx.root, extra?.signal);
-      } else if (name === "septum_symbol") {
-        const parsed = SymbolToolSchema.safeParse(args ?? {});
-        if (!parsed.success) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `[Septum Validation Error] Invalid arguments for ${name}: ${parsed.error.message}`,
-              },
-            ],
-          };
-        }
-        return await handleSymbolTool(ctx.repo, ctx.config, parsed.data, ctx.pipeline, ctx.root, extra?.signal);
-      } else if (name === "septum_slice") {
-        const parsed = SliceToolSchema.safeParse(args ?? {});
-        if (!parsed.success) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `[Septum Validation Error] Invalid arguments for ${name}: ${parsed.error.message}`,
-              },
-            ],
-          };
-        }
-        return handleSliceTool(ctx.repo, ctx.config, parsed.data, ctx.root, extra?.signal);
-      } else if (name === "septum_boundary") {
-        const parsed = BoundaryToolSchema.safeParse(args ?? {});
-        if (!parsed.success) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `[Septum Validation Error] Invalid arguments for ${name}: ${parsed.error.message}`,
-              },
-            ],
-          };
-        }
-        return await handleBoundaryTool(ctx.evaluator, ctx.config, parsed.data, ctx.repo, ctx.root, args);
-      } else {
-        throw new Error(`Unknown tool: '${name}'`);
+      switch (parsed.name) {
+        case "septum_map": return handleMapTool(ctx.repo, ctx.config, parsed.args, ctx.root, extra?.signal);
+        case "septum_symbol": return handleSymbolTool(ctx.repo, ctx.config, parsed.args, ctx.pipeline, ctx.root, extra?.signal);
+        case "septum_slice": return handleSliceTool(ctx.repo, ctx.config, parsed.args, ctx.root, extra?.signal);
+        case "septum_boundary": return handleBoundaryTool(ctx.evaluator, ctx.config, parsed.args, ctx.repo, ctx.root);
       }
     };
 
@@ -549,6 +470,12 @@ export async function runMCPServer(): Promise<void> {
       const estimatedTokens = Math.round(bytesOut / 4);
       const bloatAlert = bytesOut >= SeptumTelemetry.BLOAT_BYTE_THRESHOLD;
       const outputDigest = SeptumTelemetry.createOutputDigest(combinedText);
+      let outcome: string | undefined;
+      try {
+        const payload = JSON.parse(combinedText);
+        const candidate = payload.status ?? (payload.found === false ? "not_found" : undefined);
+        if (["success", "partial", "unknown", "approved", "rejected", "ambiguous", "not_found", "NOT_INDEXED", "stale_reference", "invalid_context_options", "budget_too_small"].includes(candidate)) outcome = candidate;
+      } catch { /* Non-JSON results retain transport status only. */ }
 
       SeptumTelemetry.recordToolCall({
         event: "tool_call_completed",
@@ -563,6 +490,7 @@ export async function runMCPServer(): Promise<void> {
         },
         bloat_alert: bloatAlert,
         output_digest: outputDigest,
+        outcome,
         session: null,
         status: (response as { isError?: boolean } | undefined)?.isError ? "error" : "success",
       }, ctx.root);

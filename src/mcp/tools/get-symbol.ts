@@ -68,7 +68,29 @@ function inspectSymbol(
   });
 
   if (details) {
-    const payload: Record<string, unknown> = { ...details };
+    const payload: Record<string, unknown> = { ...details, context_mode: "source" };
+    if (args.include_source === false) {
+      if (Array.isArray(payload.relationships)) {
+        const allRels = payload.relationships as Array<any>;
+        const maxRels = 20;
+        payload.relationships = allRels.slice(0, maxRels).map((edge) => ({
+          target: edge?.resolution?.source?.target ?? edge?.target,
+          line: edge?.source?.line ?? edge?.line,
+          status: edge?.resolution?.status,
+          reason: edge?.resolution?.reason,
+          resolved_files: Array.isArray(edge?.resolution?.targets)
+            ? edge.resolution.targets.flatMap((t: any) => t.files ?? [])
+            : [],
+        }));
+        if (allRels.length > maxRels) {
+          payload.relationships_omitted = allRels.length - maxRels;
+        }
+      }
+      if (Array.isArray(payload.connected_files) && payload.connected_files.length > 20) {
+        payload.connected_files_omitted = payload.connected_files.length - 20;
+        payload.connected_files = payload.connected_files.slice(0, 20);
+      }
+    }
     if (args.include_source) {
       delete payload.dependencies_injected;
       delete payload.outbound_calls;

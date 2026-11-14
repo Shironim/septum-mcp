@@ -4,6 +4,10 @@ import { IngestionPipeline, type IngestionMetrics } from "../../core/ingestion/p
 import { assertPathContained } from "../../core/resolver/path-resolver.ts";
 import { assertUniqueDomainRoots, domainNameKey, domainRootIdentity } from "../../core/config/domain-ownership.ts";
 import type { RegisterDomainArgs } from "../schemas.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ConfigLoader } from "../../core/config/loader.ts";
+import { SeptumConfigSchema } from "../../core/config/schema.ts";
 
 export type { RegisterDomainArgs } from "../schemas.ts";
 
@@ -37,7 +41,30 @@ export async function handleRegisterDomain(
     domainNameKey(name) !== domainNameKey(domainName) && domainRootIdentity(claim.root, workspaceRoot) === proposed));
   assertUniqueDomainRoots({ ...claims, [domainName]: domainConfig }, workspaceRoot);
 
-  const domainId = repo.domains.upsertDomain(domainName, domainConfig, workspaceRoot);
+  const policyFile = join(workspaceRoot, "septum.config.json");
+  const policySource = existsSync(policyFile) ? readFileSync(policyFile, "utf8") : undefined;
+  if (policySource !== undefined) {
+    const policy = SeptumConfigSchema.parse(JSON.parse(policySource));
+    const existing = Object.entries(policy.domains).find(([name]) => domainNameKey(name) === domainNameKey(domainName))?.[1];
+    domainConfig.allowed_dependencies ??= existing?.allowed_dependencies ?? [];
+    domainConfig.forbidden_dependencies ??= existing?.forbidden_dependencies ?? [];
+    domainConfig.archetypes ??= existing?.archetypes ?? {};
+    domainConfig.description = args.description ?? existing?.description ?? domainConfig.description;
+    const claims = Object.fromEntries(Object.entries(policy.domains).filter(([name, claim]) =>
+      domainNameKey(name) !== domainNameKey(domainName) && domainRootIdentity(claim.root, workspaceRoot) === proposed));
+    assertUniqueDomainRoots({ ...claims, [domainName]: domainConfig }, workspaceRoot);
+  }
+  const domainId = repo.runInTransaction(() => {
+    const id = repo.domains.upsertDomain(domainName, domainConfig, workspaceRoot);
+    const stored = repo.domains.getDomainByName(domainName)!;
+    if (policySource !== undefined) ConfigLoader.writeDomain(workspaceRoot, stored.name, {
+      ...domainConfig,
+      allowed_dependencies: JSON.parse(stored.allowed_deps_json),
+      forbidden_dependencies: JSON.parse(stored.forbidden_deps_json),
+      archetypes: JSON.parse(stored.archetypes_json),
+    }, policySource);
+    return id;
+  }, true);
   const stored = repo.domains.getDomainByName(domainName);
   const canonicalName = stored?.name || domainName;
   const finalConfig = {
@@ -53,7 +80,7 @@ export async function handleRegisterDomain(
   let ingestionMetrics: IngestionMetrics | null = null;
   if (args.ingest_now) {
     const pipeline = new IngestionPipeline(repo, workspaceRoot);
-    ingestionMetrics = await pipeline.run(config);
+    ingestionMetrics = await pipeline.run(config, { signal });
   }
 
   return {
@@ -63,7 +90,8 @@ export async function handleRegisterDomain(
         text: JSON.stringify(
           {
             status: "success",
-            message: `Domain '${canonicalName}' successfully registered in SQLite SSOT.${
+            policy_owner: policySource === undefined ? "database" : "file",
+            message: `Domain '${canonicalName}' successfully registered in ${policySource === undefined ? "SQLite" : "septum.config.json"}.${
               args.ingest_now ? " Initial ingestion completed." : ""
             }`,
             domain_id: domainId,

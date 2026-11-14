@@ -53,17 +53,27 @@ export function handleTraceVerticalSlice(
     summary = `[UNKNOWN: ${result.diagnostics.join(", ")}]\n${summary}`;
   }
 
+  const nextHints = result.next ?? [
+    result.found && result.entrypoint?.action && result.entrypoint?.file
+      ? `Use septum_symbol(action='context', query='${result.entrypoint.action}', file_path='${result.entrypoint.file}') to inspect handler implementation within 16 KB budget.`
+      : result.found
+      ? "Inspect the selected implementation and unresolved relationships before planning edits."
+      : "Refine the query or synchronize the workspace; no match does not prove runtime absence.",
+  ];
+
   const payload = {
     status: result.diagnostics?.includes("ambiguous_target") ? "ambiguous" : result.diagnostics?.length ? "unknown" : result.found ? "success" : "not_found",
     coverage: result.coverage,
     diagnostics: result.diagnostics,
-    next: result.next ?? [result.found ? "Inspect the selected implementation and unresolved relationships before planning edits." : "Refine the query or synchronize the workspace; no match does not prove runtime absence."],
+    next: nextHints,
     controller_file_filter: args.controller_file ?? null,
     query,
     found: result.found,
     confidence: result.confidence,
     confidence_scope: "query_to_catalog_target_only",
     relationship_limits: SLICE_RELATIONSHIP_LIMITS,
+    execution_order: "not_established",
+    branch_scope: "Static relationships can span mutually exclusive handler actions; this is not one executed branch.",
     is_exact_match: result.is_exact_match,
     architecture_style: result.architecture_style,
     max_depth_applied: result.max_depth_applied ?? maxDepth,

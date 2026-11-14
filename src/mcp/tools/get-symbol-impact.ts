@@ -62,9 +62,29 @@ function inspectImpact(
   const targetFiles = candidates.map(candidate => candidate.file_path);
   const importDependents = relationships.filter(edge => edge.resolution.status === "resolved" && edge.resolution.targets.some(target => target.files.some(file => targetFiles.includes(file))));
   const warnings = partitionResolutionWarnings(relationships, targetFiles);
+  const callSites = impact.inbound_callers.filter(
+    caller => caller.kind === "call" || caller.kind === "instantiation" || caller.kind === "heritage"
+  );
+  const firstResolution = importDependents[0]?.resolution;
+  const compactImportDependents = importDependents.map(edge => ({
+    source: {
+      file: edge.source.file,
+      line: edge.source.line,
+      statement: edge.source.statement,
+    },
+    target_domains: edge.target_domains,
+    resolution: {
+      status: edge.resolution.status,
+      reason: edge.resolution.reason,
+      targets: edge.resolution.targets,
+    },
+  }));
   const payload = { ...impact, symbol_ref: selectedCandidate?.symbol_ref, coverage: "partial", inbound_callers_complete: false,
-    relationship_limits: "Legacy inbound caller hints are inferred; import dependencies are reported separately and do not prove executed calls.",
-    import_dependents: importDependents,
+    call_sites: callSites,
+    risk_scope: "advisory; incomplete static consumer evidence, not a refactoring safety verdict",
+    relationship_limits: "Imports do not prove executed calls. Import-bound function call sites are static evidence; legacy hints remain inferred. Static calls do not prove runtime execution or a complete caller set.",
+    ...(firstResolution ? { resolution_metadata: { resolver_revision: firstResolution.resolver_revision, config_revision: firstResolution.config_revision } } : {}),
+    import_dependents: compactImportDependents,
     resolution_warnings: warnings.relevant,
     workspace_resolution_diagnostics: {
       count: warnings.workspace.length, returned_details: 0, omitted_details: warnings.workspace.length,
@@ -77,7 +97,7 @@ function inspectImpact(
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(payload, null, 2),
+        text: JSON.stringify(payload),
       },
     ],
   };

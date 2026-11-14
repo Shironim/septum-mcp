@@ -28,8 +28,8 @@ export async function handleSymbolTool(
         domain: args.domain, filePath: args.file_path, reference: args.symbol_ref,
       });
       const targetPath = candidates.length === 1 ? candidates[0]!.file_path : args.symbol_ref?.file_path || args.file_path;
-      const bounded = args.include_source !== undefined || args.source_start_line !== undefined || args.source_line_limit !== undefined;
-      if (!bounded && (!targetPath || /\.(?:ts|mts|cts)$/.test(targetPath))) {
+      const bounded = args.context_mode === "source" || args.include_source !== undefined || args.source_start_line !== undefined || args.source_line_limit !== undefined;
+      if (args.context_mode === "deep" || !bounded && (!targetPath || /\.(?:ts|mts|cts)$/.test(targetPath))) {
         return retrieveContext(repo, config, args, symbolWorkspace(repo, workspaceRoot || args.workspace_path), signal);
       }
       if (args.continuation !== undefined || args.budget_bytes !== undefined) {

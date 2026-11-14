@@ -308,15 +308,13 @@ class InvoiceRepository {
       const compactRes = handleGetDomainCatalog(repo, mockConfig, parsedCompact,catalogRoot);
       const compactJson = JSON.parse(compactRes.content[0].text);
 
-      expect(compactJson.detail_level).toBe("compact");
-      expect(compactJson.showing_files).toBe(2);
+      expect(compactJson.schema).toBe("navigation/v1");
+      expect(compactJson.accounting.returned_files).toBe(2);
 
       // Compact symbols should NOT include full properties/methods arrays
       for (const file of compactJson.files) {
-        for (const sym of file.symbols) {
-          expect(sym.properties).toBeUndefined();
-          expect(sym.methods).toBeUndefined();
-        }
+        expect(file.symbols).toBeUndefined();
+        expect(file.symbol_count).toBeDefined();
       }
 
       // 2. Archetype filter check
@@ -327,15 +325,13 @@ class InvoiceRepository {
       const filteredRes = handleGetDomainCatalog(repo, mockConfig, parsedFilter,catalogRoot);
       const filteredJson = JSON.parse(filteredRes.content[0].text);
 
-      expect(filteredJson.showing_files).toBe(1);
+      expect(filteredJson.accounting.returned_files).toBe(1);
       expect(filteredJson.files.every((f: any) => f.archetype === "repository")).toBe(true);
       expect(filteredJson.files[0].path).toBe("src/core/database/repositories/user.repository.ts");
 
       // 3. Bidirectional connections check
-      const userRepoFile = filteredJson.files[0];
-      expect(userRepoFile.connections).toBeDefined();
-      expect(userRepoFile.connections.imported_by_count).toBe(1);
-      expect(Array.isArray(userRepoFile.connections.imports_from)).toBe(true);
+      expect(filteredJson.dependencies).toContainEqual({ from: "src/core/services/user.service.ts", to: "src/core/database/repositories/user.repository.ts", relation: "imports", count: 1 });
+      expect(filteredJson.files[0].connections).toBeUndefined();
     });
   });
 

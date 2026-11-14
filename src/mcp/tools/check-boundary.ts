@@ -14,19 +14,32 @@ export type { CheckBoundaryArgs } from "../schemas.ts";
 export async function handleCheckBoundary(
   evaluator: BoundaryEvaluator,
   config: ValidatedSeptumConfig,
-  rawArgs: CheckBoundaryArgs & Record<string, unknown>,
+  rawArgs: unknown,
   repo?: SeptumRepository,
   workspaceRoot?: string
 ) {
-  const args = CheckBoundarySchema.parse(rawArgs ?? {});
+  return evaluateBoundary(evaluator, config, CheckBoundarySchema.parse(rawArgs ?? {}), repo, workspaceRoot);
+}
+
+export async function evaluateBoundary(
+  evaluator: BoundaryEvaluator,
+  config: ValidatedSeptumConfig,
+  args: CheckBoundaryArgs,
+  repo?: SeptumRepository,
+  workspaceRoot?: string
+) {
   if (args.domain) {
-    const domain = Object.keys(config.domains || {}).find(name => name.toLowerCase() === args.domain!.toLowerCase());
+    const knownDomains = new Set([
+      ...Object.keys(config.domains || {}),
+      ...(repo?.getAllDomains?.().map((d) => d.name) ?? []),
+    ]);
+    const domain = [...knownDomains].find(name => name.toLowerCase() === args.domain!.toLowerCase());
     if (!domain) throw new Error(`Unknown boundary domain '${args.domain}'. Choose a registered domain.`);
     args.domain = domain;
   }
   const root = workspaceRoot || args.workspace_path || process.cwd();
   const proposedImports = args.proposed_imports ?? [];
-  const evaluatedScope = { mode: "proposal", proposed_imports_supplied: ["proposed_imports", "proposedImports", "imports", "to_files"].some(key => Object.prototype.hasOwnProperty.call(rawArgs ?? {}, key)), existing_imports_checked: false, omissions: ["Existing file imports are not certified by proposal approval."] };
+  const evaluatedScope = { mode: "proposal", proposed_imports_supplied: args.proposed_imports_supplied, existing_imports_checked: false, omissions: ["Existing file imports are not certified by proposal approval."] };
 
   const syncState = repo?.getMeta("sync_state");
   const syncError = repo?.getMeta("sync_error");
@@ -72,14 +85,24 @@ export async function handleCheckBoundary(
     }).map(file => file.path) : [];
     const relationships = repo.getImportRelationships(root).filter(edge => relevant(edge.source.file));
     const incomplete = relationships.filter(edge => edge.index_coverage === "partial" || edge.freshness !== "current" || !["resolved","external"].includes(edge.resolution.status) || edge.resolution.coverage === "conditional" || edge.target_domains.length > 1);
-    const proposed = requested.flatMap(file => proposedImports.map(target => evaluator.getResolver().resolveImport(target,file)))
-      .filter(result => !["resolved","external"].includes(result.status) || result.coverage === "conditional");
+    const allProposed = requested.flatMap(file => proposedImports.map(target => evaluator.getResolver().resolveImport(target, file)));
+    const proposed = allProposed.filter(result => !["resolved", "external"].includes(result.status) || result.coverage === "conditional");
     if (incomplete.length || proposed.length || staleFiles.length) {
       const known = evaluator.auditCodebase(config).filter(violation => relevant(violation.file));
       known.push(...requested.flatMap(file => evaluator.evaluate(file, proposedImports, config)));
       return { content: [{ type: "text" as const, text: JSON.stringify({
         status: known.length ? "rejected" : "unknown", violations: known, total_violations: known.length,
-        circular_dependencies: known.filter(v => v.rule === "circular_dependency"), circular_dependencies_count: known.filter(v => v.rule === "circular_dependency").length, relationships: incomplete, proposed_resolutions: proposed,
+        circular_dependencies: known.filter(v => v.rule === "circular_dependency"), circular_dependencies_count: known.filter(v => v.rule === "circular_dependency").length,
+        relationships: incomplete.slice(0, 10), proposed_resolutions: allProposed,
+        diagnostic_accounting: { total: incomplete.length, returned: Math.min(10, incomplete.length), omitted: Math.max(0, incomplete.length - 10) },
+        incomplete_reasons: {
+          target_not_fully_indexed: incomplete.filter(edge => edge.index_coverage === "partial").length,
+          stale_source: incomplete.filter(edge => edge.freshness !== "current").length,
+          unresolved_or_unsupported: incomplete.filter(edge => !["resolved", "external"].includes(edge.resolution.status)).length,
+          conditional_resolution: incomplete.filter(edge => edge.resolution.coverage === "conditional").length,
+          multiple_domains: incomplete.filter(edge => edge.target_domains.length > 1).length,
+        },
+        next: ["Inspect the listed source imports; register/index uncovered target roots or narrow scope to a file/domain. Unknown is not approval."],
         stale_files: staleFiles,
         message: "Relevant import resolution is incomplete; an empty graph cannot prove boundary approval.",
       }) }] };
@@ -192,6 +215,11 @@ export async function handleCheckBoundary(
 
     const hasViolations = violations.length > 0;
     const domainCount = Object.keys(config?.domains || {}).length;
+    const allIndexedFiles = repo && typeof repo.getAllFiles === "function" ? repo.getAllFiles() : [];
+    const domainFileCount = args.domain && allIndexedFiles.length > 0
+      ? allIndexedFiles.filter((f) => evaluator.resolveSourceDomain(f.path, config) === args.domain).length
+      : null;
+    const emptyScopedDomain = Boolean(args.domain && domainFileCount === 0);
 
     return {
       content: [
@@ -199,7 +227,7 @@ export async function handleCheckBoundary(
           type: "text" as const,
           text: JSON.stringify(
             {
-              status: hasViolations ? "rejected" : "approved",
+              status: hasViolations ? "rejected" : emptyScopedDomain ? "unknown" : "approved",
               scope: args.domain ? "domain" : "all",
               ...(args.domain ? { domain: args.domain } : {}),
               total_domains_checked: domainCount,
@@ -212,6 +240,8 @@ export async function handleCheckBoundary(
                 ? `${violations.length} boundary violation(s) (${circularDependencies.length} circular) detected${
                     args.domain ? ` in domain '${args.domain}'` : " across codebase"
                   }.`
+                : emptyScopedDomain
+                ? `Boundary check is incomplete: domain '${args.domain}' has 0 indexed files (it may be unindexed or shadowed by a parent domain).`
                 : domainCount === 0
                 ? "No boundary violations detected. [Septum Notice: Domain catalog is currently unindexed. Run 'septum_map' with action='register' to initialize bounded contexts.]"
                 : `All domain boundaries are clean${
@@ -278,6 +308,7 @@ export async function handleCheckBoundary(
   const singleFile = filesToCheck[0];
   const violations = evaluator.evaluate(singleFile, proposedImports, config);
   const impact = repo?.getFileInboundImpact(singleFile);
+  const enforcementMode = config?.settings?.enforcement ?? "strict";
 
   if (violations.length > 0) {
     return {
@@ -287,6 +318,7 @@ export async function handleCheckBoundary(
           text: JSON.stringify(
             {
               status: "rejected",
+              enforcement_mode: enforcementMode,
               file: singleFile,
               evaluated_scope: evaluatedScope,
               violations_count: violations.length,
@@ -321,6 +353,7 @@ export async function handleCheckBoundary(
         text: JSON.stringify(
           {
             status: "approved",
+            enforcement_mode: enforcementMode,
             file: singleFile,
             evaluated_scope: evaluatedScope,
             impact_summary: impact
@@ -334,6 +367,8 @@ export async function handleCheckBoundary(
             message:
               Object.keys(config?.domains || {}).length === 0
                 ? "No boundary violations detected. [Septum Notice: Domain catalog is currently unindexed. Run 'septum_map' with action='register' to initialize bounded contexts.]"
+                : enforcementMode === "warn"
+                ? "Approved under 'warn' enforcement (unlisted allowed_dependencies are not blocked; only explicit forbidden_dependencies are rejected)."
                 : impact && impact.direct_dependents_count > 0
                 ? `No boundary violations detected. Caution: ${impact.direct_dependents_count} dependent file(s) consume this file.`
                 : "Proposal approved. Existing file imports were not audited.",

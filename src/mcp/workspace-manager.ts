@@ -1,7 +1,7 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { ConfigLoader } from '../core/config/loader.ts';
+import { ConfigLoader, resolveDatabasePath } from '../core/config/loader.ts';
 import type { ValidatedSeptumConfig } from '../core/config/schema.ts';
 import { SeptumDatabase } from '../core/database/client.ts';
 import { SeptumRepository } from '../core/database/repository.ts';
@@ -92,7 +92,7 @@ export class WorkspaceManager {
   get syncDurationMs(): number { return Math.max(0, ...[...this.contexts.values()].map(entry => Number(entry.context.repo.getMeta("sync_duration_ms") || 0))); }
   get pendingPaths(): number { return [...this.contexts.values()].reduce((n, entry) => n + entry.context.watcher.pendingCount, 0); }
 
-  acquire(rawRoot: string): WorkspaceLease {
+  acquire(rawRoot: string, options: { deferDiscovery?: boolean } = {}): WorkspaceLease {
     if (this.closed) throw new Error('Septum server is shutting down');
     const root = realpathSync(rawRoot);
     let entry = this.contexts.get(root);
@@ -103,7 +103,7 @@ export class WorkspaceManager {
         this.dispose(idle);
       }
       const config = ConfigLoader.load(undefined, root);
-      const db = new SeptumDatabase(resolve(root, config.settings.db_path || '.septum/septum.db'));
+      const db = new SeptumDatabase(resolveDatabasePath(root, config.settings.db_path));
       try {
         const repo = new SeptumRepository(db.raw);
         const pipeline = new IngestionPipeline(repo, root);
@@ -111,6 +111,8 @@ export class WorkspaceManager {
         const abort = new AbortController();
         const ready = this.queue.run(async () => {
           abort.signal.throwIfAborted();
+          // An explicit first registration chooses ownership before discovery.
+          if (options.deferDiscovery && Object.keys(config.domains).length === 0 && repo.getAllDomains().length === 0) return;
           try { await pipeline.run(config, {verifyContent:true,signal:abort.signal}); }
           catch (error) {
             // Keep a conflicting legacy workspace open for explicit domain repair.

@@ -117,7 +117,7 @@ export class WorkspaceWatcher {
     if (isAbsolute(rel) || rel === '..' || rel.startsWith('../') || shouldIgnoreSourcePath(norm, this.config.settings.ignore_patterns)) return;
     let directory = this.watches.has(target);
     try { directory ||= lstatSync(target).isDirectory(); } catch { /* deletion */ }
-    if (directory || /(^|\/)(package\.json|composer\.json|nest-cli\.json|go\.mod|tsconfig\.json|artisan)$/.test(norm)) {
+    if (directory || /(^|\/)(septum\.config\.json|package\.json|composer\.json|nest-cli\.json|go\.mod|tsconfig\.json|artisan)$/.test(norm)) {
       this.reconcile = true;
       this.pending.clear();
     } else if (ASTParserEngine.isSourceFile(norm)) {
