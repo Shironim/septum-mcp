@@ -43,6 +43,27 @@ export class BoundaryEvaluator {
 
     if (proposedImports.length > 0) {
       violations.push(...this.checkProposedChanges(filePath, proposedImports, activeConfig));
+      const sourceDomain = this.resolveSourceDomain(filePath, activeConfig);
+      if (sourceDomain && typeof this.repo.getAllDependenciesWithDomains === "function") {
+        const existingDeps = this.repo.getAllDependenciesWithDomains().filter(
+          (dep) => dep.source_file !== filePath
+        );
+        const proposedDeps = proposedImports.map((statement) => ({
+          source_file: filePath,
+          source_domain: sourceDomain,
+          line_number: 1,
+          target: statement,
+          statement,
+          is_external: false,
+        }));
+        violations.push(
+          ...this.detectCircularDependencies(
+            activeConfig,
+            [...existingDeps, ...proposedDeps],
+            new Set([filePath])
+          )
+        );
+      }
     }
 
     return violations;
@@ -54,8 +75,11 @@ export class BoundaryEvaluator {
     const allDependencies = this.repo.getAllDependenciesWithDomains();
 
     const evidence = this.repo.getMeta?.("workspace_root") ? this.repo.getImportRelationships(this.resolver.getProjectRoot()) : undefined;
+    const key = (file: string, line: number, target: string) => JSON.stringify([file, line, target]);
+    const current = new Set(evidence?.filter(edge => edge.freshness === "current").map(edge => key(edge.source.file, edge.source.line, edge.resolution.source.target)));
+    const resolved = new Set(evidence?.filter(edge => edge.freshness === "current" && edge.resolution.status === "resolved" && edge.resolution.coverage !== "conditional").map(edge => key(edge.source.file, edge.source.line, edge.resolution.source.target)));
     for (const dep of allDependencies) {
-      if (evidence && !evidence.some(edge => edge.source.file === dep.source_file && edge.source.line === dep.line_number && edge.freshness === "current" && edge.resolution.status === "resolved" && edge.resolution.coverage !== "conditional")) continue;
+      if (evidence && !resolved.has(key(dep.source_file, dep.line_number, dep.target))) continue;
       const targetDomain = this.resolveTargetDomain(dep.target, config, dep.source_file);
       if (!targetDomain || targetDomain === dep.source_domain) {
         continue;
@@ -97,7 +121,7 @@ export class BoundaryEvaluator {
       }
     }
 
-    const currentDependencies = evidence ? allDependencies.filter(dep => evidence.some(edge => edge.source.file === dep.source_file && edge.source.line === dep.line_number && edge.freshness === "current")) : allDependencies;
+    const currentDependencies = evidence ? allDependencies.filter(dep => current.has(key(dep.source_file, dep.line_number, dep.target))) : allDependencies;
     violations.push(...this.detectCircularDependencies(config, currentDependencies));
 
     return violations;

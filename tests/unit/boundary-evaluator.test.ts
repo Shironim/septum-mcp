@@ -90,5 +90,33 @@ describe("BoundaryEvaluator", () => {
 
       expect(violations.length).toBe(0);
     });
+
+    it("should catch intra-domain circular dependency introduced by proposed_imports", () => {
+      const cycleRepo = {
+        getAllFiles: () => [
+          { path: "src/domains/billing/services/PaymentService.ts" },
+          { path: "src/domains/billing/controllers/PaymentController.ts" },
+        ],
+        getAllDependenciesWithDomains: () => [
+          {
+            source_file: "src/domains/billing/controllers/PaymentController.ts",
+            source_domain: "billing",
+            line_number: 1,
+            target: "../services/PaymentService",
+            statement: "import { PaymentService } from '../services/PaymentService';",
+            is_external: false,
+          },
+        ],
+      } as unknown as SeptumRepository;
+
+      const cycleEvaluator = new BoundaryEvaluator(cycleRepo);
+      const violations = cycleEvaluator.evaluate(
+        "src/domains/billing/services/PaymentService.ts",
+        ["../controllers/PaymentController"],
+        mockConfig
+      );
+
+      expect(violations.some((v) => v.rule === "circular_dependency")).toBe(true);
+    });
   });
 });

@@ -87,13 +87,28 @@ describe("shared import resolution contract", () => {
   expect(compare("@x/a").status).toBe("resolved");
   put("tsconfig.json", JSON.stringify({ extends: "./missing.json" }));
   expect(resolve("@x/a").status).toBe("unsupported");
-  put("src/tsconfig.json", JSON.stringify({ compilerOptions: { paths: { "@x/*": ["lib/*"] } } }));
-  expect(resolve("@x/a").reason).toBe("nested_tsconfig_project_selection_unknown");
+  put("src/tsconfig.json", JSON.stringify({ compilerOptions: { baseUrl: "..", paths: { "@x/*": ["lib/*"] } } }));
+  expect(resolve("@x/a").status).toBe("resolved");
+  expect(resolve("@x/a").targets[0].files).toEqual(["lib/a.ts"]);
  });
- it("handles PSR-4 arrays and distinguishes manifest-backed external from unknown", () => {
-  put("composer.json",JSON.stringify({autoload:{"psr-4":{"App\\":["app/","lib/"]}},require:{"vendor/package":"^1"}}));
+ it("resolves monorepo nested Nuxt/TS tsconfig.json and local package.json dependencies", () => {
+  put("apps/web/.nuxt/tsconfig.json", JSON.stringify({ compilerOptions: { paths: { "~/*": ["../app/*"] } } }));
+  put("apps/web/tsconfig.json", JSON.stringify({ extends: "./.nuxt/tsconfig.json" }));
+  put("apps/web/package.json", JSON.stringify({ dependencies: { "@inertiajs/vue3": "^2.0.5" } }));
+  put("apps/web/app/composables/useApi.ts", "export const useApi = () => {};");
+  expect(resolve("~/composables/useApi", "apps/web/app/components/Header.vue").targets[0].files).toEqual(["apps/web/app/composables/useApi.ts"]);
+  expect(resolve("@inertiajs/vue3", "apps/web/app/components/Header.vue").status).toBe("external");
+ });
+ it("handles PSR-4 arrays, vendor autoload_psr4.php, composer.lock, and manifest-backed external", () => {
+  put("composer.json",JSON.stringify({autoload:{"psr-4":{"App\\":["app/","lib/"]}},require:{"vendor/package":"^1","inertiajs/inertia-laravel":"^2.0"}}));
+  put("vendor/composer/autoload_psr4.php", "<?php\nreturn array(\n  'Carbon\\\\' => array($vendorDir . '/nesbot/carbon/src/Carbon'),\n  'Inertia\\\\' => array($vendorDir . '/inertiajs/inertia-laravel/src'),\n);\n");
   put("app/Invoice.php","<?php class Invoice {}"); expect(resolve("App\\Invoice","app/main.php").targets[0].files).toEqual(["app/Invoice.php"]);
+  expect(resolve("use App\\Invoice;", "app/main.php").targets[0].files).toEqual(["app/Invoice.php"]);
+  expect(resolve("app/Invoice.php", "app/main.php").targets[0].files).toEqual(["app/Invoice.php"]);
   put("lib/Invoice.php","<?php class Invoice {}"); expect(resolve("App\\Invoice","app/main.php").status).toBe("ambiguous");
+  expect(resolve("Carbon\\Carbon", "app/main.php").status).toBe("external");
+  expect(resolve("Inertia\\Inertia", "app/main.php").status).toBe("external");
+  expect(resolve("UnknownVendor\\Foo", "app/main.php").reason).toBe("php_namespace_not_mapped");
   put("package.json",JSON.stringify({dependencies:{zod:"^3"}})); expect(resolve("zod").status).toBe("external"); expect(resolve("unknown-package").status).toBe("unresolved");
  });
  it("resolves declared workspace package entries without basename guessing",()=>{

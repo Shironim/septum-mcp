@@ -34,12 +34,16 @@ export async function auditStagedFiles(
       const match = /^(\d+) blob ([a-f0-9]+)\s+(\d+)\t([\s\S]+)$/.exec(entry);
       if (!match || !["100644", "100755"].includes(match[1]!)) throw new Error("Cannot certify staged view containing symlinks or submodules.");
       const [, , oid, sizeText, file] = match;
+      // Only source and interpretation inputs need bytes in the parser snapshot.
+      // Keep the complete path inventory so omitted assets cannot masquerade as source.
+      indexedPaths.push(file!);
+      const needed = ASTParserEngine.isSourceFile(file!) || /\.(?:json|jsonc|toml|ya?ml)$/i.test(file!) || /(?:^|\/)(?:go\.mod|go\.work|Cargo\.lock|artisan|requirements\.txt)$/.test(file!);
+      if (!needed) continue;
       const size = Number(sizeText);
       totalBytes += size;
       if (size > RESOURCE_LIMITS.sourceBytes || totalBytes > 128 * 1024 * 1024) throw new Error("Staged view exceeds resource limits.");
       const destination = resolve(snapshot, file!);
       if (!destination.startsWith(snapshot + "/")) throw new Error("Invalid staged path.");
-      indexedPaths.push(file!);
       blobs.push({ oid: oid!, file: file!, size });
     }
     // One raw-blob process, spooled to disk to bound JS memory. checkout-index

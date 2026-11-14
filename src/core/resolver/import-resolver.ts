@@ -133,7 +133,22 @@ export class ImportResolver {
         return finish("unresolved", "go_module_not_declared");
       }
       if (ext === ".php") {
-        const normTarget = target.replace(/^\\/, "");
+        let rawTarget = target.trim();
+        const useMatch = rawTarget.match(/^use\s+(?:function\s+|const\s+)?([^;\s]+)(?:\s+as\s+[^;\s]+)?\s*;?$/i);
+        if (useMatch) {
+          rawTarget = useMatch[1]!;
+        } else {
+          rawTarget = rawTarget.replace(/;+$/, "").trim();
+        }
+        if (rawTarget.endsWith(".php")) {
+          const absPhp = path.resolve(this.root, rawTarget.replace(/^\.\//, ""));
+          this.assertContained(absPhp);
+          if (probeSourcePath(absPhp) === "file") {
+            return resolvedFiles([path.relative(this.root, absPhp).replace(/\\/g, "/")], "php_file_path");
+          }
+          return finish("unresolved", "file_not_found");
+        }
+        const normTarget = rawTarget.replace(/^\\/, "");
         if (
           PHP_STDLIB.has(normTarget) ||
           normTarget.startsWith("Attribute") ||
@@ -142,7 +157,15 @@ export class ImportResolver {
           return finish("external", "php_standard_library");
         }
 
-        const composer = json(path.join(this.root, "composer.json"));
+        let composerDir = this.root;
+        for (let dir = path.dirname(source); dir === this.root || dir.startsWith(this.root + path.sep); dir = path.dirname(dir)) {
+          if (probeSourcePath(path.join(dir, "composer.json")) !== "missing") {
+            composerDir = dir;
+            break;
+          }
+          if (dir === this.root) break;
+        }
+        const composer = json(path.join(composerDir, "composer.json"));
         const rules = { ...(composer.autoload?.["psr-4"] ?? {}), ...(composer["autoload-dev"]?.["psr-4"] ?? {}) };
         const matches = Object.keys(rules)
           .filter((prefix) => normTarget.startsWith(prefix.replace(/^\\/, "")))
@@ -157,7 +180,7 @@ export class ImportResolver {
           const relativePath = normTarget.slice(cleanPrefix.length).replace(/\\/g, "/");
           const candidateFiles: string[] = [];
           for (const dir of dirs) {
-            const absBase = path.resolve(this.root, dir, relativePath);
+            const absBase = path.resolve(composerDir, dir, relativePath);
             this.assertContained(absBase);
             candidateFiles.push(...filesAt(absBase, [".php"]));
           }
@@ -166,6 +189,38 @@ export class ImportResolver {
             return finish("unresolved", "file_not_found");
           }
           return resolvedFiles(candidateFiles, "composer_psr4");
+        }
+
+        // Check installed Composer vendor PSR-4 autoload map (covers transitive & non-matching package names like Carbon\*, Inertia\*)
+        const autoloadPsr4 = read(path.join(composerDir, "vendor", "composer", "autoload_psr4.php"));
+        if (autoloadPsr4) {
+          for (const m of autoloadPsr4.matchAll(/['"]([^'"]+)['"]\s*=>/g)) {
+            const prefix = m[1]!.replace(/\\\\/g, "\\").replace(/^\\/, "");
+            if (prefix && normTarget.startsWith(prefix)) {
+              return finish("external", "composer_vendor_psr4");
+            }
+          }
+        }
+
+        // Fallback: check composer.lock PSR-4 declarations when vendor/ is absent
+        const composerLockRaw = read(path.join(composerDir, "composer.lock"));
+        if (composerLockRaw) {
+          const lock = JSON.parse(composerLockRaw);
+          const lockPackages = [
+            ...(Array.isArray(lock?.packages) ? lock.packages : []),
+            ...(Array.isArray(lock?.["packages-dev"]) ? lock["packages-dev"] : []),
+          ];
+          for (const pkgEntry of lockPackages) {
+            const psr4 = pkgEntry?.autoload?.["psr-4"];
+            if (psr4 && typeof psr4 === "object") {
+              for (const prefix of Object.keys(psr4)) {
+                const cleanPrefix = prefix.replace(/^\\/, "");
+                if (cleanPrefix && normTarget.startsWith(cleanPrefix)) {
+                  return finish("external", "composer_lock_package");
+                }
+              }
+            }
+          }
         }
 
         // Check declared composer dependencies
@@ -317,8 +372,21 @@ export class ImportResolver {
       const extensions = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".d.ts", ".json"];
       if (target.startsWith(".") || path.isAbsolute(target)) return resolvedFiles(filesAt(path.resolve(path.dirname(source), target), extensions), "relative_path");
       if (builtinModules.includes(target) || target.startsWith("node:") && builtinModules.includes(target.slice(5)) || target === "bun" || target.startsWith("bun:")) return finish("external", "runtime_builtin");
-      for (let dir = path.dirname(source); dir.startsWith(this.root + path.sep); dir = path.dirname(dir)) {
-        if (probeSourcePath(path.join(dir, "tsconfig.json")) !== "missing") return finish("unsupported", "nested_tsconfig_project_selection_unknown");
+      let nearestTsConfig = path.join(this.root, "tsconfig.json");
+      let nearestPkgDir = this.root;
+      let foundTsConfig = false;
+      let foundPkg = false;
+      for (let dir = path.dirname(source); dir === this.root || dir.startsWith(this.root + path.sep); dir = path.dirname(dir)) {
+        if (!foundTsConfig && probeSourcePath(path.join(dir, "tsconfig.json")) !== "missing") {
+          nearestTsConfig = path.join(dir, "tsconfig.json");
+          foundTsConfig = true;
+        }
+        if (!foundPkg && probeSourcePath(path.join(dir, "package.json")) !== "missing") {
+          nearestPkgDir = dir;
+          foundPkg = true;
+        }
+        if (foundTsConfig && foundPkg) break;
+        if (dir === this.root) break;
       }
       const loadTsConfig = (configPath: string, visited = new Set<string>()): any => {
         if (visited.has(configPath)) throw new Error("circular_tsconfig_extends");
@@ -353,7 +421,7 @@ export class ImportResolver {
         return options;
       };
 
-      const options = loadTsConfig(path.join(this.root, "tsconfig.json"));
+      const options = loadTsConfig(nearestTsConfig);
       const aliases = options.paths ?? {};
       if (typeof aliases !== "object" || Array.isArray(aliases)) return finish("unsupported", "malformed_ts_paths");
       const matching = Object.keys(aliases).filter(key => {
@@ -380,6 +448,7 @@ export class ImportResolver {
         if (localFiles.length) return resolvedFiles(localFiles,"workspace_path");
       }
       const pkg = json(path.join(this.root,"package.json"));
+      const localPkg = nearestPkgDir !== this.root ? json(path.join(nearestPkgDir, "package.json")) : {};
       const workspacePatterns = Array.isArray(pkg.workspaces) ? pkg.workspaces : pkg.workspaces?.packages ?? [];
       const roots = [...this.packageRoots];
       for (const pattern of workspacePatterns) {
@@ -420,7 +489,11 @@ export class ImportResolver {
       }
       if (workspaceFiles.length) return resolvedFiles(workspaceFiles,"workspace_package");
       const name = target.startsWith("@") ? target.split("/").slice(0,2).join("/") : target.split("/")[0]!;
-      if ([pkg.dependencies,pkg.devDependencies,pkg.peerDependencies,pkg.optionalDependencies].some(deps => deps && Object.hasOwn(deps,name))) return finish("external","package_manifest_dependency");
+      const depMaps = [
+        localPkg.dependencies, localPkg.devDependencies, localPkg.peerDependencies, localPkg.optionalDependencies,
+        pkg.dependencies, pkg.devDependencies, pkg.peerDependencies, pkg.optionalDependencies,
+      ];
+      if (depMaps.some(deps => deps && Object.hasOwn(deps, name))) return finish("external", "package_manifest_dependency");
       return finish("unresolved", "package_not_declared");
     } catch (error) {
       return finish("unsupported", error instanceof Error && error.message.includes("outside_workspace") ? "outside_workspace" : `manifest_or_source_error: ${error instanceof Error ? error.message : String(error)}`);
