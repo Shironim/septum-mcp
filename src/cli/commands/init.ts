@@ -133,7 +133,7 @@ export async function handleInitCommand(force: boolean = false): Promise<void> {
       }
       process.exitCode = 1;
     } else {
-      console.log("\x1b[32m└  ✓ Septum successfully initialized with complete index coverage!\x1b[0m");
+      console.log("\x1b[32m└  ✓ Septum initialization and configured source synchronization completed.\x1b[0m");
     }
 
     if (hasPartialCoverage && harnessErrors.length > 0) {

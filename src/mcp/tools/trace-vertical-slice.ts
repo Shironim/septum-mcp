@@ -55,7 +55,7 @@ export function handleTraceVerticalSlice(
 
   const nextHints = result.next ?? [
     result.found && result.entrypoint?.action && result.entrypoint?.file
-      ? `Use septum_symbol(action='context', query='${result.entrypoint.action}', file_path='${result.entrypoint.file}') to inspect handler implementation within 16 KB budget.`
+      ? `Use septum_symbol(action='context', query='${result.entrypoint.action}', file_path='${result.entrypoint.file}') to inspect handler source/contracts; read the selected mode, freshness and omissions.`
       : result.found
       ? "Inspect the selected implementation and unresolved relationships before planning edits."
       : "Refine the query or synchronize the workspace; no match does not prove runtime absence.",

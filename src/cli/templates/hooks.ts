@@ -28,8 +28,8 @@ export const SEPTUM_HOOKS_CONFIG = {
 };
 
 export const SEPTUM_PRE_WRITE_SCRIPT = `#!/usr/bin/env sh
-# Septum 3-Gate Boundary Guard Pre-Write Hook
-# Intercepts write_to_file and replace_file_content before disk mutation
+# Septum candidate import policy hook
+# Passes supported edit payloads to the CLI before the client writes them
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 if [ ! -f "$ROOT_DIR/.septum/septum.db" ]; then
@@ -38,7 +38,7 @@ fi
 
 export SEPTUM_HOOK_ROOT="$ROOT_DIR"
 
-# Delegate directly to Septum's active 3-gate hook engine
+# Invoke the available Septum CLI hook command
 if command -v bun >/dev/null 2>&1 && [ -f "$ROOT_DIR/bin/septum.ts" ]; then
   exec bun run "$ROOT_DIR/bin/septum.ts" hook pre-write "$@"
 elif command -v septum >/dev/null 2>&1; then

@@ -366,7 +366,7 @@ export class DomainRepository {
       files: catalogFiles,
       agent_hint:
         detailLevel === "compact"
-          ? "Compact view (<400 tokens). Use septum_symbol({ action: 'inspect', query: symbol }) for exact method signatures, or septum_map({ action: 'catalog', domain, detail_level: 'full', file_filter: '<path>' }) for full member lists."
+          ? "Compact declaration catalog. Use septum_symbol({ action: 'context', query: symbol, file_path: '<path>' }) for declaration details. septum_map provides navigation rather than member inventories."
           : undefined,
     };
   }

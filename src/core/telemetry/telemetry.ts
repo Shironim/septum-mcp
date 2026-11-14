@@ -39,7 +39,7 @@ export interface SeptumToolCallEvent {
 export class SeptumTelemetry {
   public static readonly MAX_LOG_SIZE_BYTES = 2 * 1024 * 1024; // 2MB
   public static readonly SLOW_EXECUTION_THRESHOLD_MS = 250;
-  public static readonly BLOAT_BYTE_THRESHOLD = 16 * 1024; // 16KB (~4,000 tokens)
+  public static readonly BLOAT_BYTE_THRESHOLD = 16 * 1024; // Serialized output byte threshold.
 
   /**
    * Generates a concise sample preview of output content to inspect payload relevancy and bloat.
@@ -96,7 +96,7 @@ export class SeptumTelemetry {
     if (payload.status === "error") {
       console.error(`[Septum Telemetry ERROR] ${jsonLine}`);
     } else if (payload.bloat_alert) {
-      console.error(`[Septum Telemetry BLOAT_WARN] Tool '${payload.tool}' output exceeds threshold (${payload.metrics?.bytes_out} bytes, ~${payload.metrics?.estimated_tokens} tokens)`);
+      console.error(`[Septum Telemetry BLOAT_WARN] Tool '${payload.tool}' output exceeds configured byte threshold (${payload.metrics?.bytes_out} bytes)`);
     } else if (payload.duration_ms >= this.SLOW_EXECUTION_THRESHOLD_MS) {
       console.error(`[Septum Telemetry SLOW_WARN] ${jsonLine}`);
     }

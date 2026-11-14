@@ -99,13 +99,13 @@ function countLines(text: string): number {
   return count;
 }
 
-export const SEPTUM_SERVER_INSTRUCTIONS = `Septum is an AST-powered architectural boundary, selective context, and call graph engine.
+export const SEPTUM_SERVER_INSTRUCTIONS = `Septum indexes supported declarations, imports, domain policies and static entrypoints.
 Guidelines for AI Coding Agents:
-1. SELECTIVE CONTEXT FIRST: Avoid reading whole files with read_file when analyzing implementations or finding symbols. Call septum_symbol(action: 'context') to retrieve exact implementations and bound type dependencies within a bounded 16 KB budget.
-2. DISCOVER ARCHITECTURE: Call septum_map(action: 'catalog', detail_level: 'compact') to inspect module boundaries, file locations, and allowed dependencies before introducing new files or cross-domain imports.
-3. PREVENT REGRESSIONS (BLAST RADIUS): Before altering method signatures or deleting public symbols, call septum_symbol(action: 'impact', query: '...') to check inbound callers across the dependency graph.
-4. TRACE EXECUTION FLOWS: To understand how API requests, CLI commands, or background jobs flow through layers, call septum_slice(query: '<route|handler>') instead of manually searching grep hits.
-5. PRE-FLIGHT BOUNDARY CHECK: Before adding a cross-module import, call septum_boundary(scope: 'file', proposed_imports: [...]). Call septum_boundary(scope: 'staged') before git commit to verify zero architectural violations.`;
+1. CONTEXT: Call septum_symbol(action: 'context') for declaration source and supporting references. Deep TypeScript context uses budget_bytes and continuation; source inspection uses line limits. Read freshness, diagnostics and omissions, then inspect further source when needed.
+2. NAVIGATION: Call septum_map(action: 'catalog') for domain/file locations, import relationships, static entrypoints and index health.
+3. CONSUMERS: Before changing public contracts, inspect septum_symbol(action: 'impact') and relevant consumers. Import dependents and caller hints are incomplete static evidence; verify affected application behavior.
+4. ENTRYPOINTS: Call septum_slice(query: '<route|handler>') for catalog matches and related nodes. Matching confidence does not establish runtime reachability or execution order.
+5. BOUNDARIES: Call septum_boundary(scope: 'file', file_path: '...', proposed_imports: [...]) for candidate imports, or scope: 'all'/'domain'/'staged' for those audit scopes. Proposal approval does not audit existing imports. Unknown is not approval; approved describes only the evaluated static scope.`;
 
 export async function runMCPServer(): Promise<void> {
   const manager = new WorkspaceManager();
@@ -200,7 +200,7 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_symbol",
           description:
-            "Locate declarations, read implementation source with bound dependencies, or check who calls a symbol before editing. When to use: (1) action='locate' to find where a symbol is declared, (2) action='context' (or 'inspect') to read a function implementation and bound type definitions without reading whole files (budgeted to 16 KB), (3) action='impact' before refactoring or deleting to inspect inbound callers and blast radius. When NOT to use: do NOT use for macro architecture overviews (use septum_map) or full route flow tracing (use septum_slice). Example: {action:'context',query:'handleOrder',file_path:'src/orders.ts'}.",
+            "Locate indexed declarations, retrieve source/contracts, or inspect potential consumers. action='context' (alias 'inspect') selects deep TypeScript references or bounded source inspection; read mode, freshness, diagnostics and omissions. action='impact' separates import dependents from supported static call sites and inferred caller hints; the caller set is incomplete. Use septum_map for domain/file navigation and septum_slice for static entrypoint context. Example: {action:'context',query:'handleOrder',file_path:'src/orders.ts'}.",
           inputSchema: {
             type: "object",
             properties: {
@@ -291,7 +291,7 @@ export async function runMCPServer(): Promise<void> {
         {
           name: "septum_slice",
           description:
-            "Trace end-to-end call flow from an entrypoint (HTTP route, controller, queue job, event) down through services and repositories. When to use: investigating how a request or user action flows through the system, or finding which controller/service handles a feature. When NOT to use: do NOT use to locate symbol declarations (use septum_symbol action='locate') or audit import rules (use septum_boundary). Example: {query:'POST /orders/{id}/pay',max_depth:5} or {query:'OrderController@pay'}.",
+            "Match a supported static entrypoint and inspect related nodes with relationship evidence and diagnostics. Supports cataloged routes, handlers, jobs, CLI commands and events; results do not establish runtime execution order or complete reachability. Use septum_symbol for declarations and septum_boundary for import policy. Example: {query:'POST /orders/{id}/pay',max_depth:5} or {query:'OrderController@pay'}.",
           inputSchema: {
             type: "object",
             properties: {
