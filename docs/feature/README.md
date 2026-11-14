@@ -1,6 +1,6 @@
 # Septum MCP: implemented features
 
-This directory describes the source checkout reviewed on 2026-11-14. The package declares version `0.2.2` in [package.json](../../package.json). It documents implemented behavior and current limitations; it does not establish which revision an installed binary or running MCP process has loaded.
+This directory describes the source checkout reviewed on 2026-11-14. The package declares version `0.3.0` in [package.json](../../package.json). It documents implemented behavior and current limitations; it does not establish which revision an installed binary or running MCP process has loaded.
 
 Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. It exposes four MCP tools over stdio and CLI commands for initialization, synchronization, boundary checks and hook execution. It does not execute the application being analyzed or establish complete runtime call graphs.
 
