@@ -1,114 +1,72 @@
-# Feature SSOT: `septum_map` (Macro Architecture & Domain Catalog)
+# septum_map
 
-## 1. Navigation contract (`navigation/v1`)
+## Catalog
 
-`septum_map` answers where to look and which paths connect. `septum_symbol` inspects declarations, signatures, contracts and implementation after a target is selected. Catalog responses no longer include per-file symbol arrays, source bodies, full declarations, or the complete capability registry by default.
-
-### Workspace overview
+`action: "catalog"` is the default. The response uses `schema: "navigation/v1"` and provides navigation rather than source bodies or per-file declaration inventories.
 
 ```json
-{ "action": "catalog" }
+{"action":"catalog","workspace_path":"/path/to/project"}
 ```
 
-Returns domain roots, indexed file counts and declared dependency policies. `dependencies` aggregates resolved static imports between domains; each edge carries `from`, `to`, `relation: "imports"` and `count`. Workspace `files` is empty because domain records are the navigation nodes. `entrypoints` provides up to 20 static catalog targets, with `runtime_verified: false`.
-
-### Domain and file navigation
+With no domain, file or archetype filter, the workspace view returns domain roots, file counts, dependency policies and domain-to-domain import edges. Its `files` array is empty. Static entrypoints have `evidence: "static_catalog"` and `runtime_verified: false`.
 
 ```json
-{ "action": "catalog", "domain": "ordering" }
+{"action":"catalog","domain":"orders","file_filter":"service","detail_level":"full"}
 ```
 
-Each file contains `path`, `domain`, `archetype`, `symbol_count` and one indexed symbol-name `anchor` (or null). Anchors support targeted symbol lookup; they are not declaration inventories. Dependencies use actual file paths and include both incoming and outgoing imports touching the selected scope. A neighboring path can belong to another domain.
+A scoped view returns indexed file records with path, domain, archetype, symbol count and an anchor for subsequent symbol lookup. Domain matching is case-insensitive. `file_filter` is a case-insensitive path substring; `archetype_filter` is an exact archetype match.
+
+Files are sorted by static entrypoint membership, connection degree and path. Scoped dependencies use file paths and can include incoming/outgoing edges to neighboring domains. A compact domain view without file/archetype filters omits intra-domain edges; full detail or narrower filters can expose them.
+
+| Input | Behavior |
+| --- | --- |
+| `detail_level` | `compact` by default; `full` expands navigation coverage |
+| `file_limit` | 1–100; default 40 compact or 100 full |
+| `file_offset` | Nonnegative offset into sorted matching files |
+| `include_evidence` | Requires a file filter matching exactly one indexed file |
+| `include_capabilities` | Adds parser and semantic-adapter capability metadata |
+
+Dependency edges are capped at 100 and entrypoints at 20. `pagination.next_file_offset` appears when more matching files remain. Keep filters unchanged when paging. `accounting` records returned/omitted items; edge omissions can include scope filtering as well as caps. These are item bounds, not a serialized byte budget.
+
+Evidence mode adds up to 20 raw import relationships originating in the selected file, evidence accounting and up to five unresolved examples. It does not turn imports into calls.
+
+`health` includes sync state, slice-dirty status, unresolved relationship counts, unsupported/skipped counts and bounded reasons. Its coverage remains partial. Unknown domains return `not_found` and available-domain suggestions. An uninitialized workspace is handled by the server's unindexed diagnostic path.
+
+## Registration
 
 ```json
-{ "action": "catalog", "domain": "ordering", "file_filter": "order.service.ts" }
-```
-
-`file_filter` is a case-insensitive path substring; `archetype_filter` narrows the architectural layer. Files are ordered by static entrypoint membership, connection degree, then path. `next` offers a slice lookup for an entrypoint or a symbol lookup using a real indexed anchor and its file.
-
-### Detail and omission accounting
-
-Compact selects up to 40 files; `detail_level: "full"` selects up to 100. Full expands navigation coverage, not declaration detail. `file_limit` (maximum 100) and `file_offset` remain available, but `pagination` appears only when more matching files remain. Continue with `pagination.next_file_offset` and unchanged filters. Dependency edges are capped at 100 and entrypoints at 20. `accounting` exposes returned and omitted counts; refine the scope to recover relevant edges or entrypoints. These are item limits, not a strict serialized-byte budget.
-
-`health` reports sync state, sync-needed status, unresolved import count, unsupported/skipped file counts and bounded reasons. Coverage remains `partial`: an import edge is not a call, execution order, or runtime proof. Static entrypoints can be inferred. Missing and unindexed targets remain uncertain.
-
-### Optional diagnostics
-
-```json
-{ "action": "catalog", "file_filter": "src/orders/order.service.ts", "include_evidence": true }
-```
-
-Evidence requires a filter matching exactly one indexed file. It returns at most 20 raw import relationships with explicit accounting, plus up to five unresolved diagnostic examples. The raw evidence describes imports originating in that file; incoming connections remain available in the navigation edges.
-
-`include_capabilities: true` explicitly adds parser and semantic-adapter capabilities. With `detail_level: "full"`, that registry is expanded. Normal navigation includes the small runtime-version metadata but omits the registry.
-
-### Compatibility
-
-Catalog input aliases and registration behavior remain supported. The response shape changes intentionally to `navigation/v1`: consumers reading `telescope_view`, `connections`, file symbol arrays or full declarations must migrate. Use `dependencies`, `files`, `health` and `next`, then `septum_symbol` for depth. The programmatic repository declaration-catalog API remains available; MCP map does not call it. No database migration is required.
-
----
-
-## 3. Sub-Operation `action: "register"` (Dynamic Domain Registration)
-When engineers or AI agents introduce a new module or bounded context, domains can be registered dynamically without manual configuration file edits:
-
-```json
-// Request
 {
-  "action": "register",
-  "name": "shipping",
-  "root": "src/modules/shipping",
-  "allowed_dependencies": ["common", "ordering"],
-  "forbidden_dependencies": ["billing"],
-  "ingest_now": true
+  "action":"register",
+  "name":"orders",
+  "root":"src/orders",
+  "allowed_dependencies":["shared"],
+  "forbidden_dependencies":["billing"],
+  "ingest_now":true
 }
 ```
-* **Root Collision Validation:** Two names cannot own the same physical root. Nested roots are supported.
-* **Policy Ownership:** With `septum.config.json`, registration updates the file and records the effective domain in SQLite. Without it, SQLite owns policy. The response identifies `policy_owner` (`file` or `database`). Omitted fields retain the current owner's values; explicit empty arrays clear them.
-* **Write Failures:** A lock or stale file snapshot rejects registration. A failed file write rolls back the database update. The file is replaced atomically, but the filesystem and SQLite do not form a distributed transaction; the file remains authoritative after a crash between their commits.
-* **Ingestion:** With `ingest_now: true`, registration also synchronizes source. Registration success without ingestion does not certify index freshness.
 
-Catalog construction returns structured data first; shared guidance is derived from its status and the MCP handler serializes it. Full capabilities distinguish registered adapters, applicability and counts from the last successful extraction. Those counts describe supported patterns, not runtime completeness.
+Name/domain and root are required. Roots must be contained in the workspace. Different names cannot own the same physical root; nested roots are supported. Registration retains omitted policy arrays/maps; explicit empty arrays/maps clear them.
 
----
+When `septum.config.json` exists, it owns policy. Registration updates that file and SQLite and reports `policy_owner: "file"`. Otherwise SQLite owns registered policy and the response reports `"database"`. File updates use an exclusive lock, snapshot checks and atomic rename. A file-write failure rolls back the surrounding database transaction. File and database commits are not a distributed transaction; a crash can leave them out of step.
 
-## 4. Automatic Topology Discovery (`TopologyDetector`)
+`ingest_now` defaults to false. A successful registration alone does not certify source-index freshness. With ingestion enabled, synchronization follows registration; an ingestion failure need not undo the already recorded policy.
 
-When initialized in a workspace, the **`TopologyDetector`** engine ([topology-detector.ts](../../src/core/discovery/topology-detector.ts)) automatically discovers languages, frameworks, and architectural styles without prior configuration:
+## Automatic topology discovery
 
-```
-                            Project Root
-                                 │
-         ┌───────────────────────┴───────────────────────┐
-         ▼                                               ▼
-1. Language Detection                           2. Framework Detection
-   • PHP: composer.json, artisan                   • Laravel: artisan
-   • Go: go.mod                                    • Symfony: bin/console, symfony.lock
-   • Python: pyproject.toml, requirements.txt      • NestJS: @nestjs/core in package.json
-   • TS/JS: tsconfig.json, package.json            • Express, Fastify, Hono, Elysia
-                                                   • FastAPI, Django, Flask (Python)
-                                                   • Gin, Echo, Chi, Fiber (Go)
-                                 │
-         ┌───────────────────────┴───────────────────────┐
-         ▼                                               ▼
-3. Project Type Classification                  4. Architectural Style Mapping
-   • monorepo (pnpm, turbo, lerna, nx)             • monorepo-workspaces (apps/*, packages/*)
-   • backend (standalone API framework)            • modular-ddd (domains/*, modules/*)
-   • fullstack (Next.js, Nuxt, Laravel Blade)      • layered-monolith (app/Http/Controllers, etc.)
-   • cli-mcp (MCP server SDK, CLI)                 • clean-architecture (Go cmd/*, internal/*)
-```
+Discovery uses filesystem layout and project manifests to infer language, framework, project type, architecture and initial domains. It is a heuristic configuration generator.
 
-### Automatic Domain Partition Rules
-* **Monorepo Workspaces:** Every package under `apps/*` and `packages/*` is mapped as an independent domain. Default dependency rules permit `apps` to import `packages`, while prohibiting `packages` from importing `apps`.
-* **Modular DDD:** Directory structures such as `src/domains/*`, `src/modules/*`, `app/Domain/*`, or `features/*` are isolated into bounded domains with dependencies restricted to `shared` or `common`.
-* **Go Clean Architecture:** `cmd/` is designated as the entrypoint domain, `internal/` as private domain logic, and `pkg/` as public shared libraries. Rules enforce that `internal` is never imported externally, and `pkg` cannot depend on `cmd`.
-* **Layered Monolith (Laravel MVC / NestJS Layered):** Mapped into domain layers (`app/Http/Controllers`, `app/Services`, `app/Models`, etc.).
+- Monorepos inspect `apps`, `packages`, `modules` and `libs`. Duplicate package names receive disambiguating names. Apps allow package domains; non-app domains forbid app domains.
+- Modular layouts include variants of `app/Domain`, `src/domains`, `src/modules` and `features`. Generated dependencies include shared/common/root names in the applicable branch.
+- Layered layouts generate domains from detected source layers.
+- Go layouts can generate `pkg`, one domain per `internal/<subdir>`, and `cmd-<subdir>` entrypoint domains. Without source-bearing subdirectories, direct `internal` or `cmd` domains can be used.
 
----
+**Current Go limitation:** generated forbidden lists use literal names `internal` and `cmd`, even when discovered domains are named `orders` or `cmd-api`. Those lists do not match the renamed domains. In warn mode, a `pkg` import into `cmd/api` can therefore produce no violation; strict allowlists can reject it independently. Discovery does not certify Go visibility or external consumers.
 
-## 5. SSOT Metadata Summary in SQLite (`repo_meta`)
+## Implementation and regression evidence
 
-All discovered topological facts are persisted in the embedded database:
-* `repo_meta.framework`: Framework name (e.g., `"laravel"`, `"nestjs"`, `"fastapi"`, `"gin"`).
-* `repo_meta.language`: Primary language (`"typescript"`, `"php"`, `"python"`, `"go"`).
-* `repo_meta.architecture_style`: Architectural style (`"modular-ddd"`, `"clean-architecture"`, etc.).
-* `repo_meta.project_type`: Project classification (`"backend"`, `"monorepo"`, `"fullstack"`).
+- [Navigation builder](../../src/core/discovery/navigation.ts), [catalog handler](../../src/mcp/tools/get-domain-catalog.ts)
+- [Registration](../../src/mcp/tools/register-domain.ts), [policy file writes](../../src/core/config/loader.ts)
+- [Topology discovery](../../src/core/discovery/topology-detector.ts)
+- [Navigation/output regressions](../../tests/unit/refactor-contracts.test.ts), [policy ownership](../../tests/unit/policy-ownership.test.ts), [domain ownership](../../tests/integration/domain-ownership.py)
+
+These paths describe source and test ownership; a linked test file is not a claim that every discovery layout or live installation was exercised.

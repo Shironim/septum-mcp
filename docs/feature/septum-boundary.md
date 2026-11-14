@@ -1,100 +1,69 @@
-# Feature SSOT: `septum_boundary` (Architectural Boundary & Circular Dependency Guard)
+# septum_boundary and CLI checks
 
-## 1. Background & Business Requirements
+Boundary analysis applies configured domain rules to statically resolved imports and detects selected domain/file cycles. Approval concerns the analyzed static scope; it does not certify runtime behavior or complete language resolution.
 
-AI Coding Agents often prioritize immediate local problem-solving (making code run) without evaluating long-term architectural integrity. This frequently causes **Architectural Drift**:
-1. **Module Boundary Leaks:** An isolated domain (e.g., *Ordering*) directly imports internal services from another domain (*Billing*), violating *Dependency Inversion* and *Hexagonal / Clean Architecture* principles.
-2. **Circular Dependencies:** File A imports File B, and File B imports File A, leading to runtime deadlocks, memory leaks, or module initialization failures.
+## Rules actually implemented
 
-`septum_boundary` operates as an AST-powered **Architectural Circuit Breaker** that verifies import compliance both before and after code modifications.
+| Rule | Trigger |
+| --- | --- |
+| `forbidden_dependency` | Resolved target domain occurs in the source domain's forbidden list |
+| `disallowed_dependency` | In strict mode, a cross-domain target is absent from the source domain's allowed list |
+| `circular_dependency` | DFS finds a cycle in the constructed domain or file import graph |
+| `unmapped_domain` | Proposal evaluation has a source file with no registered domain |
 
----
+Forbidden checks apply in both warn and strict modes. Same-domain imports do not require allowlist membership. Cycle analysis excludes recognized type-only imports; domain-cycle construction also excludes the virtual `root` aggregator. These are graph checks over available resolved evidence, not a proof of all runtime cycles.
 
-## 2. Four Violation Rules
+**Current unmapped-target limitation:** `unmapped_domain` does not mean “target is outside all domains.” The evaluator skips a target whose domain cannot be resolved. A proposal from a mapped source to a real internal file outside all domain roots can receive `approved`, including in strict mode. Other incomplete-resolution guards can return unknown, but they do not implement a universal unmapped-target rejection.
 
-The `BoundaryEvaluator` engine ([evaluator.ts](../../src/core/boundary/evaluator.ts)) evaluates 4 core rules:
+Domain policies match domain names, not directory categories. See [map](septum-map.md) for the current Go discovery naming limitation.
 
-### 1. `forbidden_dependency` (Hard Violation)
-Triggered when a domain is explicitly prohibited from importing a target domain in the configuration:
-```json
-{
-  "domains": {
-    "ordering": {
-      "forbidden_dependencies": ["billing"]
-    }
-  }
-}
-```
-If any file within `ordering` imports a file from `billing`, Septum rejects the change immediately and requires decoupled communication via events/messaging or shared interfaces.
+Boundary decisions use the [language resolver](import-resolution.md), not the extractor's `is_external` flag alone. The new Rust/Ruby/Java/C# paths can resolve supported local targets; missing classpaths, dynamic configuration and conditional imports still yield incomplete evidence. A repository with no relevant imports can be approved even when some language constructs are unsupported.
 
-### 2. `disallowed_dependency` (Strict Mode)
-When `settings.enforcement = "strict"`, a domain is **only permitted** to import domains explicitly listed in `allowed_dependencies`. All imports targeting unlisted domains are treated as boundary violations.
-
-### 3. `circular_dependency` (Cycle Detection)
-Detects import loops using Depth-First Search (DFS):
-* **Domain Cycles:** Domain A $\to$ Domain B $\to$ Domain A.
-* **File Cycles:** `serviceA.ts` $\to$ `serviceB.ts` $\to$ `serviceA.ts`.
-* **Smart Type-Only Import Erasure:** Septum ignores type-only imports (`import type { ... }` in TypeScript) during circular dependency evaluation, as type definitions are erased at compile time and do not induce runtime cycles.
-
-### 4. `unmapped_domain`
-Triggered when a source file imports an internal path that sits outside any recognized domain defined in the project configuration.
-
----
-
-## 3. Three Operational Scopes
-
-### A. Pre-Flight Proposal Mode (`scope: "file"`)
-Used by AI agents **before writing changes to disk** to simulate whether candidate imports satisfy architectural rules:
+## MCP scopes
 
 ```json
-// Request
-{
-  "file_path": "src/modules/ordering/order.service.ts",
-  "proposed_imports": ["../billing/billing.service"]
-}
-
-// Response (Rejected)
-{
-  "status": "rejected",
-  "total_violations": 1,
-  "circular_dependencies_count": 0,
-  "violations": [
-    {
-      "file": "src/modules/ordering/order.service.ts",
-      "line": 1,
-      "source_domain": "ordering",
-      "target_domain": "billing",
-      "imported_target": "../billing/billing.service",
-      "rule": "forbidden_dependency",
-      "message": "Forbidden cross-domain dependency detected: 'ordering' is strictly prohibited from importing domain 'billing'."
-    }
-  ]
-}
+{"scope":"file","file_path":"src/orders/service.ts","proposed_imports":["../billing/service"]}
 ```
 
-### B. Git Staged Audit Mode (`scope: "staged"`)
-Freezes the Git index as a tree before analysis ([staged-auditor.ts](../../src/core/boundary/staged-auditor.ts)). Source and interpretation inputs are read from that snapshot, including unchanged source needed to resolve imports and cycles. Binary assets are inventoried without materializing their bytes or applying the source-size cap to them.
-* Reports violations relevant to changed files; manifest changes can widen the affected scope.
-* Unresolved or unsupported evidence yields `unknown`; approval applies to the analyzed static scope and does not certify runtime behavior.
-* Snapshot file-count/total-byte limits and source-size limits remain enforced. Symlinks and submodules are conservatively rejected.
+File scope evaluates supplied candidate imports and simulated cycles using available indexed relationships. `file_paths` supports multiple sources. Use either `file_path` or `file_paths`, not both.
+
+The response records proposal scope and `existing_imports_checked: false` where supplied. Omitting imports or supplying an empty list does not audit the existing file. Proposal success must not be interpreted as an existing-file clean bill. Freshness/incomplete-evidence guards can also surface known existing violations before proposal evaluation.
 
 ```json
-// Request
-{ "scope": "staged" }
-
-// Response (Approved)
-{
-  "status": "approved",
-  "scope": "staged",
-  "total_checked": 3,
-  "total_violations": 0,
-  "circular_dependencies": [],
-  "domain_violation_breakdown": {},
-  "violations": [],
-  "message": "All 3 staged file(s) approved. No boundary violations detected."
-}
+{"scope":"all"}
 ```
 
-### C. Full Codebase / Domain Scope (`scope: "all"` or `scope: "domain"`)
-Incomplete-resolution output includes up to ten relationship examples, total/returned/omitted accounting, reason counts and a recovery hint. A resolved import can still yield `unknown` if its target source is not indexed; registering/indexing the target root can resolve that uncertainty. Sampling diagnostics does not change the underlying decision.
-Executes a comprehensive audit across the entire SQLite dependency graph to ensure ongoing architectural health across the repository.
+All scope audits the indexed dependency graph. `{"scope":"domain","domain":"orders"}` narrows analysis to a registered domain. Unknown domain names are rejected. Without explicit scope, a file target selects file scope, a domain selects domain scope, otherwise the default is all.
+
+```json
+{"scope":"staged"}
+```
+
+Staged scope freezes the Git index using `git write-tree`. Source and interpretation files are materialized from the resulting tree, including unchanged source needed for import/cycle resolution. Unstaged source does not replace staged bytes. Manifest/interpretation changes can widen the affected scope.
+
+Staged analysis rejects snapshots containing symlinks or submodules. Snapshot entry-count, source-size and total-source-byte limits apply. Non-source binary entries are inventoried without materializing their contents or applying the source-size cap. Unmapped source files are skipped by the staged source loop; staged approval does not establish domain ownership for every file.
+
+## Completeness and statuses
+
+The MCP handler requires completed workspace synchronization. Missing/running/error sync, relevant skipped files or unsupported sources can return `unknown`. Stale sources and incomplete import relationships produce diagnostics; known violations can make an otherwise incomplete result `rejected`.
+
+Incomplete relationship diagnostics include up to ten examples, returned/omitted accounting, reason counts and a recovery hint. Missing target indexing, conditional resolution, unsupported/ambiguous resolution and stale evidence remain uncertainty.
+
+`approved` means no violations were found in the evaluated scope under those checks. `rejected` reports violations. `unknown` is not approval. Validation errors and operational failures can instead become MCP errors. Output shape differs between file, batch, staged and workspace scopes; clients should read the relevant status/count fields rather than assume one universal example schema.
+
+## CLI behavior differs from MCP
+
+`septum check` loads policy, synchronizes with content verification and audits the workspace. `--staged` uses the frozen-index auditor instead. `--strict` overrides enforcement for that invocation; `--json` selects structured reporting.
+
+The default configuration returned by `ConfigLoader.getDefaultConfig()` uses `warn`; the raw configuration schema's enforcement default is `strict`. Follow the effective loaded policy, not one isolated schema default.
+
+CLI violations are advisory with exit code 0 in warn mode; strict mode sets exit code 1. Unknown resolution likewise fails strict checks while warn checks can remain non-blocking. Unsupported/skipped source or operational errors can fail the command. A non-staged workspace with no domains reports `not_indexed` and fails only when strict.
+
+MCP reports detected violations as rejected even with warn enforcement. Pre-write hooks also deny detected forbidden violations. “Warn” does not mean identical behavior across all entry points.
+
+## Implementation and regression evidence
+
+- [Rule evaluator](../../src/core/boundary/evaluator.ts), [MCP guards/results](../../src/mcp/tools/check-boundary.ts)
+- [Frozen-index audit](../../src/core/boundary/staged-auditor.ts), [CLI check](../../src/cli/commands/check.ts)
+- [Input validation](../../src/mcp/schemas.ts)
+- [Evaluator tests](../../tests/unit/boundary-evaluator.test.ts), [resolution consumers](../../tests/unit/resolution-consumers.test.ts), [staged contracts](../../tests/unit/refactor-contracts.test.ts)

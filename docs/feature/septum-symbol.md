@@ -1,192 +1,83 @@
-# Feature SSOT: `septum_symbol` (AST Symbol Intelligence & Blast Radius)
+# septum_symbol
 
-## 1. Background & Business Requirements
+The public actions are `locate`, `context` and `impact`. `inspect` normalizes to `context`. Without an explicit action, context-related options select context; otherwise the default is locate.
 
-AI Coding Agents performing code modifications frequently struggle with 3 critical limitations:
-1. **Coordinate Blindness:** Agents struggle to pinpoint exact line numbers of functions or classes without brute-force `grep`, especially when identical method names exist across multiple files.
-2. **Token Bloat vs. Hollow Slicing:** Reading an entire 1,000-line controller file rapidly exhausts token budgets. Conversely, reading only a 3-line delegating wrapper method (`return this.service.handle()`) starves the agent of essential business logic.
-3. **Refactoring Blast Radius Blindness:** Altering public parameters or function contracts without discovering all upstream call sites across the codebase introduces regressions and breaks dependent modules.
+Common selectors are `query` (alias `symbol`), `domain`, `file_path`, `symbol_ref` and `workspace_path`. Use the reference returned for a particular declaration when names are ambiguous. A reference includes its indexed source identity; after index content changes, stale references are rejected.
 
-`septum_symbol` serves as the primary AST symbol intelligence tool, offering 3 core sub-operations (*actions*): `locate`, `context`, and `impact`.
+## Locate
 
----
-
-## 2. Sub-Operation 1: `action: "locate"` (Precision Coordinate Discovery)
-
-### Internal Mechanics & Algorithms
-1. **Error Log & Stack-Trace Parser:**
-   AI agents can pass raw error messages directly from compiler or runtime output. The parser isolates the container class and target method ([symbol-locator.ts](../../src/core/resolver/symbol-locator.ts)):
-   * `"Call to undefined method App\Http\Controllers\OrderController::calculateTotal()"` $\to$ Container: `OrderController`, Member: `calculateTotal`.
-   * `"'OrderService' object has no attribute 'calculate_total'"` $\to$ Container: `OrderService`, Member: `calculate_total`.
-   * Flexible syntax: `OrderController::store`, `OrderService->calculateTotal`, `OrderService.calculateTotal`, or bare `calculateTotal`.
-2. **Multi-Signal Similarity Engine (0.0 – 1.0):**
-   When typos occur, Septum calculates a combined similarity score:
-   * **Damerau-Levenshtein Distance:** Handles typos and character transpositions.
-   * **Token Jaccard Similarity:** Deconstructs identifiers across *CamelCase*, *snake_case*, *kebab-case*, and namespace segments.
-   * **Prefix & Substring Bonus:** Grants extra weight for partial name matches.
-3. **Sibling Methods & Suggestions:**
-   If a symbol is absent from the target container, Septum returns `sibling_methods` (other methods defined in the same container).
-4. **Just-In-Time (JIT) Delta Sync:**
-   If a file changed on disk since the previous sync, Septum reparses it on-the-fly so `start_line` and `end_line` coordinates remain accurate.
-
-### Input & Output Schema
 ```json
-// Request
-{
-  "action": "locate",
-  "query": "OrderController::calculateTotal"
-}
-
-// Response
-{
-  "found": true,
-  "query": "OrderController::calculateTotal",
-  "file_path": "app/Http/Controllers/OrderController.php",
-  "container_name": "OrderController",
-  "exact_symbol": {
-    "name": "calculateTotal",
-    "kind": "method",
-    "signature": "public function calculateTotal(OrderRequest $request): JsonResponse",
-    "visibility": "public",
-    "start_line": 52,
-    "end_line": 78,
-    "total_lines": 27
-  },
-  "sibling_methods": ["index", "store", "show", "cancel"]
-}
-```
-*(Note: If a symbol exceeds the 300-line threshold, `complexity_smell` is emitted with `is_high_complexity: true` and `threshold: 300`.)*
-
----
-
-## 3. Sub-Operation 2: `action: "context"` (Bounded Slicing & DTO Extraction)
-
-### Internal Mechanics & Algorithms
-`action: "context"` (or alias `"inspect"`) accepts explicit `context_mode: "deep" | "source"`. Without that option, legacy automatic selection by language and bounded options remains available. Responses identify the selected mode:
-1. **In-Memory TypeScript Compiler Host (`.ts`, `.mts`, `.cts` when bounded line options are omitted):**
-   Runs the `referenced-typescript-declarations/v4` policy ([context.ts](../../src/core/retrieval/context.ts)) within a strict byte budget (`budget_bytes`, default: 16 KB), returning `items` (`source`, `type_contract`, `relationship`, `selection`, `diagnostic`) and pagination `continuation` tokens (see [symbol-context-contract.md](./symbol-context-contract.md)).
-2. **Bounded Source Slicing (Polyglot files or when `include_source` / `source_line_limit` is specified):**
-   Extracts only the requested symbol lines (default limit: 120 lines, max: 200 lines) via [get-symbol.ts](../../src/mcp/tools/get-symbol.ts).
-3. **Anti-Hollow Slicing (1-Hop Transitive Delegator Expansion):**
-   If a polyglot/bounded method ($\le 15$ lines, or `semantic_depth: 2`) is a thin delegate to an injected dependency across PHP (`$this->prop->method(`), TypeScript/JS (`this.prop.method(`), Python (`self.prop.method(`), Go (`recv.prop.Method(`), or static calls (`Class::method(`):
-   ```php
-   public function calculate(OrderRequest $request) {
-       return $this->orderService->calculateTotal($request->validated());
-   }
-   ```
-   Septum inspects constructor/field/type-hint DI bindings, identifies `OrderService`, and **automatically embeds the target method's implementation** (`delegated_implementation`) in the same response without requiring a second tool call.
-4. **Dependency & Outbound Call Resolution:**
-   When `include_source: false` (signature/contract inspection mode), lists injected services (`dependencies_injected`) and resolved external method invocations (`outbound_calls`, `resolved_outbound_calls`).
-
-### Input & Output Schema (Bounded Polyglot Mode)
-```json
-// Request
-{
-  "action": "context",
-  "query": "OrderController::calculateTotal"
-}
-
-// Response
-{
-  "symbol": "OrderController::calculateTotal",
-  "kind": "method",
-  "file_path": "app/Http/Controllers/OrderController.php",
-  "exact_range": {
-    "start_line": 52,
-    "end_line": 78,
-    "total_lines": 27
-  },
-  "source_slice": {
-    "status": "current",
-    "file_path": "app/Http/Controllers/OrderController.php",
-    "start_line": 52,
-    "end_line": 78,
-    "text": "public function calculateTotal(OrderRequest $request): JsonResponse {\n    $total = $this->orderService->calculateTotal($request->validated());\n    return response()->json(['total' => $total]);\n}",
-    "related_dependency_analysis": "delegated_implementation_expanded",
-    "delegated_implementation": {
-      "symbol": "OrderService::calculateTotal",
-      "file_path": "app/Services/OrderService.php",
-      "start_line": 80,
-      "end_line": 105,
-      "text": "public function calculateTotal(array $payload): float {\n    // Concrete calculation implementation in Service...\n}"
-    }
-  }
-}
+{"action":"locate","query":"OrderController::store"}
 ```
 
----
+The locator parses supported PHP-style undefined-method errors, Python missing-attribute errors, class/member syntax (`::`, `->`, `.`) and bare names. Fuzzy suggestions combine Damerau-Levenshtein, identifier-token overlap and prefix/substring signals. Suggestions are candidates, not confirmed declarations.
 
-## 4. Sub-Operation 3: `action: "impact"` (Blast Radius & Inbound Callers)
-`call_sites` separately reports supported TypeScript/JavaScript identifier calls bound to a named import, including aliases. Comments, strings and locally shadowed bindings are excluded by AST symbol identity. Method dispatch and namespace/default imports without a proven binding remain limited; this is not a complete caller graph. `inbound_callers` retains legacy evidence for compatibility. Risk remains advisory and explicitly states its scope.
+A successful response includes `found`, `file_path`, `container_name`, `exact_symbol`, `symbol_ref`, suggestions and sibling methods. The nested coordinates are:
 
-
-### Internal Mechanics & Algorithms
-1. **Inverse Dependency, Same-File & Same-Package Traversal:**
-   Scans the repository for all files that import the file declaring the target symbol, plus same-file callers (outside the target symbol's own declaration line span) and same-package/namespace files in `.go`, `.php`, `.java`, and `.cs` that invoke the target without explicit import statements.
-2. **Batch Enclosing Symbol Resolution (Zero N+1 Query):**
-   Septum loads symbols from calling files in a single batch SQLite query to resolve callers: *“Which method encloses line 115?”* Output provides concrete caller method identifiers rather than plain line numbers.
-3. **Method-Level Invocation Hints:**
-   Import dependencies are returned separately from lexical caller hints. Matching the following syntax does not prove receiver identity, runtime dispatch or a complete caller set:
-   * `->methodName(` (PHP)
-   * `.methodName(` (TypeScript, JavaScript, Python, Go)
-   * `::methodName(` (Static calls in PHP, C++)
-4. **Regression Risk Level Calculation:**
-   * **`low`:** Invoked by < 2 files within the same domain.
-   * **`medium`:** Invoked by 2–5 files or spans 2 domains.
-   * **`high`:** Invoked by > 5 files or spans > 2 architectural domains.
-
-Caller scanning and risk calculation live in `core/resolver/symbol-impact.ts`; database candidate queries remain in `DependencyRepository`. Results retain `coverage: "partial"` and `inbound_callers_complete: false`. Per-target `capabilities` distinguish declaration extraction, import resolution, source/deep context and heuristic caller analysis.
-
-### Input & Output Schema
 ```json
-// Request
-{
-  "action": "impact",
-  "query": "OrderService::cancelOrder"
-}
-
-// Response
-{
-  "target_symbol": "OrderService::cancelOrder",
-  "found_in_index": true,
-  "impact_summary": {
-    "total_dependents": 3,
-    "risk_level": "medium",
-    "affected_files_count": 2
-  },
-  "inbound_callers": [
-    {
-      "file": "app/Http/Controllers/OrderController.php",
-      "caller": "OrderController@cancel",
-      "line": 85,
-      "kind": "method",
-      "domain": "ordering"
-    },
-    {
-      "file": "app/Jobs/ExpireUnpaidOrdersJob.php",
-      "caller": "ExpireUnpaidOrdersJob@handle",
-      "line": 42,
-      "kind": "method",
-      "domain": "ordering"
-    },
-    {
-      "file": "app/Http/Controllers/Admin/OrderAdminController.php",
-      "caller": "OrderAdminController@forceCancel",
-      "line": 120,
-      "kind": "method",
-      "domain": "admin"
-    }
-  ]
-}
+{"exact_symbol":{"line_start":52,"line_end":78,"total_lines":27}}
 ```
 
----
+This is a field excerpt, not a complete response. `symbol_ref` and file-list candidates use `start_line`/`end_line` instead. Do not assume every object shares one coordinate spelling.
 
-## 5. Programming Language Support
+Multiple declarations produce `ambiguous` candidates. An absent target can produce suggestions or `not_found`. An empty query with `file_path` lists indexed declarations in that file. `limit` defaults to 10 and caps returned candidates/suggestions where applied. Symbols exceeding 300 indexed lines receive `complexity_smell`; line count is not a control-flow complexity measurement.
 
-`septum_symbol` provides full AST symbol navigation for:
-* **TypeScript & JavaScript:** Classes, methods, arrow functions, interfaces, type aliases, enums.
-* **PHP (Laravel & Symfony):** Classes, Traits, Interfaces, Enums, Constructor Property Promotion (PHP 8), Attributes.
-* **Python (FastAPI, Django, Flask):** Classes, async/sync defs, Pydantic models.
-* **Go (Golang):** Structs, Interfaces, standalone functions, method receivers (`func (s *Service) Method()`).
-* **Rust, C#, Java, Ruby:** Native declaration indexing for structs, classes, and methods via Tree-Sitter WASM grammars.
+When the handler receives an ingestion pipeline, it can initialize an empty catalog, refresh a found target and try bounded candidate-file discovery on a miss. Refresh failures become diagnostics. Freshness metadata can still mark coordinates stale or unavailable; a found result alone is insufficient for editing.
+
+## Context engine selection
+
+```json
+{"action":"context","context_mode":"source","query":"OrderController::store","include_source":true}
+```
+
+| Selection | Engine |
+| --- | --- |
+| Explicit `context_mode: "deep"` | TypeScript declaration/reference context |
+| Explicit `context_mode: "source"` | Bounded source inspection |
+| No mode, but `include_source`, `source_start_line` or `source_line_limit` supplied | Bounded source inspection |
+| No bounded option and target is `.ts`, `.mts` or `.cts` | Deep context |
+| Other known target extension | Bounded source inspection |
+
+Without a resolved target path, automatic selection initially attempts deep context. Deep mode rejects bounded source options. Source mode rejects `budget_bytes` and `continuation`. See [deep context](symbol-context-contract.md) for its distinct output contract.
+
+## Bounded source behavior
+
+Source is included by default on this path. `source_start_line` defaults to the declaration start; `source_line_limit` defaults to 120 and is capped at 200. The requested start must be inside the indexed declaration. A truncated source slice supplies `next_start_line`.
+
+`source_slice.status` can be `current`, `stale`, `invalid_range`, `unavailable`, `out_of_scope` or `ambiguous`. The handler reads disk content and compares its hash to the index before using the target's coordinates. Stale source asks for `septum sync`.
+
+For slices of at most 15 lines, or with `semantic_depth: 2`, the handler attempts one-hop delegated implementation expansion. It recognizes selected PHP, TypeScript/JavaScript, Python, Go and static-call patterns and infers dependency types from declarations or naming. Resolution is heuristic and can fail or select a similarly named target. The delegated text is not covered by the primary 120/200-line cap and is read using indexed coordinates without a separate delegated-target hash comparison. It must not be treated as a verified runtime callee.
+
+`include_source: false` returns declaration details and, when dependencies are enabled, injected dependencies/outbound-call inference instead of a source slice. Relationship and connected-file lists are compacted to at most 20 with omission counts. Source mode has no deep-context serialized byte guarantee.
+
+## Impact
+
+```json
+{"action":"impact","query":"cancelOrder","file_path":"src/orders/service.ts"}
+```
+
+Impact combines indexed declarations/import dependents, supported import-bound TypeScript/JavaScript call sites and legacy lexical caller hints. Candidate traversal includes importing files, same-file callers and selected same-package/namespace candidates. It does not establish complete dynamic dispatch.
+
+The response separates `import_dependents`, `call_sites`, legacy `inbound_callers` and resolution warnings. It reports `coverage: "partial"`, `inbound_callers_complete: false` and an advisory risk scope. Risk uses distinct caller files/domains:
+
+| Risk | Condition |
+| --- | --- |
+| High | More than five files or more than two domains |
+| Medium | At least two files or at least two domains, unless high |
+| Low | Remaining indexed cases |
+| Unknown | No symbol/dependency index evidence |
+
+`total_dependents` counts returned legacy inbound entries; it is not a complete count of runtime consumers.
+
+## Evidence metadata
+
+Locate, source inspection and impact attach `retrieval` metadata describing selected-source freshness, partial completeness, observed stale/unavailable inputs and reasons. Selected-source freshness does not certify the full dependency closure. Parser capabilities distinguish declaration extraction from import resolution and runtime dispatch.
+
+## Implementation and regression evidence
+
+- [Dispatch](../../src/mcp/tools/symbol.ts), [schemas](../../src/mcp/schemas.ts)
+- [Locate handler](../../src/mcp/tools/locate-symbol.ts), [query parsing](../../src/core/resolver/symbol-locator.ts)
+- [Source inspection/delegation](../../src/mcp/tools/get-symbol.ts)
+- [Impact response](../../src/mcp/tools/get-symbol-impact.ts), [caller analysis](../../src/core/resolver/symbol-impact.ts)
+- [Evidence enrichment](../../src/core/retrieval/symbol-evidence.ts)
+- [Locator tests](../../tests/symbol-locator.test.ts), [identity tests](../../tests/unit/symbol-identity.test.ts), [retrieval evidence](../../tests/unit/symbol-retrieval-evidence.test.ts), [mode selection](../../tests/unit/refactor-contracts.test.ts)

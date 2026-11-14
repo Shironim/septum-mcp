@@ -1,198 +1,72 @@
-# Feature SSOT: `septum_slice` (Vertical Execution Chain Tracer)
+# septum_slice
 
-## 1. Background & Business Requirements
+This tool matches a query against a stored static entrypoint catalog and returns related architectural nodes. It does not run handlers or prove that nodes execute sequentially.
 
-In modern backend architectures, a client request never stops at the controller layer. Execution flows vertically through multiple layers:
-$$\text{Ingress (Route / HTTP / CLI / Job)} \longrightarrow \text{Guard / Middleware} \longrightarrow \text{Validation DTO} \longrightarrow \text{Controller} \longrightarrow \text{Service / Use Case} \longrightarrow \text{Repository / ORM} \longrightarrow \text{Database Table}$$
-
-**The Conventional Problem:**
-When an AI agent needs to understand an endpoint such as `POST /orders`, it conventionally has to:
-1. Search across source files for routing definitions.
-2. Read the router file to find the controller handler.
-3. Read the controller to identify the FormRequest / DTO and invoked service methods.
-4. Read the service file to uncover mutated database tables or queries.
-This consumes 5–8 separate tool calls and burns thousands of tokens from the agent's context window.
-
-**The `septum_slice` Solution:**
-`septum_slice` returns a bounded static catalog around supported entrypoints. Each relationship carries its evidence kind and derivation. Target-match confidence does not prove sequential execution or complete runtime reachability.
-
----
-
-## 2. Omni-Trigger Support
-
-`septum_slice` is not limited to HTTP endpoints; it natively supports 4 types of backend triggers:
-
-1. **HTTP Endpoints & REST Routes:**
-   * Method + URI: `POST /api/v1/orders`, `DELETE /users/{id}`
-   * URI Path: `/orders/{id}/status`, `orders` (automatically matches route parameter placeholders `{id}`, `:id`, or `<int:id>`)
-   * Named Routes: `orders.store`, `admin.users.index`, `api.checkout`
-2. **Background Jobs / Queue Workers:**
-   * Query: `JOB ProcessOrderJob` or `job:ProcessOrderJob`
-   * Traces: Job dispatch $\to$ Job Handler $\to$ Service $\to$ DB Transaction.
-3. **CLI Commands / Console Tasks:**
-   * Query: `CLI order:cleanup` or `cli:order:cleanup`
-   * Traces: Artisan / NestJS Commander / Click CLI command $\to$ Handler $\to$ Business Logic.
-4. **Domain Events & Listeners:**
-   * Query: `EVENT OrderPlacedListener` or `event:OrderPlacedListener`
-   * Traces: Event trigger $\to$ Subscriber / Listener $\to$ Side effects (e.g., notifications).
-5. **Controller & Action Method:**
-   * Query: `OrderController@store`, `OrderController::updateStatus`, or `OrderController`.
-6. **Task Intent / Natural Language:**
-   * Query: `"Update order status in dashboard"` or `"checkout shopping cart"`. The engine tokenizes and scores similarity against known routes and execution graphs (`confidence: "inferred"`).
-
----
-
-## 3. Two-Tier Slicing Architecture
-
-```
-                       septum_slice(query)
-                                │
-                                ▼
-         ┌──────────────────────────────────────────────┐
-         │ Tier 1: Dedicated Framework Semantic         │
-         │         Extractor (Laravel, NestJS, etc.)    │
-         └──────────────────────┬───────────────────────┘
-                                │
-                    Extract supported adapter patterns
-                    then identify uncovered entrypoint files
-                                │
-                                ▼
-         ┌──────────────────────────────────────────────┐
-         │ Tier 2: Generic Tree-Sitter Call-Graph       │
-         │         Tracer (bounded static fallback)    │
-         └──────────────────────────────────────────────┘
-```
-
-### Tier 1: 12 Dedicated Framework Extractors
-Septum includes semantic adapters tailored to framework decorators, routing constructs, validation contracts, and ORMs:
-* **PHP:**
-  * **Laravel:** `routes/web.php`, `routes/api.php`, FormRequest validation rules (`payload_props`), Controllers, Services, Eloquent Models, and database migration schemas.
-  * **Symfony:** PHP 8 Attributes (`#[Route]`), Controller actions, and Doctrine Entities.
-* **TypeScript / JavaScript:**
-  * **NestJS:** Decorators `@Controller()`, `@Get()`, `@Post()`, `@Body() dto: CreateDto`, `@Injectable()` Services, and TypeORM / Prisma Repositories.
-  * **Express.js:** `router.post()`, middleware chains, controller handlers, and service layers.
-  * **Fastify:** Route schemas (`schema.body`, `schema.params`), handler functions, and encapsulated plugins.
-  * **Hono & Elysia:** Modern TypeScript/Bun frameworks with support for Zod `zValidator` and TypeBox schemas.
-  * **MCP / CLI:** Traces MCP server endpoints (`server.setRequestHandler`) and CLI command handlers.
-* **Python:**
-  * **FastAPI:** `@app.post()`, `@router.get()`, Pydantic `BaseModel` DTOs, `Depends()` injection, SQLAlchemy session queries.
-  * **Django:** `urls.py`, Class-based Views (`APIView`, `ModelViewSet`), DRF Serializers, and Django ORM.
-  * **Flask:** `@app.route()`, Blueprints, Marshmallow schemas, and views.
-* **Go (Golang):**
-  * Supports 5 Go web framework paradigms: **Standard `net/http`**, **Gin**, **Echo**, **Chi**, and **Fiber**.
-  * Extracts request struct bindings (`c.ShouldBindJSON(&req)`), handler functions, service structs, and DB queries (GORM / sqlx).
-
-### Tier 2: Generic Call-Graph Fallback
-`slice-catalog.ts` owns extraction and publication for both ingestion and query refresh. Generic declarative routes complement files not already covered by an adapter. Router files already covered by an adapter are excluded to avoid inventing unprefixed duplicates of mounted routes. Inferred controller entrypoints are retained only when no adapter slices were produced.
-
-The shared source inventory applies ignore patterns, containment and scan-error handling to adapters and ingestion. Semantic files can be outside registered domain roots. The fallback uses available indexed declarations and static heuristics; parsing a language does not establish complete call resolution. Languages with declaration support include:
-* **Rust** (`.rs`)
-* **Java** (`.java`)
-* **C# / .NET** (`.cs`)
-* **Ruby** (`.rb`)
-
----
-
-## 4. Execution Chain Stage Anatomy
-
-Each item within the output `chain` represents an explicit architectural execution stage:
-
-| Stage | Description & Extracted Properties |
-|---|---|
-| **`ingress`** | Entrypoint trigger (HTTP Method, Route URI, CLI Command name, or Event name). |
-| **`guard`** | Authentication middleware, RBAC checks, or guard decorators (e.g., `@UseGuards(AuthGuard)`). |
-| **`validation`** | DTO class / FormRequest / Pydantic schema along with payload property fields (`payload_props: ["customer_id", "items", "amount"]`). |
-| **`controller` / `action`** | Controller class, handler method name, and precise source line coordinates. |
-| **`orchestrator` / `use_case`** | CQRS handler or application orchestrator class (in Clean / DDD architectures). |
-| **`service`** | Domain business service invoked by the controller. |
-| **`repository` / `entity`** | Data persistence layer (Repository, DAO, Prisma Client, Eloquent Model). |
-| **`table`** | Concrete database table name and its schema migration definition file. |
-| **`side_effect` / `event`** | Emitted domain events, dispatched background jobs, or transaction markers (`transactions: true`). |
-
----
-
-## 5. JSON Input & Output Contracts
-
-### Input Schema
 ```json
 {
-  "query": "POST /api/v1/orders",    // Required: Route URI, Method + URI, Controller@action, or task intent
-  "max_depth": 5,                     // Optional: Traversal depth (1–8, default: 5)
-  "controller_file": "src/orders/order.controller.ts", // Optional: Filter candidate matches in case of ambiguity
-  "workspace_path": "/path/to/project" // Optional: Workspace target path
+  "query":"POST /orders",
+  "max_depth":5,
+  "controller_file":"src/orders/controller.ts",
+  "workspace_path":"/path/to/project"
 }
 ```
 
-### Output Schema (Success)
+`query` is required. `max_depth` defaults to 5; normalization truncates/clamps numeric values to 1–8. `controller_file` narrows the candidate set when routes are ambiguous.
+
+## Query matching
+
+The tracer attempts method/URI, URI-only, named-route, trigger, controller/action, symbol and token-scored matching. Supported examples include:
+
+- `POST /orders`, `/orders/{id}` and named routes.
+- `OrderController@store`, `OrderController::store` or a controller name.
+- `JOB ProcessOrderJob`, `CLI order:cleanup`, `EVENT OrderPlacedListener`.
+- Task text, matched through token scores against catalog fields.
+
+Colon forms such as `job:ProcessOrderJob` can match stored route URIs. The dedicated JOB/CLI/EVENT parser expects whitespace after the trigger word; colon syntax is not a universal trigger alias. A query only works when the corresponding catalog record or another matching signal exists.
+
+Literal catalog matches can be exact. Parameterized/semantic matches can be inferred. Multiple matches or top-score ties return `ambiguous` instead of selecting one chain. Alternatives are bounded and can include omission counts; use `controller_file` or a narrower query to resolve them.
+
+## Catalog construction
+
+The registry contains 12 semantic adapters:
+
+| Adapter group | Registered adapters |
+| --- | --- |
+| PHP | Laravel, Symfony |
+| TypeScript/JavaScript | NestJS, Express, Fastify, Hono, Elysia, MCP/CLI |
+| Python | FastAPI, Django, Flask |
+| Go | One Go HTTP adapter covering selected standard HTTP/Gin/Echo/Chi/Fiber patterns |
+
+Registration does not mean an adapter applies to every repository, nor that all framework syntax is recognized. Adapters extract selected literal/decorator/routing and lexical patterns. They can provide validation, service, persistence, event and schema hints where implemented.
+
+Generic extraction complements uncovered route files. Files already represented by an adapter are excluded from generic declarative-route extraction to avoid duplicate/unprefixed mounted routes. Inferred controller entrypoints are retained only when no adapter slices were produced. The shared source inventory applies containment and ignore rules; semantic files can be outside registered domain roots.
+
+Both ingestion and query refresh use the shared slice-catalog publisher. Catalog inputs, filesystem observations, membership and adapter counts are tracked. Dirty/changed catalogs can be refreshed; extraction failure is surfaced rather than certifying a complete empty catalog. Stored generic chains are constructed to the supported maximum depth; query depth limits returned expansion.
+
+## Response interpretation
+
+The MCP response contains `status`, `found`, `confidence`, `entrypoint`, `chain`, alternatives, diagnostics and recovery hints. Status can be `success`, `not_found`, `ambiguous` or `unknown`; diagnostics can make a found result unknown.
+
+The response explicitly sets:
+
 ```json
 {
-  "status": "success",
-  "found": true,
-  "confidence": "exact",
-  "architecture_style": "controller_service_repository",
-  "max_depth_applied": 5,
-  "entrypoint": {
-    "method": "POST",
-    "uri": "/api/v1/orders",
-    "name": "orders.store",
-    "controller": "OrderController",
-    "action": "store",
-    "file": "app/Http/Controllers/OrderController.php",
-    "line": 28
-  },
-  "chain": [
-    {
-      "stage": "ingress",
-      "symbol": "POST /api/v1/orders",
-      "file": "routes/api.php",
-      "line": 42
-    },
-    {
-      "stage": "validation",
-      "symbol": "CreateOrderRequest",
-      "file": "app/Http/Requests/CreateOrderRequest.php",
-      "line": 15,
-      "payload_props": ["customer_id", "items", "payment_method"]
-    },
-    {
-      "stage": "controller",
-      "symbol": "OrderController@store",
-      "file": "app/Http/Controllers/OrderController.php",
-      "line": 28,
-      "relationship": { "kind": "calls", "derivation": "source" }
-    },
-    {
-      "stage": "service",
-      "symbol": "OrderService@createOrder",
-      "file": "app/Services/OrderService.php",
-      "line": 54,
-      "relationship": { "kind": "calls", "derivation": "source" }
-    },
-    {
-      "stage": "repository",
-      "symbol": "orders",
-      "table": "orders",
-      "schema_file": "database/migrations/2026_01_01_create_orders_table.php",
-      "columns_summary": "id, customer_id, total_amount, status"
-    }
-  ],
-  "summary": "[ENTRYPOINT] POST /api/v1/orders -> OrderController@store -> OrderService@createOrder -> orders (table)"
+  "confidence_scope":"query_to_catalog_target_only",
+  "execution_order":"not_established"
 }
 ```
 
-### Ambiguity Recovery
-When multiple route handlers match a query (e.g., across API versions), Septum does not guess arbitrarily. Instead, it returns `status: "ambiguous"` with candidate options in `alternatives`:
-```json
-{
-  "status": "ambiguous",
-  "found": false,
-  "query": "POST /orders",
-  "candidate_count": 2,
-  "alternatives": [
-    { "controller": "V1\\OrderController", "file": "app/Http/Controllers/V1/OrderController.php" },
-    { "controller": "V2\\OrderController", "file": "app/Http/Controllers/V2/OrderController.php" }
-  ],
-  "message": "Multiple route handlers match query 'POST /orders'. Narrow your query using 'controller_file'."
-}
-```
-The AI agent simply re-executes the tool call providing `controller_file` to target the intended controller.
+This is a field excerpt. `chain` can contain ingress, guard, validation, controller/action, service/use-case, repository/entity, table and side-effect/event nodes. Presence and stage detail depend on adapter evidence; this is not a required sequence or a guarantee that every layer appears.
+
+A node's `relationship.kind` and `derivation` describe its evidence. Missing metadata is unknown. Import nodes are filtered from the returned execution-context chain. Lexical heuristics remain partial and can span mutually exclusive branches. The summary labels nodes with their relation/derivation instead of claiming one proven runtime path.
+
+Go package-import expansion is omitted; extracted handler/service relationships remain lexical. Migration-derived table fields are static summaries, not proof of deployed database state. The registered schema provider is Laravel migration analysis; dynamic or unreadable migration operations can prevent a reliable summary.
+
+A missing catalog match does not prove that an endpoint, job or listener is absent at runtime.
+
+## Implementation and regression evidence
+
+- [Public handler](../../src/mcp/tools/trace-vertical-slice.ts), [matching and output selection](../../src/core/resolver/vertical-slice-tracer.ts)
+- [Catalog publication](../../src/core/resolver/slice-catalog.ts), [adapter registry](../../src/core/parser/extractors/registry.ts)
+- [Relationship formatting](../../src/core/resolver/slice-format.ts), [schema provider](../../src/core/parser/schema/schema-provider-registry.ts)
+- [Tracer tests](../../tests/vertical-slice-tracer.test.ts), [selection integrity](../../tests/unit/slice-selection-integrity.test.ts), [output tests](../../tests/unit/vertical-slice-output.test.ts), [shared extraction contracts](../../tests/unit/refactor-contracts.test.ts)

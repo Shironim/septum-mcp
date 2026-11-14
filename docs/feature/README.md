@@ -1,45 +1,56 @@
-# Septum SSOT — Feature & Architecture Catalog
+# Septum MCP: implemented features
 
-Septum is a backend structural intelligence engine powered by **Tree-Sitter AST (Abstract Syntax Tree)** and an embedded **SQLite (`.septum/septum.db`)** database. Septum is purposefully designed for AI Coding Agents to navigate, comprehend architecture, trace execution flows, and refactor multi-language backend code without relying on brute-force text searches (*grep*) or token-heavy full-file reads.
+This directory describes the source checkout reviewed on 2026-11-14. The package declares version `0.2.2` in [package.json](../../package.json). It documents implemented behavior and current limitations; it does not establish which revision an installed binary or running MCP process has loaded.
 
----
+Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. It exposes four MCP tools over stdio and CLI commands for initialization, synchronization, boundary checks and hook execution. It does not execute the application being analyzed or establish complete runtime call graphs.
 
-## 1. Philosophy & Problems Solved
+## Feature documents
 
-In medium-to-large-scale backend engineering:
-1. **Language & Framework Divergence:** Modern backends span multiple languages (TypeScript, PHP, Python, Go, Rust, Java, C#) across various frameworks (NestJS, Laravel, FastAPI, Gin, Symfony, Express). Conventional AI agents often misinterpret architecture because they rely on raw text regex search.
-2. **Token Bloat & Context Costs:** Reading thousands of lines in controller or service files simply to inspect a method signature or DTO contract consumes 80–90% of an AI agent's context window.
-3. **Blast Radius Blindness:** AI agents frequently alter function signatures without knowing which services invoke them across the codebase, triggering regressions and runtime bugs.
-4. **Architectural Drift:** AI agents frequently introduce forbidden cross-domain imports (e.g., billing directly importing ordering) or introduce circular dependencies.
+| Document | Contents |
+| --- | --- |
+| [Map](septum-map.md) | Navigation catalog, domain registration and topology discovery |
+| [Symbol](septum-symbol.md) | Declaration lookup, bounded source inspection and consumer analysis |
+| [Deep context](symbol-context-contract.md) | TypeScript reference selection, public contracts and pagination |
+| [Slice](septum-slice.md) | Static entrypoint matching and relationship chains |
+| [Boundary](septum-boundary.md) | Proposal, workspace, domain and Git-index checks |
+| [Import resolution](import-resolution.md) | Language-specific static targets, manifests, project references and uncertainty |
+| [Hooks](septum-hooks.md) | Candidate reconstruction, pre-write decisions and background sync |
+| [Workspace lifecycle](workspace-lifecycle.md) | Policy, database, ingestion, watchers, resource limits and telemetry |
 
-Septum resolves these issues by building a real-time **Single Source of Truth (SSOT)** for dependency graphs, symbol tables, domain topologies, and vertical execution slices.
+## Entry points
 
----
+`bun run bin/septum.ts <command>` runs the checkout. The package also declares `septum` and `septum-mcp` executables. A compiled executable can be built through the package build script.
 
-## 2. Feature SSOT Directory
+| CLI command | Implemented behavior |
+| --- | --- |
+| `init` | Discover/configure the workspace, scaffold selected integrations and synchronize the index; `--force` regenerates Septum-owned artifacts |
+| `sync` | Synchronize source and static slice catalog; `--json` emits metrics |
+| `check` | Synchronize and audit boundaries; supports `--strict`, `--staged` and `--json` |
+| `serve` | Start the stdio MCP server |
+| `hook pre-write` | Read a supported JSON edit payload from stdin and evaluate candidate imports |
+| `help`, `version` | Show CLI information; no command also shows help |
 
-Every document in this `docs/feature/` directory represents a definitive **Single Source of Truth (SSOT)** for a core Septum capability:
+The package script named `ingest` invokes `sync`; `ingest` is not a CLI subcommand. Canonical MCP names are `septum_map`, `septum_symbol`, `septum_slice` and `septum_boundary`. Argument normalizers accept aliases, but examples here use canonical inputs.
 
-| SSOT Document | Feature / Component | Primary Scope & Focus |
-|---|---|---|
-| [septum-slice.md](./septum-slice.md) | `septum_slice` | **Vertical Execution Chain Tracer:** Traces end-to-end execution flow from Route Ingress, Middleware, Validation DTO, Controller, Service, down to Database/Entity across 12 backend frameworks plus a generic call-graph fallback. Supports HTTP endpoints, CLI Commands, Queue Jobs, and Domain Events. |
-| [septum-symbol.md](./septum-symbol.md) | `septum_symbol` | **AST Symbol Intelligence:** Sub-actions `locate` (fuzzy Damerau-Levenshtein search, error log / stack-trace parser), `context` (bounded 16 KB AST slice, anti-hollow slicing via 1-hop delegator expansion, DTO extraction), and `impact` (blast radius & backward inbound callers). |
-| [septum-map.md](./septum-map.md) | `septum_map` | **Navigation & Domain Registration:** Domain/file import paths, static entrypoints, index health and targeted next steps (`navigation/v1`); symbol inspection supplies depth. |
-| [septum-boundary.md](./septum-boundary.md) | `septum_boundary` | **Architectural Boundary Guard:** Enforces bounded-context rules (`forbidden_dependency`, `disallowed_dependency`, `circular_dependency`, `unmapped_domain`), smart type-only import erasure, pre-flight import proposal simulations, and git-staged audits. |
-| [septum-hooks.md](./septum-hooks.md) | Septum Hooks System | **Real-Time Guard & Auto-Sync:** Pre-Write Hook (`PreToolUse`) for in-memory interception and blocking of illegal mutations before touching disk, and Post-Write Hook (`PostToolUse`) for non-blocking background incremental synchronization. |
-| [workspace-lifecycle.md](./workspace-lifecycle.md) | Lifecycle & Invalidation | **Database SSOT & Hashing Engine:** Internal SQLite schema, transitive invalidation for type files (`types.ts`) and barrel files (`index.ts`), and global configuration revision tracking (*Config Fingerprint*). |
-| [symbol-context-contract.md](./symbol-context-contract.md) | Context Contract Host | **In-Memory TypeScript Compiler Host:** Technical specifications for AST loading and public DTO interface contract projection without `node_modules` overhead. |
+## Reading results
 
----
+- An import dependency identifies a static import relationship. It is not evidence of a method call.
+- A static call site is not proof of runtime execution, dispatch identity or a complete caller set.
+- An exact slice match refers to query-to-catalog matching, not execution order.
+- `unknown`, `partial`, stale-source diagnostics and omitted counts are material parts of a result.
+- A successful MCP transport response can contain an analysis rejection or incomplete result.
+- Limits differ by operation: map uses item caps, source context uses line limits, and deep context uses a serialized byte budget.
 
-## 3. MCP Tool Routing Matrix for AI Agents
+Use `workspace_path` explicitly when working across repositories. The server resolves workspace roots, awaits workspace readiness and flushes pending watcher work before dispatch. An uninitialized workspace receives a map diagnostic; other operations are rejected except domain registration. These checks do not eliminate filesystem-event latency.
 
-| AI Agent Scenario | MCP Tool Call | Advantage vs Conventional Approach |
-|---|---|---|
-| Understand project structure, domain boundaries, and file inventory | `septum_map({ action: "catalog" })` | Delivers an instant macro architectural map without repeated `ls` or `find` calls. |
-| Trace static relationships around an endpoint | `septum_slice({ query: "POST /path" })` | Returns supported route, DTO, handler and persistence relationships with evidence limits; it does not prove a complete runtime execution chain. |
-| Locate exact file coordinates and line numbers of a function/class | `septum_symbol({ action: "locate", query: "..." })` | Pinpoints precise coordinates via Damerau-Levenshtein fuzzy matching without reading entire files. |
-| Inspect implementation logic, parameters, or return types | `septum_symbol({ action: "context", query: "..." })` | Returns a bounded AST slice and DTOs without overwhelming the context window. |
-| Investigate potential consumers before refactoring | `septum_symbol({ action: "impact", query: "..." })` | Separates import dependencies from inferred caller hints; coverage remains partial and risk is advisory. |
-| Validate whether a new import violates architectural rules | `septum_boundary({ file_path: "...", proposed_imports: [...] })` | Simulates architectural compliance in pre-flight mode before saving changes to disk. |
-| Audit architectural compliance before committing | `septum_boundary({ scope: "staged" })` | Ensures staged git files are free of circular dependencies and forbidden imports. |
+## Language coverage
+
+[language-capabilities.ts](../../src/core/parser/language-capabilities.ts) registers partial declaration extraction for TypeScript, JavaScript, PHP, Python, Go, Rust, Java, C#, Ruby, Blade and embedded scripts in Vue/Astro/Svelte. Declaration support, import resolution, deep context and caller analysis have different coverage.
+
+Kotlin, Scala and Zig are recognized for unsupported-file diagnostics, with no registered extractor. Rust, Ruby, Java and C# have bounded import resolvers with language-specific limitations; see [import resolution](import-resolution.md). Extractor `is_external` flags do not override the resolver's final relationship evidence. Deep context accepts only `.ts`, `.mts` and `.cts` targets.
+
+## Source and verification owners
+
+Public normalization and validation live in [schemas.ts](../../src/mcp/schemas.ts); MCP dispatch lives in [server.ts](../../src/mcp/server.ts); CLI dispatch lives in [cli/index.ts](../../src/cli/index.ts). Each feature document links its implementation and regression tests.
+
+The rewrite was checked against source, the local unit suite and targeted handler fixtures. Those checks do not certify installed-binary parity, live harness interception or every framework syntax. Known implementation gaps are documented where they affect behavior.

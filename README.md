@@ -8,17 +8,17 @@
 [![Database: SQLite WAL](https://img.shields.io/badge/Database-SQLite%20(bun:sqlite)-003B57?logo=sqlite)](https://sqlite.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
-Septum provides architecture maps, change context, and boundary checks for AI coding agents before and after edits. It indexes source in a local SQLite database (`.septum/septum.db`) and evaluates configured dependency rules and task scope. Results describe detected relationships and analysis limits; application behavior still requires application verification.
+Septum provides architecture maps, declaration context, and boundary checks for AI coding agents before and after edits. It indexes source in a local SQLite database and evaluates configured domain dependency rules. Results describe detected relationships and analysis limits; application behavior still requires application verification.
 
-Start with the [product requirements and feature inventory](docs/feature/README.md), which serves as the Single Source of Truth (SSOT) for all Septum capabilities, architectures, and hook specifications.
+Start with the [implemented feature documentation](docs/feature/README.md), which describes the reviewed source checkout, tool behavior and known limits. Installed binaries and running MCP processes can use a different revision.
 
 ---
 
 ## Installation
 
-### Option 1: Standalone Binary (Recommended)
+### Option 1: Standalone Binary
 
-No need to install Bun, Node.js, or package managers. Download and install the prebuilt binary:
+The standalone executable bundles its runtime. The installation scripts select a release executable for the platform:
 
 **Linux & macOS:**
 ```bash
@@ -40,33 +40,36 @@ If you already use [Bun](https://bun.sh):
 bun add -g @dimassetoid/septum-mcp
 ```
 
-> **Zero-Install:** You can also run commands directly using `bunx @dimassetoid/septum-mcp <command>`.
+You can invoke the package with `bunx @dimassetoid/septum-mcp <command>`.
 
 ---
 
 ## Quick Start
 
-### 1. Initialize in Any Project
+### 1. Initialize a Workspace
 
 Run `septum init` from the workspace directory you want Septum to manage:
 
 ```bash
 septum init
-# or zero-install via bunx:
-bunx septum init
+# or via bunx:
+bunx @dimassetoid/septum-mcp init
 ```
 
-Septum automatically:
-1. **Detects Project Structure:** Identifies module boundaries across Monorepos, Laravel, Next.js, NestJS, Express, Fastify, Hono, Elysia, Django, Flask, FastAPI, and Go.
-2. **Indexes Codebase AST:** Ingests symbols, interfaces, and dependencies into `.septum/septum.db`.
-3. **Scaffolds Agent Configurations:** Sets up MCP servers, skills, and pre-write hooks for supported environments:
+Initialization:
+
+1. **Infers Project Structure:** Uses supported manifests and directory layouts to propose domains and dependency policies.
+2. **Indexes Supported Source:** Stores extracted declarations, imports and static entrypoints in the configured database; the default is `.septum/septum.db`.
+3. **Scaffolds Selected Agent Configurations:** Writes MCP configuration, skills and hook artifacts for supported environments:
    - **Antigravity** (`.gemini/`)
    - **Claude Code** (`.claude/`, `.mcp.json`, `CLAUDE.md`)
    - **Codex** (`.codex/`)
    - **Opencode** (`opencode/`, `opencode.json`)
    - **.agents Standard** (`.agents/`, `AGENTS.md`)
 
-Septum retains twelve semantic adapters: Laravel, Symfony, MCP/CLI, NestJS, Express, Fastify, Hono, Elysia, FastAPI, Django, Flask, and Go. They cover selected static patterns with framework-specific limits; registration does not certify complete framework understanding. Behavioral and migration/Prisma schema enrichment remain available within their declared heuristic limits.
+Semantic adapters cover selected patterns in Laravel, Symfony, MCP/CLI, NestJS, Express, Fastify, Hono, Elysia, FastAPI, Django, Flask and Go. Their applicability and extraction results depend on repository syntax and configuration.
+
+Import resolution includes supported Python manifests/lockfiles, Go workspaces/replacements, Rust Cargo/modules, Ruby literal requires/gems, Java source projects and C# namespaces/project references. See [import resolution](docs/feature/import-resolution.md) for supported cases and unresolved boundaries.
 
 Detection and scaffolding do not certify every framework pattern or active client hook. See the [feature specifications and architecture contracts](docs/feature/README.md) for full scope and technical details.
 
@@ -84,7 +87,7 @@ If your MCP client is not configured via `septum init`, add Septum to your MCP c
   }
 }
 ```
-*(Or use `"command": "bunx", "args": ["septum", "serve"]` if running without global installation).*
+*(Or use `"command": "bunx", "args": ["@dimassetoid/septum-mcp", "serve"]` when invoking the package through Bun).*
 
 ---
 
@@ -94,8 +97,8 @@ If your MCP client is not configured via `septum init`, add Septum to your MCP c
 |---|---|
 | `septum init [--force]` | Scaffold agent integrations and build initial symbol catalog. `--force` regenerates Septum-managed configs while preserving existing database and user git hooks |
 | `septum sync [--json]` | Synchronize AST and update symbol catalog into `.septum/septum.db` (full or incremental) |
-| `septum check [--strict] [--staged] [--domain <name>] [--json]` | Verify boundary rules and detect cross-domain or circular dependency violations |
-| `septum hook pre-write` | Pre-write guard hook to intercept forbidden cross-domain imports in real time |
+| `septum check [--strict] [--staged] [--json]` | Verify boundary rules and detect cross-domain or circular dependency violations |
+| `septum hook pre-write` | Reconstruct supported candidate edits from stdin and evaluate their imports; interception depends on the client and hook configuration |
 | `septum serve` | Start stdio Model Context Protocol (MCP) server |
 
 ---
@@ -105,7 +108,7 @@ If your MCP client is not configured via `septum init`, add Septum to your MCP c
 All tools provide structured schemas via the Model Context Protocol:
 
 - **Domain Map & Discovery (`septum_map`):**
-  - `action: "catalog"`: High-level architecture map and module dependencies (`detail_level: "compact" | "full"`).
+  - `action: "catalog"`: Navigation map (`navigation/v1`): domain/file import paths, static entrypoints, health and targeted next steps. `full` expands navigation; inspect signatures and source with `septum_symbol`.
   - `action: "register"`: Register or update domain boundaries with allowed and forbidden dependencies.
 - **Symbol Inspection & Impact Analysis (`septum_symbol`):**
   - `action: "locate"`: Search and find symbols across the codebase.
@@ -128,9 +131,9 @@ Locate a declaration, select its returned `symbol_ref` when names are ambiguous,
 {"action":"context","query":"submit","file_path":"src/submit.ts","budget_bytes":65536}
 ```
 
-Send these arguments to `septum_symbol` with an explicit `workspace_path` when needed. Context v2 supports `.ts/.mts/.cts` and selects supporting declarations through bounded local/import bindings. TSX and complete business dependency closure are outside this policy.
+Send these arguments to `septum_symbol` with an explicit `workspace_path` when needed. Context v4 supports `.ts/.mts/.cts` and selects supporting declarations through bounded local/import bindings. Set `context_mode: "deep"` explicitly for this policy, or `context_mode: "source"` for bounded source inspection. Omission preserves legacy automatic selection; responses identify the selected mode. TSX and complete business dependency closure are outside the deep-context policy.
 
-Read evidence scope, freshness and omissions before editing. Retrieval is strictly read-only; use impact for potential consumers and application checks for behavior. Budget, paging, source identity and recovery semantics have one owner: the [symbol context contract](docs/feature/symbol-context-contract.md). Per-action requirements are in [septum_symbol](docs/feature/septum-symbol.md).
+Read evidence scope, freshness and omissions before editing. Context inspection returns source/contracts; lookup and server freshness guards can synchronize the local index. Use impact for potential consumers and application checks for behavior. Budget, paging, source identity and recovery semantics have one owner: the [symbol context contract](docs/feature/symbol-context-contract.md). Per-action requirements are in [septum_symbol](docs/feature/septum-symbol.md).
 
 ---
 

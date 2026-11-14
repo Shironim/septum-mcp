@@ -1,44 +1,81 @@
-# Workspace Lifecycle, Policy Ownership and Index Freshness
+# Workspace lifecycle and stored state
 
-## Policy and database location
+## Policy and database selection
 
-`ConfigLoader.load()` reads configuration without discovery, initialization or policy writes. When `septum.config.json` exists, it owns policy. Otherwise registered SQLite domains and settings supply it. `resolveDatabasePath()` resolves `settings.db_path` consistently for CLI commands, hooks and MCP workspaces.
+`ConfigLoader.load()` reads `septum.config.json` when present; otherwise it reads policy/settings from SQLite or defaults. Loading policy does not perform topology discovery or initialize an index.
 
-`init` performs explicit discovery/scaffolding and initial sync. Ingestion with no configured domains can discover topology. `map register` updates the authoritative owner and returns `policy_owner`. See [registration](septum-map.md) for persistence and recovery limits.
+The file owns policy when present. Otherwise SQLite owns registered domains/settings. `resolveDatabasePath()` resolves relative `settings.db_path` from the workspace and preserves absolute paths and `:memory:`. The default path is `.septum/septum.db`.
 
-## Stored state
+Custom paths are supported by command/workspace database resolution, but two surrounding checks still use the default path:
 
-SQLite uses WAL, foreign keys and a busy timeout.
+- MCP initialization recognition checks for `septum.config.json` or `.septum/septum.db`.
+- Generated hook wrappers require `.septum/septum.db` before dispatch.
 
-| Table | Facts |
+A custom database alone therefore does not satisfy those checks. See [hooks](septum-hooks.md).
+
+Registration updates the authoritative policy owner as described in [map](septum-map.md). `init` performs explicit discovery/scaffolding and initial synchronization. Ingestion without configured domains first considers stored domains, then discovery.
+
+## SQLite facts
+
+The database enables WAL, foreign keys, a 5-second busy timeout and `synchronous=NORMAL`. Its principal stored facts include:
+
+| Table | Contents |
 | --- | --- |
-| `domains` | Domain roots and effective dependency rules |
-| `files` | Ownership, content hash, mtime, size and archetype |
-| `symbols` | Declarations, signatures and line spans |
-| `dependencies` | Import targets and source coordinates |
-| `vertical_slices` | Static entrypoint catalog |
-| `repo_meta` | Sync status, revisions, observed inputs and diagnostics |
+| `domains` | Root ownership and dependency policies |
+| `files` | Paths, content hashes, source metadata and archetypes |
+| `symbols` | Names, kinds, signatures and indexed line spans |
+| `dependencies` | Extracted import targets/statements and source lines |
+| `vertical_slices` | Static entrypoint records and serialized chains |
+| `repo_meta` | Sync state, revisions, observed inputs and diagnostics |
 
-No schema migration is needed for the consistency refactor; extraction reports use existing metadata storage.
+These records are an index of supported static evidence, not authoritative application state. Corrupt database initialization raises an error; it does not automatically delete/replace database files.
 
-## Source inventory and ingestion
+## Source membership and ingestion
 
-`resources/source-inventory.ts` owns membership for ingestion and semantic adapters, applying configured ignores, containment and a common symlink policy. Contained file symlinks are eligible; directory symlinks are not traversed. Permission/I/O errors propagate instead of becoming an apparently empty scan. Semantic source can be outside registered domain roots.
+The shared source inventory applies configured ignores, workspace containment and recognized-language filtering. Contained file symlinks are eligible; directory symlinks are not traversed. Recognized unsupported formats can generate diagnostics. Non-ENOENT scan/I/O errors propagate instead of becoming empty successful scans.
 
-Warm ingestion skips parsing after metadata and previously verified content agree. Verification/rebuild reads content. Changed files are stored in bounded transactions after hashes are checked. A later failure can follow earlier committed batches: inspect `sync_state` and `sync_error` rather than assuming workspace-wide rollback.
+Ingestion assigns source to registered domains, extracts declarations/imports and publishes the slice catalog. Semantic adapters can inspect eligible source outside domain roots. Duplicate physical roots are rejected; nested roots are supported by ownership resolution.
 
-Source byte limits produce skipped-file diagnostics. Changes to types/barrels can dirty semantics. Import freshness describes the importing source hash; it does not promise every transitive consumer was reparsed. Deep context checks the hashes of declarations it reads and diagnoses source/index differences. An outdated `symbol_ref` is rejected when its indexed source identity no longer matches. Synchronize before retrieving current contracts from modified source.
+Warm synchronization can skip parsing after metadata and content verification agree. Verification/rebuild options read content. Changed source is stored in bounded transactions after hashes are checked. One retry is allowed for the supported “source changed during synchronization” condition.
 
-## Slice publication
+Synchronization records `running`, then `complete` or `error`, with error metadata. Earlier committed batches can remain after a later failure; there is no workspace-wide rollback guarantee. Oversized or unsupported files are recorded and constrain downstream analysis.
 
-`resolver/slice-catalog.ts` owns extraction and transactional catalog publication for ingestion and query refresh. It records input hashes, path/directory observations, membership and adapter counts. Failure retains a dirty catalog and is surfaced to callers.
+Import evidence freshness refers to the importing source. It does not guarantee every transitive consumer was reparsed. Semantic dirty tracking and observed input identities govern slice rebuilds. Deep context separately validates hashes of source it returns. Existing daemons must restart to load changed implementation code.
 
-Generic routes complement uncovered files as described in [slice](septum-slice.md). Generic chains are built to maximum supported depth once; query depth limits returned expansion. Adapter counts describe the last successful extraction of supported patterns, not complete framework coverage.
+Supported manifest/project changes also trigger watcher reconciliation and are included in staged snapshots through a shared interpretation-input predicate. See [import resolution](import-resolution.md) for language-specific ownership and limits.
 
-## Revisions, watchers and telemetry
+## MCP workspace management
 
-Implementation fingerprints bind loaded code/runtime and grammar assets. Resolution records manifests it used. A daemon must restart to load implementation changes.
+Workspace resolution uses explicit `workspace_path`, supported environment roots, file hints and known/fallback roots. The manager rejects unsuitable roots such as the filesystem root, home directory and known app-host locations. Multi-project callers should supply explicit workspace paths.
 
-Watchers coalesce source/config events and periodically verify content. Watch exhaustion falls back to polling. A bounded serial queue orders work; leases prevent active-workspace eviction. These controls do not guarantee zero filesystem-event latency.
+Contexts hold database, repository, parser pipeline, resolver and watcher state. Leases prevent eviction during active use. A bounded serial queue orders tool work. Watchers coalesce events, periodically verify content and fall back to polling when watch resources are exhausted. Query dispatch awaits readiness and flushes pending work, then reloads effective policy and checks ownership.
 
-Telemetry records sizes, timing, transport status and selected options. Analysis outcome (`partial`, `unknown`, `rejected`, etc.) is separate from transport success. Raw arguments, errors and previews are omitted by default. `SEPTUM_DEBUG_TELEMETRY=1` enables those details for local debugging.
+| Current resource setting | Value |
+| --- | --- |
+| Cached workspaces | 4 |
+| Idle expiry | 10 minutes |
+| Watch budget | 2,048 |
+| Pending watcher paths | 1,000 |
+| Event debounce | 300 ms |
+| Poll interval | 5 seconds |
+| Content verification interval | 60 seconds |
+| Source read limit per file | 2 MiB |
+| Ingestion batch limits | 50 files / 1 MiB |
+| Pending serial queue limit | 50 |
+| Shutdown wait setting | 5 seconds |
+
+These are implementation settings, not latency or memory guarantees. Cancellation is checked at cooperative points; it is not atomic rollback or forced termination of every synchronous parse/filesystem operation.
+
+## Revisions and telemetry
+
+Parser/semantic implementation fingerprints include loaded implementation/runtime and grammar assets. Resolution records revision/configuration evidence and observed interpretation inputs. Revision metadata does not establish that another installed process is running this checkout.
+
+Telemetry records request/response sizes, timing, transport status, analysis outcome and selected options. Raw argument payloads, detailed errors and response previews are omitted from default telemetry; `SEPTUM_DEBUG_TELEMETRY=1` enables debug details. This statement concerns telemetry serialization, not a guarantee that all process stderr or client logs are redacted.
+
+## Implementation and regression evidence
+
+- [Configuration](../../src/core/config/loader.ts), [database](../../src/core/database/client.ts)
+- [Inventory](../../src/core/resources/source-inventory.ts), [ingestion](../../src/core/ingestion/pipeline.ts), [slice publication](../../src/core/resolver/slice-catalog.ts)
+- [Manager](../../src/mcp/workspace-manager.ts), [watcher](../../src/mcp/workspace-watcher.ts), [limits](../../src/core/resources/limits.ts)
+- [Fingerprinting](../../src/core/parser/implementation-fingerprint.ts), [telemetry](../../src/core/telemetry/telemetry.ts)
+- [Policy ownership](../../tests/unit/policy-ownership.test.ts), [source consistency](../../tests/unit/source-read-consistency.test.ts), [workspace lifecycle](../../tests/unit/memory-workspaces.test.ts), [database corruption](../../tests/unit/database-corruption.test.ts), [observability](../../tests/mcp-observability.test.ts)
