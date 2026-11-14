@@ -184,7 +184,7 @@ export class CallGraphTracer {
   /**
    * Build execution chains for all discovered entrypoints and controller actions.
    */
-  public traceAllSlices(maxDepth: number = 5): Array<Omit<VerticalSliceRecord, "id" | "created_at">> {
+  public traceAllSlices(maxDepth: number = 5, options: { includeInferredControllers?: boolean; excludeEntrypointFiles?: ReadonlySet<string> } = {}): Array<Omit<VerticalSliceRecord, "id" | "created_at">> {
     const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
     this.initMaps();
     const slices: Array<Omit<VerticalSliceRecord, "id" | "created_at">> = [];
@@ -192,6 +192,7 @@ export class CallGraphTracer {
 
     // 1. Trace from declarative routes
     for (const route of declarativeRoutes) {
+      if (options.excludeEntrypointFiles?.has(route.file)) continue;
       const chain = this.traceChainFromRoute(route, effectiveMaxDepth);
       if (chain.length > 0) {
         const sliceRecord = this.buildSliceRecordFromChain(
@@ -203,6 +204,8 @@ export class CallGraphTracer {
         slices.push(sliceRecord);
       }
     }
+
+    if (options.includeInferredControllers === false) return slices;
 
     // 2. Trace controllers if routes were not explicitly bound or found
     for (const [normPath, file] of this.fileMapByNormPath.entries()) {
@@ -560,15 +563,14 @@ export class CallGraphTracer {
     chain: ExecutionChainNode[],
     maxDepth: number = 5
   ): void {
-    const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
     const visitedFiles = new Set<string>();
     visitedFiles.add(startFile.path);
-    const queue: Array<{ file: FileRecord; depth: number; scopeText?: string }> = [];
 
     const deps = this.fileDependencies(startFile.id);
     const scopeText = (methodSymbol.signature || "") + "\n" + methodBody;
 
     for (const dep of deps) {
+      if (/^\s*(?:import|export)\s+type\b/.test(dep.statement)) continue;
       if (chain.length >= CallGraphTracer.MAX_CHAIN_NODES) break;
       const importedNames = this.extractImportedSymbolNames(dep.statement);
       const baseTarget = dep.target.split(/[\/\\]/).pop()?.replace(/\.[^.]+$/, "") || "";
@@ -608,8 +610,12 @@ export class CallGraphTracer {
 
         const symbolDisplay = mainSymbol.name;
 
+        const shortSymbolDisplay = symbolDisplay.split(/[\\:]/).pop();
         const existingNode = chain.find(
-          (c) => (c.file && c.file === resolvedFile.path) || (c.symbol === symbolDisplay && c.stage === stage)
+          (c) =>
+            (c.file && c.file === resolvedFile.path) ||
+            (c.stage === stage &&
+              (c.symbol === symbolDisplay || c.symbol.split(/[\\:]/).pop() === shortSymbolDisplay))
         );
 
         if (!existingNode) {
@@ -618,96 +624,14 @@ export class CallGraphTracer {
             symbol: symbolDisplay,
             file: resolvedFile.path,
             line: mainSymbol.line_start || 1,
-            description: `${stage.toUpperCase()} (direct call site): ${symbolDisplay}`,
+            description: `${stage.toUpperCase()} (referenced import): ${symbolDisplay}`,
             relationship: {
               kind: "imports",
               derivation: "source",
               source: { file: startFile.path, line: dep.line_number, statement: dep.statement },
-              reason: "method-scoped call site dependency",
+              reason: "import referenced in method scope; not proof of a call",
             },
           });
-        }
-
-        const collaboratorScope = this.extractScopeForCollaborator(resolvedFile, scopeText);
-        if (collaboratorScope) {
-          queue.push({ file: resolvedFile, depth: 2, scopeText: collaboratorScope });
-        }
-      }
-    }
-
-    // Expand transitive hops from actually executed dependencies
-    while (queue.length > 0 && chain.length < CallGraphTracer.MAX_CHAIN_NODES) {
-      const current = queue.shift()!;
-      if (current.depth > effectiveMaxDepth) break;
-
-      const currentDeps = this.fileDependencies(current.file.id);
-      for (const dep of currentDeps) {
-        if (chain.length >= CallGraphTracer.MAX_CHAIN_NODES) break;
-
-        const importedNames = this.extractImportedSymbolNames(dep.statement);
-        const baseTarget = dep.target.split(/[\/\\]/).pop()?.replace(/\.[^.]+$/, "") || "";
-
-        if (current.scopeText) {
-          const isReferenced =
-            (importedNames.length > 0 &&
-              importedNames.some((name) => {
-                const camel = name.charAt(0).toLowerCase() + name.slice(1);
-                return current.scopeText!.includes(name) || current.scopeText!.includes(camel);
-              })) ||
-            (baseTarget.length > 0 &&
-              (current.scopeText!.includes(baseTarget) ||
-                current.scopeText!.includes(baseTarget.charAt(0).toLowerCase() + baseTarget.slice(1))));
-
-          if (!isReferenced) {
-            continue;
-          }
-        }
-
-        const resolvedFiles = this.repo.getMeta?.("workspace_root")
-          ? this.resolveImportTargets(current.file.path, dep.target)
-          : dep.is_external
-          ? []
-          : [this.resolveImportToFile(current.file.path, dep.target)].filter((file): file is FileRecord => !!file);
-
-        for (const resolvedFile of resolvedFiles) {
-          if (!resolvedFile || visitedFiles.has(resolvedFile.path)) continue;
-          visitedFiles.add(resolvedFile.path);
-
-          const stage = this.detectStage(resolvedFile.path, resolvedFile.archetype);
-          const fileSymbols = this.fileSymbols(resolvedFile.id);
-          const mainSymbol = this.resolveExecutableSymbol(fileSymbols, importedNames);
-          if (!mainSymbol) {
-            continue;
-          }
-
-          const symbolDisplay = mainSymbol.name;
-
-          const existingNode = chain.find(
-            (c) => (c.file && c.file === resolvedFile.path) || (c.symbol === symbolDisplay && c.stage === stage)
-          );
-
-          if (!existingNode) {
-            chain.push({
-              stage,
-              symbol: symbolDisplay,
-              file: resolvedFile.path,
-              line: mainSymbol.line_start || 1,
-              description: `${stage.toUpperCase()}: ${symbolDisplay}`,
-              relationship: {
-                kind: "imports",
-                derivation: "source",
-                source: { file: current.file.path, line: dep.line_number, statement: dep.statement },
-                reason: "transitive method dependency",
-              },
-            });
-          }
-
-          if (current.scopeText) {
-            const nextScope = this.extractScopeForCollaborator(resolvedFile, current.scopeText);
-            if (nextScope) {
-              queue.push({ file: resolvedFile, depth: current.depth + 1, scopeText: nextScope });
-            }
-          }
         }
       }
     }
@@ -735,6 +659,7 @@ export class CallGraphTracer {
       const deps = this.fileDependencies(current.file.id);
 
       for (const dep of deps) {
+        if (/^\s*(?:import|export)\s+type\b/.test(dep.statement)) continue;
         if (chain.length >= CallGraphTracer.MAX_CHAIN_NODES) break;
         const resolvedFiles = this.repo.getMeta?.("workspace_root") ? this.resolveImportTargets(current.file.path, dep.target)
           : dep.is_external ? [] : [this.resolveImportToFile(current.file.path, dep.target)].filter((file): file is FileRecord => !!file);

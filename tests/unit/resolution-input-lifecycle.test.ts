@@ -105,7 +105,7 @@ describe("TypeScript resolution interpretation inputs", () => {
       put("src/tsconfig.json", "{}\n");
       const changed = await pipeline.run(config, { verifyContent: true });
       expect(changed.parser_invocations).toBe(0);
-      expect(repo.getAllVerticalSlices()[0]!.action_name).toBe("unsupported");
+      expect(repo.getAllVerticalSlices()[0]!.action_name).toBe("unresolved");
       expect(extractions).toBe(2);
       rmSync(join(root, "src/tsconfig.json"));
       // The on-demand path must validate the same persisted interpretation inputs.

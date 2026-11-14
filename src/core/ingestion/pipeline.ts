@@ -1,21 +1,21 @@
+import { scanSourceFiles } from "../resources/source-inventory.ts";
+import { rebuildSliceCatalog } from "../resolver/slice-catalog.ts";
 import { SEMANTIC_FINGERPRINT } from "../parser/semantic-revision.ts";
 import { RESOLVER_REVISION } from "../resolver/import-resolver.ts";
-import { SOURCE_READ_REVISION, sourceObservationsCurrent } from "../resources/source-files.ts";
+import { sourceObservationsCurrent } from "../resources/source-files.ts";
 import { shouldIgnoreSourcePath } from "../resources/ignore.ts";
 import { RESOURCE_LIMITS } from "../resources/limits.ts";
-import { readSourceFile, SourceFileLimitError, collectSourceSkips, type SkippedSourceFile, type SourceReadFingerprint } from "../resources/source-files.ts";
-import { existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync } from "node:fs";
+import { readSourceFile, SourceFileLimitError, type SkippedSourceFile, type SourceReadFingerprint } from "../resources/source-files.ts";
+import { existsSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isPathContained, resolveWorkspaceRoot } from "../resolver/path-resolver.ts";
 import type { ParsedFileAST } from "../../types/index.ts";
 import type { ValidatedSeptumConfig } from "../config/schema.ts";
 import type { SeptumRepository } from "../database/repository.ts";
 import { detectArchetype } from "../parser/extractors/base.ts";
-import { SemanticSliceExtractorRegistry } from "../parser/extractors/registry.ts";
 import { TopologyDetector } from "../discovery/topology-detector.ts";
 import { PARSER_FINGERPRINT } from "../parser/language-capabilities.ts";
 import { ASTParserEngine } from "../parser/tree-sitter.ts";
-import { CallGraphTracer } from "../resolver/call-graph-tracer.ts";
 import { ModuleResolver } from "../resolver/module-resolver.ts";
 import { computeContentHash } from "./hasher.ts";
 import { assertUniqueDomainRoots, domainNameKey, DomainRootConflictError } from "../config/domain-ownership.ts";
@@ -86,6 +86,7 @@ export class IngestionPipeline {
     let removedFiles = 0;
 
     let domainNames = Object.keys(config.domains);
+    const hasExplicitDomains = domainNames.length > 0;
     const projectRoot = this.customWorkspaceRoot || resolveWorkspaceRoot();
 
     // Existing SQLite ownership precedes inference when the caller omits domains.
@@ -104,6 +105,13 @@ export class IngestionPipeline {
       domainNames = Object.keys(config.domains);
     }
     this.assertDomainOwnership(config, projectRoot);
+    if (hasExplicitDomains) {
+      const pruned = this.repo.pruneDomainsNotIn(domainNames);
+      if (pruned.prunedDomains > 0) {
+        removedFiles += pruned.removedFiles;
+        this.repo.setMeta("slices_dirty", "1");
+      }
+    }
     this.ensureParserFingerprint(options.rebuild);
     const inventory = this.sourceInventory(projectRoot, config.settings.ignore_patterns, options.signal);
 
@@ -343,29 +351,9 @@ export class IngestionPipeline {
     }
     const extractorRevision = SEMANTIC_FINGERPRINT;
     if (this.repo.getMeta("semantic_extractor_revision") !== extractorRevision || this.repo.getMeta("semantic_inventory") !== inventoryRevision || semanticInputChanged || filesUpdated > 0 || removedFiles > 0 || this.repo.getMeta("slices_dirty") === "1" || this.repo.getMeta("semantic_revision") !== semanticRevision) {
-      const extracted = await collectSourceSkips(projectRoot, async () => {
-        const detectedTopology = TopologyDetector.detect(projectRoot);
-        const semanticSlices = await SemanticSliceExtractorRegistry.extractAllSlices(projectRoot, detectedTopology.framework, undefined, options.signal);
-        return semanticSlices.length > 0 ? semanticSlices : new CallGraphTracer(this.repo, projectRoot).traceAllSlices();
-      });
-      options.signal?.throwIfAborted();
-      if (extracted.skipped.length) {
-        this.repo.setMeta("skipped_files", JSON.stringify([...skippedFiles,...extracted.skipped]));
-        this.repo.setMeta("slices_dirty", "1");
-        throw new Error("Semantic extraction incomplete: source read limit exceeded.");
-      }
-      skippedFiles.push(...extracted.skipped);
-      this.repo.runInTransaction(() => {
-        this.repo.clearVerticalSlices();
-        for (const slice of extracted.value) this.repo.upsertVerticalSlice(slice);
-        this.repo.setMeta("slices_dirty", "");
-        this.repo.setMeta("semantic_revision", semanticRevision);
-        this.repo.setMeta("semantic_extractor_revision", extractorRevision);
-        this.repo.setMeta("semantic_inventory", inventoryRevision);
-        this.repo.setMeta("semantic_inputs", JSON.stringify(extracted.inputs));
-        this.repo.setMeta("semantic_observations", JSON.stringify(extracted.observations));
-        this.repo.setMeta("semantic_input_revision", SOURCE_READ_REVISION);
-        this.repo.setMeta("semantic_skipped_files", JSON.stringify(extracted.skipped));
+      await rebuildSliceCatalog(this.repo, projectRoot, {
+        ignorePatterns: config.settings.ignore_patterns, signal: options.signal,
+        semanticRevision, inventoryRevision,
       });
     }
 
@@ -432,83 +420,8 @@ export class IngestionPipeline {
     childDomainRoots: string[] = [],
     signal?: AbortSignal
   ): Array<{ fullPath: string; relPath: string }> {
-    const results: Array<{ fullPath: string; relPath: string }> = [];
-
-    // SV-02: Check if initial dir itself is an escaping symlink
-    try {
-      const dirLstat = lstatSync(dir);
-      if (dirLstat.isSymbolicLink()) {
-        const real = realpathSync(dir);
-        if (!isPathContained(real, workspaceRoot)) {
-          throw new Error(`Directory '${dir}' is a symlink escaping workspace boundary '${workspaceRoot}'.`);
-        }
-      }
-    } catch (err: any) {
-      if (err?.code !== "ENOENT") throw err;
-    }
-
-    const walk = (currentDir: string) => {
-      signal?.throwIfAborted();
-      let entries: string[] = [];
-      try {
-        entries = readdirSync(currentDir);
-      } catch (err: any) {
-        // SV-01: Gracefully skip non-existent or permission-restricted directories
-        if (err?.code === "ENOENT" || err?.code === "EACCES" || err?.code === "EPERM") {
-          return;
-        }
-        throw new Error(`Failed to read directory '${currentDir}': ${err.message || err}`);
-      }
-
-      for (const entry of entries) {
-        signal?.throwIfAborted();
-        const fullPath = join(currentDir, entry);
-        const relPath = relative(workspaceRoot, fullPath).replace(/\\/g, "/");
-
-        if (shouldIgnoreSourcePath(relPath, ignorePatterns)) {
-          continue;
-        }
-
-        if (childDomainRoots.some((child) => relPath === child || relPath.startsWith(child + "/"))) {
-          continue;
-        }
-
-        try {
-          const stat = lstatSync(fullPath);
-          if (stat.isSymbolicLink()) {
-            try {
-              const real = realpathSync(fullPath);
-              if (!isPathContained(real, workspaceRoot)) {
-                continue;
-              }
-              const targetStat = statSync(real);
-              if (targetStat.isDirectory()) {
-                continue;
-              } else if (targetStat.isFile() && this.isSourceFile(real)) {
-                results.push({ fullPath, relPath });
-              }
-            } catch {
-              continue;
-            }
-            continue;
-          }
-
-          if (stat.isDirectory()) {
-            walk(fullPath);
-          } else if (stat.isFile() && this.isSourceFile(fullPath)) {
-            results.push({ fullPath, relPath });
-          }
-        } catch (err: any) {
-          if (err?.code === "ENOENT" || err?.code === "EACCES" || err?.code === "EPERM") {
-            continue;
-          }
-          throw new Error(`Failed to stat path '${fullPath}': ${err.message || err}`);
-        }
-      }
-    };
-
-    walk(dir);
-    return results;
+    return scanSourceFiles(workspaceRoot, { directory: dir, ignorePatterns, excludeRoots: childDomainRoots, signal })
+      .files.map(fullPath => ({ fullPath, relPath: relative(workspaceRoot, fullPath).replace(/\\/g, "/") }));
   }
 
   private resolveWorkspaceRoot(config: ValidatedSeptumConfig, domainRoot: string): string {

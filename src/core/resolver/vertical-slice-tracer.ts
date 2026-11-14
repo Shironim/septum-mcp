@@ -1,9 +1,6 @@
-import { SEMANTIC_FINGERPRINT } from "../parser/semantic-revision.ts";
-import { readSourceFile } from "../resources/source-files.ts";
-import { computeContentHash } from "../ingestion/hasher.ts";
-import { assertPathContained } from "./path-resolver.ts";
-import { join, relative, resolve } from "node:path";
-import { collectSourceSkips, SOURCE_READ_REVISION, sourceObservationsCurrent } from "../resources/source-files.ts";
+import { rebuildSliceCatalog, sliceInputsCurrent } from "./slice-catalog.ts";
+import { scanSourceFiles } from "../resources/source-inventory.ts";
+import { relative } from "node:path";
 import type {
   ExecutionChainNode,
   VerticalSliceRecord,
@@ -11,11 +8,6 @@ import type {
 } from "../../types/index.ts";
 import type { SeptumRepository } from "../database/repository.ts";
 import { CallGraphTracer } from "./call-graph-tracer.ts";
-import { SemanticSliceExtractorRegistry } from "../parser/extractors/registry.ts";
-import { TopologyDetector } from "../discovery/topology-detector.ts";
-import { readdirSync } from "node:fs";
-import { ASTParserEngine } from "../parser/tree-sitter.ts";
-import { shouldIgnoreSourcePath } from "../resources/ignore.ts";
 import { formatSliceNode, SLICE_RELATIONSHIP_LIMITS } from "./slice-format.ts";
 
 export class VerticalSliceTracer {
@@ -26,65 +18,20 @@ export class VerticalSliceTracer {
     if (this.repo.getMeta("sync_state") === "error" || this.repo.getMeta("sync_state") === "running") {
       return { query: rawQuery, found: false, coverage: "partial", diagnostics: ["index_incomplete"], message: "Workspace synchronization is incomplete." };
     }
-    let inputsChanged = false;
-    let membershipChanged = false;
-    try {
-      const inputs = JSON.parse(this.repo.getMeta("semantic_inputs") || "[]") as Array<{path:string;hash:string}>;
-      inputsChanged = this.repo.getMeta("semantic_extractor_revision") !== SEMANTIC_FINGERPRINT ||
-        (!!this.repo.getMeta("semantic_inputs") && this.repo.getMeta("semantic_input_revision") !== SOURCE_READ_REVISION) ||
-        !sourceObservationsCurrent(this.projectRoot, JSON.parse(this.repo.getMeta("semantic_observations") || '{"paths":[],"directories":[]}')) || inputs.some(input => {
-        signal?.throwIfAborted();
-        assertPathContained(input.path,this.projectRoot,"Semantic source");
-        return computeContentHash(readSourceFile(resolve(this.projectRoot,input.path))) !== input.hash;
-      });
-      if (this.verifyMembership) {
-        const files = this.listSourceFiles(this.projectRoot);
-        membershipChanged = JSON.stringify(files) !== (this.repo.getMeta("semantic_catalog_files") || "[]");
-      }
-    } catch { signal?.throwIfAborted(); inputsChanged = true; }
-    if (inputsChanged || membershipChanged || this.repo.getAllVerticalSlices().length === 0 || this.repo.getMeta("slices_dirty") === "1") {
+    const inventory = this.verifyMembership ? scanSourceFiles(this.projectRoot, { ignorePatterns: this.ignorePatterns, signal }) : undefined;
+    const files = inventory?.files.map(file => relative(this.projectRoot, file).replace(/\\/g, "/"));
+    const membershipChanged = files !== undefined && JSON.stringify(files) !== this.repo.getMeta("semantic_catalog_files");
+    if (membershipChanged || !sliceInputsCurrent(this.repo, this.projectRoot, signal) || this.repo.getMeta("slices_dirty") === "1") {
       try {
-        const topology = TopologyDetector.detect(this.projectRoot);
-        const extracted = await collectSourceSkips(this.projectRoot, async () => {
-          const slices = await SemanticSliceExtractorRegistry.extractAllSlices(this.projectRoot,topology.framework,undefined,signal);
-          return slices.length ? slices : new CallGraphTracer(this.repo,this.projectRoot).traceAllSlices(maxDepth);
-        });
-        signal?.throwIfAborted();
-        if (extracted.skipped.length) throw new Error("Semantic source exceeds read limits; catalog is incomplete.");
-        this.repo.runInTransaction(() => {
-          signal?.throwIfAborted();
-          this.repo.clearVerticalSlices();
-          for (const slice of extracted.value) this.repo.upsertVerticalSlice(slice);
-          this.repo.setMeta("slices_dirty", "");
-          this.repo.setMeta("semantic_inputs", JSON.stringify(extracted.inputs));
-          this.repo.setMeta("semantic_observations", JSON.stringify(extracted.observations));
-          this.repo.setMeta("semantic_input_revision", SOURCE_READ_REVISION);
-          this.repo.setMeta("semantic_extractor_revision", SEMANTIC_FINGERPRINT);
-          if (this.verifyMembership) this.repo.setMeta("semantic_catalog_files", JSON.stringify(this.listSourceFiles(this.projectRoot)));
-        });
+        await rebuildSliceCatalog(this.repo, this.projectRoot, { ignorePatterns: this.ignorePatterns, signal });
       } catch (error) {
         signal?.throwIfAborted();
-        this.repo.setMeta("slices_dirty", "1");
         return { query: rawQuery, found: false, coverage: "partial", diagnostics: [error instanceof Error ? error.message : String(error)], message: "Semantic extraction failed; no complete catalog was published." };
       }
     }
     return this.trace(rawQuery,maxDepth,controllerFile);
   }
 
-  private listSourceFiles(root: string): string[] {
-    const files: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const fullPath = join(dir, entry.name);
-        const relPath = relative(root, fullPath).replace(/\\/g, "/");
-        if (shouldIgnoreSourcePath(relPath, this.ignorePatterns)) continue;
-        if (entry.isDirectory()) walk(fullPath);
-        else if (entry.isFile() && ASTParserEngine.isSourceFile(fullPath)) files.push(relPath);
-      }
-    };
-    walk(root);
-    return files.sort();
-  }
 
   /**
    * Trace an end-to-end vertical slice from route/action/intent query.
@@ -358,34 +305,11 @@ export class VerticalSliceTracer {
       }
     }
 
-    let message = `Vertical slice target match (${confidence}): ${record.http_method} ${record.route_uri}; catalog handler ${record.controller_class}@${record.action_name}. ${SLICE_RELATIONSHIP_LIMITS}`;
-    if (chain.length > 0) {
-      const stageLines = chain.map((node) => {
-        const loc = node.file ? ` (${node.file}${node.line ? `:${node.line}` : ""})` : "";
-        let extra = "";
-        if (node.table) {
-          extra += ` [table: ${node.table}]`;
-        }
-        if (node.columns_summary) {
-          extra += ` {${node.columns_summary}}`;
-        }
-        if (node.guards && node.guards.length > 0 && node.stage !== "guard") {
-          extra += ` [guards: ${node.guards.join(", ")}]`;
-        }
-        if (node.mutations && node.mutations.length > 0 && node.stage !== "side_effect") {
-          extra += ` [mutates: ${node.mutations.join(", ")}]`;
-        }
-        if (node.transactions && node.stage !== "transaction") {
-          extra += ` [transaction: statically detected]`;
-        }
-        return `${formatSliceNode(node)}${loc}${extra}`;
-      });
-      message = `=== VERTICAL SLICE TRACE (TARGET MATCH: ${confidence.toUpperCase()}) ===\n${SLICE_RELATIONSHIP_LIMITS}\n` + stageLines.join("\n");
-    }
+    let message = `Vertical slice target match (${confidence}): ${record.http_method} ${record.route_uri} -> ${record.controller_class}@${record.action_name} (${chain.length} node(s)).`;
     if (record.architecture_style === "go-http") {
-      message += "\nGo package import expansion is omitted; extracted handler/service relationships remain lexical and partial.";
+      message += " Go package import expansion is omitted; extracted handler/service relationships remain lexical and partial.";
     }
-    if (diagnostics.length) message += `\nAnalysis incomplete: ${diagnostics.join(", ")}. Run septum sync and retry; inspect source if it persists.`;
+    if (diagnostics.length) message += ` Analysis incomplete: ${diagnostics.join(", ")}. Run septum sync and retry; inspect source if it persists.`;
 
     return {
       query,

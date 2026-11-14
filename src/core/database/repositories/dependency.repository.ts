@@ -1,16 +1,16 @@
+import { analyzeSymbolImpact } from "../../resolver/symbol-impact.ts";
 import { assertPathContained } from "../../resolver/path-resolver.ts";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
-import { readSourceFile, probeSourcePath } from "../../resources/source-files.ts";
+import { readSourceFile } from "../../resources/source-files.ts";
 import { computeContentHash } from "../../ingestion/hasher.ts";
 import { getLanguageCapability } from "../../parser/language-capabilities.ts";
 import type { ImportRelationship } from "../../../types/index.ts";
-import { dirname, join, posix, resolve, sep } from "node:path";
+import { posix, resolve, sep } from "node:path";
 import type { Database } from "bun:sqlite";
 import type {
   ExtractedDependency,
   FileConnectionsSummary,
   GetSymbolImpactResponse,
-  InboundCaller,
   SymbolReference,
   VerticalSliceRecord,
 } from "../../../types/index.ts";
@@ -465,19 +465,8 @@ export class DependencyRepository {
     const definingFiles = new Set<string>(
       targetSymRows.map((r) => r.file_path.replace(/\\/g, "/"))
     );
-    const targetSpansByFile = new Map<string, Array<{ start: number; end: number; kind: string }>>();
     const domainByFile = new Map<string, string>();
-    for (const r of targetSymRows) {
-      const normPath = r.file_path.replace(/\\/g, "/");
-      if (r.domain_name) domainByFile.set(normPath, r.domain_name);
-      // For container queries (which also match `ClassName::%` members), keep the primary declaration span(s)
-      const isMemberOfQueriedContainer = !targetMethod && r.name.includes("::") && !trimmed.includes("::");
-      if (!isMemberOfQueriedContainer) {
-        const list = targetSpansByFile.get(normPath) || [];
-        list.push({ start: r.line_start, end: r.line_end, kind: r.kind });
-        targetSpansByFile.set(normPath, list);
-      }
-    }
+    for (const row of targetSymRows) if (row.domain_name) domainByFile.set(row.file_path.replace(/\\/g, "/"), row.domain_name);
 
     const definingFileStems = Array.from(
       new Set(
@@ -637,240 +626,11 @@ export class DependencyRepository {
       }
     }
 
-    const findEnclosingSymbol = (
-      filePath: string,
-      lineNum: number
-    ): { name: string; kind: string; signature: string } | undefined => {
-      const syms = callerSymbolsByFile.get(filePath);
-      if (!syms) return undefined;
-      return syms.find((s) => lineNum >= s.line_start && lineNum <= s.line_end);
-    };
-
-    const callersMap = new Map<string, InboundCaller>();
-
-    for (const row of depRows) {
-      const enclosing = findEnclosingSymbol(row.file, row.line_number);
-      const callerName = enclosing ? enclosing.name : `${row.file}:${row.line_number}`;
-      const key = `${row.file}:${row.line_number}:${callerName}`;
-
-      if (!callersMap.has(key)) {
-        callersMap.set(key, {
-          file: row.file,
-          caller: callerName,
-          line: row.line_number,
-          kind: enclosing?.kind || "import",
-          domain: row.domain_name ?? undefined,
-        });
-      }
-    }
-
-    // 4. Scan file content of callers for exact method calls if targetMethod specified
-    if (targetMethod) {
-      for (const filePath of uniqueCallerFiles) {
-        try {
-          const fullPath = options.workspaceRoot ? resolve(options.workspaceRoot, filePath) : filePath;
-          if (options.workspaceRoot) assertPathContained(fullPath, options.workspaceRoot, "Inbound caller source");
-          if (probeSourcePath(fullPath) === "file") {
-            const content = readSourceFile(fullPath);
-            const lines = content.split(/\r?\n/);
-            for (let i = 0; i < lines.length; i++) {
-              const line = lines[i];
-              if (
-                line.includes(`->${targetMethod}(`) ||
-                line.includes(`::${targetMethod}(`) ||
-                line.includes(`.${targetMethod}(`)
-              ) {
-                const lineNum = i + 1;
-                const enclosing = findEnclosingSymbol(filePath, lineNum);
-                const callerName = enclosing ? enclosing.name : `${filePath}:${lineNum}`;
-                const key = `${filePath}:${lineNum}:${callerName}`;
-                if (!callersMap.has(key)) {
-                  callersMap.set(key, {
-                    file: filePath,
-                    caller: callerName,
-                    line: lineNum,
-                    kind: enclosing?.kind || "call",
-                    domain: domainByFile.get(filePath),
-                  });
-                }
-              }
-            }
-          }
-        } catch {
-          // Ignore read errors
-        }
-      }
-    }
-
-    // 4b. Scan same-file (definingFiles outside target declaration range) and same-package/namespace files
-    const isLineInsideTargetSpan = (filePath: string, lineNum: number): boolean => {
-      const spans = targetSpansByFile.get(filePath);
-      if (!spans || spans.length === 0) return false;
-      return spans.some((span) => lineNum >= span.start && lineNum <= span.end);
-    };
-
-    const targetIsFunctionOnly =
-      !targetMethod &&
-      targetSymRows.every((r) => r.kind === "function" || r.kind === "method");
-    const escapedMethod = targetMethod ? escapeRegExp(targetMethod) : "";
-    const escapedContainer = escapeRegExp(targetContainer);
-    const sameFileMethodCallRegex = targetMethod
-      ? new RegExp(
-          `(?:\\$this->|self::|static::|\\bthis\\.|\\bself\\.|\\b${escapedContainer}::)${escapedMethod}\\s*\\(`
-        )
-      : null;
-    const goReceiverMethodCallRegex = targetMethod
-      ? new RegExp(`\\b[A-Za-z_]\\w*\\.${escapedMethod}\\s*\\(`)
-      : null;
-    const fnCallRegex = !targetMethod
-      ? new RegExp(`(?:^|[^.\\w$:])${escapedContainer}\\s*\\(`)
-      : null;
-    const fnDeclRegex = !targetMethod
-      ? new RegExp(`\\b(?:function|func|def|fn)\\s+${escapedContainer}\\b`)
-      : null;
-    const classUsageRegex = !targetMethod
-      ? new RegExp(
-          `(?:\\bnew\\s+${escapedContainer}\\b|\\b${escapedContainer}::|&?\\b${escapedContainer}\\s*\\{|\\*?\\b${escapedContainer}\\b)`
-        )
-      : null;
-
-    // Same-file call-site scan (outside target symbol's own line_start..line_end)
-    for (const filePath of definingFiles) {
-      try {
-        const fullPath = options.workspaceRoot ? resolve(options.workspaceRoot, filePath) : filePath;
-        if (options.workspaceRoot) assertPathContained(fullPath, options.workspaceRoot, "Inbound caller source");
-        if (probeSourcePath(fullPath) !== "file") continue;
-        const content = readSourceFile(fullPath);
-        const lines = content.split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-          const lineNum = i + 1;
-          if (isLineInsideTargetSpan(filePath, lineNum)) continue;
-          const line = lines[i];
-          const trimmedLine = line.trim();
-          if (!trimmedLine || trimmedLine.startsWith("//") || trimmedLine.startsWith("#") || trimmedLine.startsWith("*")) {
-            continue;
-          }
-          const enclosing = findEnclosingSymbol(filePath, lineNum);
-          let matched = false;
-          if (targetMethod) {
-            if (sameFileMethodCallRegex?.test(line)) {
-              matched = true;
-            } else if (/\.go$/i.test(filePath) && goReceiverMethodCallRegex?.test(line) && enclosing) {
-              const recv = enclosing.signature.match(/^func\s*\(\s*(?:[A-Za-z_]\w*\s+)?\*?([A-Za-z_]\w*)(?:\[[^\]]+\])?\s*\)/);
-              if (recv?.[1] === targetContainer) matched = true;
-            }
-          } else if (targetIsFunctionOnly) {
-            if (fnCallRegex?.test(line) && !fnDeclRegex?.test(line)) {
-              matched = true;
-            }
-          } else if (enclosing && classUsageRegex?.test(line)) {
-            matched = true;
-          }
-
-          if (matched) {
-            const callerName = enclosing ? enclosing.name : `${filePath}:${lineNum}`;
-            const key = `${filePath}:${lineNum}:${callerName}`;
-            if (!callersMap.has(key)) {
-              callersMap.set(key, {
-                file: filePath,
-                caller: callerName,
-                line: lineNum,
-                kind: enclosing?.kind || "call",
-                domain: domainByFile.get(filePath),
-              });
-            }
-          }
-        }
-      } catch {
-        // Ignore read errors
-      }
-    }
-
-    // Same-package / same-namespace call-site scan for .go, .php, .java, .cs files without explicit import
-    const explicitCallerSet = new Set(uniqueCallerFiles);
-    for (const filePath of implicitPackageFiles) {
-      if (explicitCallerSet.has(filePath)) continue;
-      try {
-        const fullPath = options.workspaceRoot ? resolve(options.workspaceRoot, filePath) : filePath;
-        if (options.workspaceRoot) assertPathContained(fullPath, options.workspaceRoot, "Inbound caller source");
-        if (probeSourcePath(fullPath) !== "file") continue;
-        const content = readSourceFile(fullPath);
-        if (!containerWordRegex.test(content)) continue;
-        const lines = content.split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-          const lineNum = i + 1;
-          const line = lines[i];
-          const trimmedLine = line.trim();
-          if (!trimmedLine || trimmedLine.startsWith("//") || trimmedLine.startsWith("#") || trimmedLine.startsWith("*")) {
-            continue;
-          }
-          let matched = false;
-          if (targetMethod) {
-            if (
-              line.includes(`->${targetMethod}(`) ||
-              line.includes(`::${targetMethod}(`) ||
-              line.includes(`.${targetMethod}(`)
-            ) {
-              matched = true;
-            }
-          } else if (targetIsFunctionOnly) {
-            if (fnCallRegex?.test(line) && !fnDeclRegex?.test(line)) {
-              matched = true;
-            }
-          } else if (classUsageRegex?.test(line) && !/\b(?:class|interface|trait|enum|type|struct)\s+/.test(line)) {
-            matched = true;
-          }
-
-          if (matched) {
-            const enclosing = findEnclosingSymbol(filePath, lineNum);
-            const callerName = enclosing ? enclosing.name : `${filePath}:${lineNum}`;
-            const key = `${filePath}:${lineNum}:${callerName}`;
-            if (!callersMap.has(key)) {
-              callersMap.set(key, {
-                file: filePath,
-                caller: callerName,
-                line: lineNum,
-                kind: enclosing?.kind || "call",
-                domain: domainByFile.get(filePath),
-              });
-            }
-          }
-        }
-      } catch {
-        // Ignore read errors
-      }
-    }
-
-    const inboundCallers = Array.from(callersMap.values());
-    const affectedFiles = new Set(inboundCallers.map((c) => c.file));
-    const distinctDomains = new Set(
-      inboundCallers.map((c) => c.domain).filter(Boolean)
-    );
-
-    let riskLevel: "low" | "medium" | "high" = "low";
-    if (affectedFiles.size > 5 || distinctDomains.size > 2) {
-      riskLevel = "high";
-    } else if (affectedFiles.size >= 2 || distinctDomains.size >= 2) {
-      riskLevel = "medium";
-    }
-
-    // 5. Determine if symbol exists in index
-    const foundInIndex = targetSymRows.length > 0 || depRows.length > 0;
-    const warning = foundInIndex
-      ? undefined
-      : `Symbol '${trimmed}' was not found in Septum index (neither in declared symbols nor tracked dependencies). Risk cannot be assessed without index evidence.`;
-
-    return {
-      target_symbol: trimmed,
-      found_in_index: foundInIndex,
-      warning,
-      impact_summary: {
-        total_dependents: inboundCallers.length,
-        risk_level: foundInIndex ? riskLevel : "unknown",
-        affected_files_count: affectedFiles.size,
-      },
-      inbound_callers: inboundCallers,
-    };
+    return analyzeSymbolImpact({
+      query: trimmed, container: targetContainer, method: targetMethod,
+      targets: targetSymRows, dependencies: depRows, samePackageFiles: implicitPackageFiles,
+      symbolsByFile: callerSymbolsByFile, domainsByFile: domainByFile, workspaceRoot: options.workspaceRoot,
+    });
   }
 
   public getFileInboundImpact(filePath: string): {
@@ -892,40 +652,66 @@ export class DependencyRepository {
       .all(cleanPath, `%${cleanPath}`);
 
     const matchedFiles = new Set<string>();
-    const orConditions: string[] = [];
-    const params: string[] = [];
-
-    if (baseName.length >= 3) {
-      orConditions.push("d.target_symbol_or_path LIKE ?");
-      params.push(`%${cleanPath}%`);
-      orConditions.push("d.target_symbol_or_path LIKE ?");
-      params.push(`%${baseName}%`);
-    }
-
-    for (const sym of symbols.slice(0, 8)) {
-      const symName = sym.name.split("::").pop() || sym.name;
-      if (symName.length >= 4) {
-        orConditions.push("d.target_symbol_or_path LIKE ?");
-        params.push(`%${symName}%`);
-        orConditions.push("d.import_statement LIKE ?");
-        params.push(`%${symName}%`);
+    const relationships = this.getImportRelationships();
+    if (relationships.length > 0) {
+      for (const edge of relationships) {
+        if (edge.freshness !== "current" || edge.resolution.status !== "resolved") continue;
+        if (edge.source.file === cleanPath) continue;
+        if (edge.resolution.targets.some((t) => t.files.includes(cleanPath))) {
+          matchedFiles.add(edge.source.file);
+        }
       }
-    }
+    } else {
+      const orConditions: string[] = [];
+      const params: string[] = [];
 
-    if (orConditions.length > 0) {
-      params.push(`%${cleanPath}`);
-      const depRows = this.db
-        .query<{ file: string }, string[]>(
-          `SELECT DISTINCT f.path AS file
-           FROM dependencies d
-           JOIN files f ON d.source_file_id = f.id
-           WHERE (${orConditions.join(" OR ")})
-             AND f.path NOT LIKE ?`
-        )
-        .all(...params);
+      if (baseName.length >= 3) {
+        orConditions.push("d.target_symbol_or_path LIKE ?");
+        params.push(`%${cleanPath}%`);
+        orConditions.push("d.target_symbol_or_path LIKE ?");
+        params.push(`%${baseName}%`);
+      }
 
-      for (const row of depRows) {
-        matchedFiles.add(row.file);
+      for (const sym of symbols.slice(0, 8)) {
+        const symName = sym.name.split("::").pop() || sym.name;
+        if (symName.length >= 4) {
+          orConditions.push("d.target_symbol_or_path LIKE ?");
+          params.push(`%${symName}%`);
+          orConditions.push("d.import_statement LIKE ?");
+          params.push(`%${symName}%`);
+        }
+      }
+
+      if (orConditions.length > 0) {
+        params.push(`%${cleanPath}`);
+        const depRows = this.db
+          .query<{ file: string; target: string; stmt: string }, string[]>(
+            `SELECT DISTINCT f.path AS file, d.target_symbol_or_path AS target, d.import_statement AS stmt
+             FROM dependencies d
+             JOIN files f ON d.source_file_id = f.id
+             WHERE (${orConditions.join(" OR ")})
+               AND f.path NOT LIKE ?`
+          )
+          .all(...params);
+
+        const baseBoundary = baseName.length >= 3
+          ? new RegExp(`(?:^|[\\/\\\\.])${escapeRegExp(baseName)}(?:\\.[^.\\/\\\\]+)?$`, "i")
+          : null;
+        const symNames = symbols
+          .slice(0, 8)
+          .map((s) => s.name.split("::").pop() || s.name)
+          .filter((n) => n.length >= 4)
+          .map((n) => new RegExp(`\\b${escapeRegExp(n)}\\b`));
+
+        for (const row of depRows) {
+          const targetMatches =
+            row.target.includes(cleanPath) ||
+            (baseBoundary !== null && baseBoundary.test(row.target)) ||
+            symNames.some((re) => re.test(row.target) || re.test(row.stmt));
+          if (targetMatches) {
+            matchedFiles.add(row.file);
+          }
+        }
       }
     }
 

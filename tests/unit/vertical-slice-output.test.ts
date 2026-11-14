@@ -115,11 +115,11 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
     expect(json.coverage).toBe("partial");
     expect(json.confidence).toBe("exact");
     expect(json.confidence_scope).toBe("query_to_catalog_target_only");
-    expect(json.message).toContain("Missing relationship metadata is unknown");
+    expect(json.message).toContain("Vertical slice target match (exact): POST /orders/{id}/status -> OrderController@updateStatus");
     expect(json.relationship_limits).toContain("not a proven sequential execution path");
   });
 
-  it("preserves mixed relationship kinds and derivation in JSON, summary and message", async () => {
+  it("preserves mixed relationship kinds and derivation in JSON and summary without duplicating nodes in message", async () => {
     repo.upsertVerticalSlice({ domain_id: null, feature_key: null, http_method: "GET", route_uri: "/mixed", route_name: null,
       controller_class: "Handler", action_name: "run", controller_file: null, controller_line: 1,
       architecture_style: "fixture", entry_kind: "http_route", execution_chain_json: JSON.stringify([
@@ -131,8 +131,9 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
     const payload = JSON.parse(result.content[0].text);
     for (const label of ["route_binding; source", "calls; inferred", "schema_binding; source"]) {
       expect(payload.summary).toContain(label);
-      expect(payload.message).toContain(label);
     }
+    expect(payload.message).toContain("GET /mixed -> Handler@run");
+    expect(payload.message).not.toContain("route_binding; source");
     expect(payload.summary).not.toContain("➔");
     expect(payload.max_depth_applied).toBe(1);
     expect(payload.coverage).toBe("partial");

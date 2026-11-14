@@ -211,9 +211,8 @@ class Penjualan
     expect(res.slice).toEqual(res.chain!);
 
     // Ensure action and service appear in formatted message
-    expect(res.message).toContain("[ACTION]");
-    expect(res.message).toContain("RecordPembayaranAction");
-    expect(res.message).toContain("[SERVICE]");
-    expect(res.message).toContain("PenjualanService");
+    expect(res.message).toContain("POST /penjualan -> PenjualanController@store");
+    expect(res.chain?.some((c) => c.symbol.includes("RecordPembayaranAction"))).toBe(true);
+    expect(res.chain?.some((c) => c.stage === "service" && c.symbol.includes("PenjualanService"))).toBe(true);
   });
 });
