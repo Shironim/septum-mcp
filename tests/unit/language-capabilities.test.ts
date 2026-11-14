@@ -30,7 +30,7 @@ function catalog(full = false, registered = false, domain?: string) {
     const repo = new SeptumRepository(db.raw);
     const config = ConfigLoader.getDefaultConfig();
     if (registered) repo.upsertDomain("core", { root: "src", archetypes: {}, allowed_dependencies: [], forbidden_dependencies: [] });
-    return JSON.parse(handleGetDomainCatalog(repo, config, { detail_level: full ? "full" : "compact", domain }, "/tmp").content[0].text);
+    return JSON.parse(handleGetDomainCatalog(repo, config, { detail_level: full ? "full" : "compact", domain, include_capabilities: true }, "/tmp").content[0].text);
   } finally { db.close(); }
 }
 

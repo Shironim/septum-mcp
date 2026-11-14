@@ -1,8 +1,8 @@
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import { readPythonStaticString as cleanLiteral } from "../static-string.ts";
 import type Parser from "web-tree-sitter";
 import { parseSourceWithTreeSitter } from "../wasm-loader.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
-import { isIgnoredDirectory } from "../../resources/ignore.ts";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -113,9 +113,9 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
     return false;
   }
 
-  public async extractSlices(projectRoot: string, domainId?: number, signal?: AbortSignal): Promise<VerticalSliceCandidate[]> {
+  public async extractSlices(projectRoot: string, domainId?: number, signal?: AbortSignal, inventory?: SourceInventory): Promise<VerticalSliceCandidate[]> {
     const slices: VerticalSliceCandidate[] = [];
-    const pyFiles = this.findPythonFiles(projectRoot);
+    const pyFiles = listSourceFiles(projectRoot, /\.py$/, inventory);
     const resolver = new ImportResolver(projectRoot);
 
     const allRoutes: ExtractedRoute[] = [];
@@ -697,29 +697,6 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
     }
 
     return slices;
-  }
-
-  private findPythonFiles(dir: string): string[] {
-    const results: string[] = [];
-    const traverse = (currentDir: string) => {
-      if (!fs.existsSync(currentDir)) return;
-      try {
-        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (isIgnoredDirectory(entry.name)) continue;
-
-          const fullPath = path.join(currentDir, entry.name);
-          if (entry.isDirectory()) {
-            traverse(fullPath);
-          } else if (entry.isFile() && entry.name.endsWith(".py")) {
-            results.push(fullPath);
-          }
-        }
-      } catch {}
-    };
-
-    traverse(dir);
-    return results;
   }
 }
 

@@ -1,3 +1,4 @@
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
 import { parseWithTreeSitter } from "../wasm-loader.ts";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
@@ -88,10 +89,10 @@ export class FastifySemanticExtractor implements SemanticSliceExtractor {
   public async extractSlices(
     projectRoot: string,
     domainId?: number,
-    signal?: AbortSignal
+    signal?: AbortSignal, inventory?: SourceInventory
   ): Promise<VerticalSliceCandidate[]> {
     const slices: VerticalSliceCandidate[] = [];
-    const sourceFiles = this.findSourceFiles(projectRoot);
+    const sourceFiles = listSourceFiles(projectRoot, /\.(?:[cm]?[jt]sx?)$/, inventory).filter(file => !file.endsWith('.d.ts'));
     const resolver = new ImportResolver(projectRoot);
 
     const allRoutes: RawFastifyRoute[] = [];
@@ -753,22 +754,6 @@ export class FastifySemanticExtractor implements SemanticSliceExtractor {
       result.set(k, Array.from(set));
     }
     return result;
-  }
-
-  private findSourceFiles(dir: string): string[] {
-    const results: string[] = [];
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules" && entry.name !== "dist") {
-          results.push(...this.findSourceFiles(full));
-        } else if (entry.isFile() && /\.(?:[cm]?[jt]sx?)$/.test(entry.name) && !entry.name.endsWith(".d.ts")) {
-          results.push(full);
-        }
-      }
-    } catch {}
-    return results;
   }
 }
 

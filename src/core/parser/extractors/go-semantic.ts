@@ -1,5 +1,5 @@
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
-import { isIgnoredDirectory } from "../../resources/ignore.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
@@ -22,12 +22,12 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
     }
 
     const goMod = path.join(projectRoot, "go.mod");
-    if (fs.existsSync(goMod)) {
+    if (fs.existsSync(goMod) || listSourceFiles(projectRoot, /(?:^|[\\/])go\.mod$/).length > 0) {
       return true;
     }
 
     // Check Go source files for HTTP framework or standard library imports
-    const goFiles = this.findGoFiles(projectRoot, 3);
+    const goFiles = listSourceFiles(projectRoot, /\.go$/).filter(file => !file.endsWith('_test.go'));
     for (const file of goFiles) {
       try {
         const content = fs.readFileSync(file, "utf-8");
@@ -46,9 +46,9 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
     return false;
   }
 
-  public extractSlices(projectRoot: string, domainId?: number): VerticalSliceCandidate[] {
+  public extractSlices(projectRoot: string, domainId?: number, signal?: AbortSignal, inventory?: SourceInventory): VerticalSliceCandidate[] {
     const slices: VerticalSliceCandidate[] = [];
-    const goFiles = this.findGoFiles(projectRoot);
+    const goFiles = listSourceFiles(projectRoot, /\.go$/, inventory).filter(file => !file.endsWith('_test.go'));
 
     interface HandlerInfo {
       name: string;
@@ -87,8 +87,11 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
     const goStructs = new Map<string, GoStructInfo>();
     const goMethods = new Map<string, GoMethodInfo>();
     const constructors = new Map<string, string>();
-    const goModPath = path.join(projectRoot, "go.mod");
-    const moduleName = fs.existsSync(goModPath)
+    const rootGoMod = path.join(projectRoot, "go.mod");
+    const discoveredGoMods = fs.existsSync(rootGoMod) ? [rootGoMod] : listSourceFiles(projectRoot, /(?:^|[\\/])go\.mod$/, inventory);
+    const goModPath = discoveredGoMods[0];
+    const moduleRoot = goModPath ? path.dirname(goModPath) : projectRoot;
+    const moduleName = goModPath && fs.existsSync(goModPath)
       ? readOptionalSourceFile(goModPath, "utf-8").match(/^module\s+(\S+)/m)?.[1]
       : undefined;
 
@@ -242,6 +245,27 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
       }
     }
 
+    // Collect Chi r.Route("/prefix", func(sub chi.Router) { helper(sub, ...) }) delegations across package files
+    const delegatedRoutePrefixes = new Map<string, string>();
+    for (const file of goFiles) {
+      const content = readOptionalSourceFile(file, "utf-8");
+      if (!content) continue;
+      const chiBlockRegex = /([a-zA-Z0-9_]+)\.Route\s*\(\s*["']([^"']*)["']\s*,\s*func\s*\(\s*([a-zA-Z0-9_]+)\s+chi\.Router\s*\)\s*\{/g;
+      let cbMatch: RegExpExecArray | null;
+      while ((cbMatch = chiBlockRegex.exec(content)) !== null) {
+        const prefixRaw = cbMatch[2].replace(/\/+$/, "");
+        const prefix = prefixRaw ? (prefixRaw.startsWith("/") ? prefixRaw : `/${prefixRaw}`) : "";
+        const subRouter = cbMatch[3];
+        const blockStart = cbMatch.index + cbMatch[0].length;
+        const blockEnd = this.findGoBraceBlockEnd(content, blockStart - 1);
+        const blockBody = content.slice(blockStart, blockEnd);
+        const callRegex = new RegExp(`\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(\\s*${subRouter}\\b`, "g");
+        for (const call of blockBody.matchAll(callRegex)) {
+          delegatedRoutePrefixes.set(`${path.dirname(file)}:${call[1]}`, prefix);
+        }
+      }
+    }
+
     // 2. Extract route registrations per file with lexical block scoping
     for (const file of goFiles) {
       const content = readOptionalSourceFile(file, "utf-8");
@@ -251,7 +275,7 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
       const importedPackages = new Map<string, string>();
       for (const spec of content.matchAll(/^\s*(?:import\s+)?(?:(\w+)\s+)?"([^"\n]+)"/gm)) {
         if (moduleName && spec[2].startsWith(`${moduleName}/`)) {
-          importedPackages.set(spec[1] || path.basename(spec[2]), path.join(projectRoot, spec[2].slice(moduleName.length + 1)));
+          importedPackages.set(spec[1] || path.basename(spec[2]), path.join(moduleRoot, spec[2].slice(moduleName.length + 1)));
         }
       }
 
@@ -263,6 +287,7 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
       while ((funcMatch = setupFuncRegex.exec(content)) !== null) {
         const receiverVar = funcMatch[1];
         const receiverType = funcMatch[2];
+        const funcName = funcMatch[3];
         const funcParams = funcMatch[4];
         const funcStart = funcMatch.index;
         const bodyStart = funcStart + funcMatch[0].length;
@@ -304,6 +329,13 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
 
         // Scoped router groups: groupVar -> accumulatedPrefix
         const scopedGroupPrefixes = new Map<string, string>();
+        const delegatedPrefix = delegatedRoutePrefixes.get(`${path.dirname(file)}:${funcName}`);
+        if (delegatedPrefix) {
+          const chiParamMatch = funcParams.match(/\b([a-zA-Z0-9_]+)\s+chi\.Router\b/);
+          if (chiParamMatch) {
+            scopedGroupPrefixes.set(chiParamMatch[1], delegatedPrefix);
+          }
+        }
 
         // Gin / Echo groups: v1 := r.Group("/api/v1")
         const groupRegex = /([a-zA-Z0-9_]+)\s*:=\s*([a-zA-Z0-9_]+)\.Group\s*\(\s*["']([^"']*)["']/g;
@@ -332,9 +364,9 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
         }
 
         // 3. Extract route registrations within this function scope
-        // Method 1: Gin / Echo / Chi HTTP method calls: r.GET("/ping", pingHandler), v1.POST("/orders", h.CreateOrder)
+        // Method 1: Gin / Echo / Chi HTTP method calls: r.GET("/ping", pingHandler), v1.POST("/orders", h.CreateOrder), r.With(mw).Get("/x", h.Get)
         const routeRegex =
-          /([a-zA-Z0-9_]+)\.(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|Get|Post|Put|Patch|Delete|Options|Head)\s*\(\s*["']([^"']*)["']\s*,\s*(?:[a-zA-Z0-9_.]+\s*,\s*)*(?:func\s*\([^)]*\)|([a-zA-Z0-9_.]+))/g;
+          /([a-zA-Z0-9_]+)(?:\s*\.\s*With\s*\([^)]*\))*\s*\.\s*(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|Get|Post|Put|Patch|Delete|Options|Head)\s*\(\s*["']([^"']*)["']\s*,\s*(?:[a-zA-Z0-9_.]+\s*,\s*)*(?:func\s*\([^)]*\)|([a-zA-Z0-9_.]+))/g;
         let rMatch: RegExpExecArray | null;
 
         while ((rMatch = routeRegex.exec(funcBody)) !== null) {
@@ -634,28 +666,5 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
     }
 
     return content.length;
-  }
-
-  private findGoFiles(dir: string, maxDepth: number = 10): string[] {
-    const results: string[] = [];
-    const traverse = (currentDir: string, currentDepth: number) => {
-      if (currentDepth > maxDepth || !fs.existsSync(currentDir)) return;
-      try {
-        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (isIgnoredDirectory(entry.name)) continue;
-
-          const fullPath = path.join(currentDir, entry.name);
-          if (entry.isDirectory()) {
-            traverse(fullPath, currentDepth + 1);
-          } else if (entry.isFile() && entry.name.endsWith(".go") && !entry.name.endsWith("_test.go")) {
-            results.push(fullPath);
-          }
-        }
-      } catch {}
-    };
-
-    traverse(dir, 0);
-    return results;
   }
 }

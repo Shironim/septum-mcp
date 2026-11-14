@@ -14,6 +14,15 @@ import { ExpressSemanticExtractor } from "./express-semantic.ts";
 import { FastifySemanticExtractor } from "./fastify-semantic.ts";
 import { HonoSemanticExtractor } from "./hono-semantic.ts";
 import { ElysiaSemanticExtractor } from "./elysia-semantic.ts";
+import { scanSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
+import { shouldIgnoreSourcePath } from "../../resources/ignore.ts";
+
+export interface AdapterExtractionResult { id: string; slices: number }
+interface ExtractionOptions {
+  ignorePatterns?: string[];
+  inventory?: SourceInventory;
+  onResult?: (result: AdapterExtractionResult) => void;
+}
 
 export class SemanticSliceExtractorRegistry {
   private static extractors: SemanticSliceExtractor[] = [
@@ -31,8 +40,16 @@ export class SemanticSliceExtractorRegistry {
     new GoSemanticExtractor(),
   ];
 
-  public static getCapabilities() {
-    return this.extractors.map(({ id, name }) => ({ id, name, coverage: "partial" }));
+  public static getCapabilities(projectRoot?: string, framework?: string) {
+    return this.extractors.map(extractor => {
+      let applicable: boolean | null = null;
+      let diagnostic: string | undefined;
+      try { if (projectRoot) applicable = extractor.canHandle(projectRoot, framework); }
+      catch (error) { diagnostic = error instanceof Error ? error.message : String(error); }
+      return { id: extractor.id, name: extractor.name, coverage: "partial", registered: true, applicable,
+        extraction: "not_established_by_registration", ...(diagnostic ? { diagnostic } : {}),
+      };
+    });
   }
 
   /**
@@ -58,18 +75,22 @@ export class SemanticSliceExtractorRegistry {
     projectRoot: string,
     framework?: string,
     domainId?: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options: ExtractionOptions = {}
   ): Promise<VerticalSliceCandidate[]> {
     const matched = this.getExtractors(projectRoot, framework);
+    const sources = options.inventory ?? scanSourceFiles(projectRoot, { ignorePatterns: options.ignorePatterns, signal });
     const combinedSlices: VerticalSliceCandidate[] = [];
 
     for (const extractor of matched) {
       signal?.throwIfAborted();
       let slices: VerticalSliceCandidate[];
-      try { slices = await extractor.extractSlices(projectRoot, domainId, signal); }
+      try { slices = await extractor.extractSlices(projectRoot, domainId, signal, sources); }
       catch (error) { signal?.throwIfAborted(); throw new Error(`Semantic adapter '${extractor.id}' failed: ${error instanceof Error ? error.message : String(error)}`); }
       signal?.throwIfAborted();
-      combinedSlices.push(...slices);
+      const selected = slices.filter(slice => !slice.controller_file || !shouldIgnoreSourcePath(slice.controller_file, options.ignorePatterns));
+      options.onResult?.({ id: extractor.id, slices: selected.length });
+      combinedSlices.push(...selected);
     }
 
     return combinedSlices;

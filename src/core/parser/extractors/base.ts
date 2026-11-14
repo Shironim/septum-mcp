@@ -17,12 +17,16 @@ export function detectArchetype(filePath: string, archetypesMap: Record<string, 
 
   // Built-in convention heuristics
   const lower = normalized.toLowerCase();
-  if (lower.includes("controller")) return "controller";
+  if (/(?:^|\/)(?:tests?|__tests__)\/|(?:\.test\.|\.spec\.|_test\.go$|Test\.php$)/i.test(normalized)) {
+    return "unknown";
+  }
+  if (lower.includes("controller") || /(?:^|\/)handlers?\/|handler\.(?:go|ts|js|py|php)$/i.test(lower)) return "controller";
   if (lower.endsWith("views.py") || (lower.includes("views/") && lower.endsWith(".py"))) return "controller";
+  if (/(?:^|\/)(?:console\/)?commands?\//i.test(lower)) return "action";
+  if (/(?:^|\/)models?\/|entities|entity/.test(lower) || /model\.(?:php|ts|js|py|go)$/i.test(lower)) return "model";
   if (lower.includes("service")) return "service";
   if (lower.includes("repository") || lower.includes("repo")) return "repository";
-  if (lower.includes("model") || lower.includes("entities") || lower.includes("entity")) return "model";
-  if (lower.includes("action")) return "action";
+  if (/(?:^|\/)actions?\/|action\.(?:php|ts|js|py|go)$/i.test(lower)) return "action";
   if (lower.includes("job") || lower.includes("queue")) return "job";
   if (lower.includes("event")) return "event";
   if (lower.includes("listener")) return "listener";

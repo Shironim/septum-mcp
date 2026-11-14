@@ -722,4 +722,51 @@ func SetupRoutes(r *gin.Engine, h *OrderHandler) {
       expect(entNode?.file).toBe("internal/domain/order.go");
     });
   });
+
+  it("handles monorepo nested go.mod, delegated Chi r.Route helpers, and r.With(...).Get chaining", () => {
+    const root = createTempDir("monorepo-chi");
+    try {
+      const files: Record<string, string> = {
+        "apps/api/go.mod": "module derianza-api\n\ngo 1.24\n",
+        "apps/api/cmd/server/main.go": `package main
+import (
+  "github.com/go-chi/chi/v5"
+  "derianza-api/internal/invoice"
+)
+func main() {
+  r := chi.NewRouter()
+  invH := invoice.NewHandler()
+  r.Route("/api/v1", func(r chi.Router) {
+    registerProtectedRoutes(r, invH)
+  })
+}`,
+        "apps/api/cmd/server/routes.go": `package main
+import (
+  "github.com/go-chi/chi/v5"
+  "derianza-api/internal/invoice"
+)
+func registerProtectedRoutes(r chi.Router, invH *invoice.Handler) {
+  r.With(authMiddleware).Get("/invoices", invH.List)
+  r.Post("/invoices", invH.Create)
+}`,
+        "apps/api/internal/invoice/handler.go": `package invoice
+import "net/http"
+type Handler struct{}
+func NewHandler() *Handler { return &Handler{} }
+func (h *Handler) List(w http.ResponseWriter, r *http.Request) {}
+func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {}`,
+      };
+      for (const [file, content] of Object.entries(files)) {
+        fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+        fs.writeFileSync(path.join(root, file), content);
+      }
+
+      expect(extractor.canHandle(root)).toBe(true);
+      const slices = extractor.extractSlices(root);
+      expect(slices.some((s) => s.http_method === "GET" && s.route_uri === "/api/v1/invoices")).toBe(true);
+      expect(slices.some((s) => s.http_method === "POST" && s.route_uri === "/api/v1/invoices")).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

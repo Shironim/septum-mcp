@@ -1,4 +1,5 @@
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
@@ -28,7 +29,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
   public readonly id = "laravel";
   public readonly name = "Laravel MVC Semantic Extractor";
 
-  constructor(private projectRoot: string = process.cwd()) {}
+  constructor(private projectRoot: string = process.cwd(), private inventory?: SourceInventory) {}
 
   public canHandle(projectRoot: string, framework?: string): boolean {
     if (framework === "laravel") return true;
@@ -44,12 +45,14 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
    */
   public extractSlices(
     projectRootOrDomainId?: string | number,
-    maybeDomainId?: number
+    maybeDomainId?: number,
+    signal?: AbortSignal,
+    inventory?: SourceInventory
   ): LaravelSemanticExtractionResult {
     // The registry reuses one adapter across workspaces. Keep helpers bound to
     // this invocation's root without mutating the shared adapter instance.
-    if (typeof projectRootOrDomainId === "string" && path.resolve(projectRootOrDomainId) !== path.resolve(this.projectRoot)) {
-      return new LaravelSemanticExtractor(projectRootOrDomainId).extractSlices(maybeDomainId);
+    if (typeof projectRootOrDomainId === "string" && (inventory || path.resolve(projectRootOrDomainId) !== path.resolve(this.projectRoot))) {
+      return new LaravelSemanticExtractor(projectRootOrDomainId, inventory).extractSlices(maybeDomainId, undefined, signal);
     }
     let root = this.projectRoot;
     let domainId: number | undefined;
@@ -64,11 +67,12 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     const routeFiles = [
       path.join(root, "routes/web.php"),
       path.join(root, "routes/api.php"),
-    ].filter((f) => fs.existsSync(f));
+    ].filter((f) => fs.existsSync(f) && (!this.inventory || this.inventory.files.includes(f)));
 
     const parsedRoutes: ParsedRoute[] = [];
 
     for (const routeFile of routeFiles) {
+      signal?.throwIfAborted();
       const content = readOptionalSourceFile(routeFile, "utf-8");
       const relativeRouteFile = path.relative(root, routeFile).replace(/\\/g, "/");
       const routesFromFile = this.parseRoutesContent(content);
@@ -904,7 +908,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     const jobsDir = path.join(root, "app/Jobs");
     if (!fs.existsSync(jobsDir)) return [];
 
-    const jobFiles = fs.readdirSync(jobsDir).filter((f) => f.endsWith(".php"));
+    const jobFiles = listSourceFiles(jobsDir, /\.php$/, this.inventory).filter(file => path.dirname(file) === jobsDir).map(file => path.basename(file));
     const slices: Array<Omit<VerticalSliceRecord, "id" | "created_at">> = [];
 
     for (const file of jobFiles) {
@@ -980,7 +984,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     const commandsDir = path.join(root, "app/Console/Commands");
     if (!fs.existsSync(commandsDir)) return [];
 
-    const files = fs.readdirSync(commandsDir).filter((f) => f.endsWith(".php"));
+    const files = listSourceFiles(commandsDir, /\.php$/, this.inventory).filter(file => path.dirname(file) === commandsDir).map(file => path.basename(file));
     const slices: Array<Omit<VerticalSliceRecord, "id" | "created_at">> = [];
 
     for (const file of files) {
@@ -993,6 +997,10 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
       const sigMatch = content.match(/protected\s+\$signature\s*=\s*['"]([^'"]+)['"]/);
       const commandSignature = sigMatch ? sigMatch[1].split(/\s+/)[0] : this.toSnakeCase(className);
 
+      const handleMatch = content.match(/\bfunction\s+handle\s*\(/);
+      const handleLine = handleMatch && handleMatch.index !== undefined
+        ? content.slice(0, handleMatch.index).split("\n").length
+        : 1;
       const actionBody = this.extractActionBody(content, "handle");
       const behavior = BehavioralAnalyzer.analyzeMethod(actionBody);
 
@@ -1001,12 +1009,14 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
           stage: "ingress",
           symbol: `CLI ${commandSignature}`,
           file: path.relative(this.projectRoot, fullPath),
+          line: handleLine,
           description: `Console Command: ${commandSignature}`,
         },
         {
           stage: "controller",
           symbol: `${className}::handle`,
           file: path.relative(this.projectRoot, fullPath),
+          line: handleLine,
           description: "Command Execution Handler",
           mutations: behavior.mutations.length ? behavior.mutations : undefined,
           transactions: behavior.hasTransaction,
@@ -1042,7 +1052,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
         controller_class: className,
         action_name: "handle",
         controller_file: path.relative(this.projectRoot, fullPath),
-        controller_line: 1,
+        controller_line: handleLine,
         architecture_style: "clean",
         entry_kind: "scheduled_command",
         execution_chain_json: JSON.stringify(chain.map(node => (node.guards || node.mutations || node.emits || node.dispatches || node.transactions) ? { ...node, semantic_analysis: "lexical_heuristic" } : node)),
@@ -1059,7 +1069,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     const listenersDir = path.join(root, "app/Listeners");
     if (!fs.existsSync(listenersDir)) return [];
 
-    const files = fs.readdirSync(listenersDir).filter((f) => f.endsWith(".php"));
+    const files = listSourceFiles(listenersDir, /\.php$/, this.inventory).filter(file => path.dirname(file) === listenersDir).map(file => path.basename(file));
     const slices: Array<Omit<VerticalSliceRecord, "id" | "created_at">> = [];
 
     for (const file of files) {

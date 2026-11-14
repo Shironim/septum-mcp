@@ -1,5 +1,5 @@
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
-import { isIgnoredDirectory } from "../../resources/ignore.ts";
 import { parseWithTreeSitter } from "../wasm-loader.ts";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
 import type Parser from "web-tree-sitter";
@@ -48,14 +48,14 @@ export class NestJsSemanticExtractor implements SemanticSliceExtractor {
   public async extractSlices(
     projectRoot: string,
     domainId?: number,
-    signal?: AbortSignal
+    signal?: AbortSignal, inventory?: SourceInventory
   ): Promise<VerticalSliceCandidate[]> {
     const slices: VerticalSliceCandidate[] = [];
     const srcDir = path.join(projectRoot, "src");
     if (!fs.existsSync(srcDir)) return slices;
 
     const resolver = new ImportResolver(projectRoot);
-    const controllerFiles = this.findFilesRecursively(srcDir, /\.controller\.(ts|js)$/);
+    const controllerFiles = listSourceFiles(srcDir, /\.controller\.(ts|js)$/, inventory);
 
     for (const file of controllerFiles) {
       if (signal?.aborted) throw new Error("semantic_extraction_cancelled");
@@ -523,21 +523,5 @@ export class NestJsSemanticExtractor implements SemanticSliceExtractor {
     }
 
     return null;
-  }
-
-  private findFilesRecursively(dir: string, pattern: RegExp): string[] {
-    const results: string[] = [];
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory() && !isIgnoredDirectory(entry.name)) {
-          results.push(...this.findFilesRecursively(full, pattern));
-        } else if (entry.isFile() && pattern.test(entry.name)) {
-          results.push(full);
-        }
-      }
-    } catch {}
-    return results;
   }
 }

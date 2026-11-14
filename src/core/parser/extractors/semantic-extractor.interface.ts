@@ -1,4 +1,5 @@
 import type { VerticalSliceRecord } from "../../../types/index.ts";
+import type { SourceInventory } from "../../resources/source-inventory.ts";
 
 export type VerticalSliceCandidate = Omit<VerticalSliceRecord, "id" | "created_at">;
 
@@ -17,6 +18,7 @@ export interface SemanticSliceExtractor {
   extractSlices(
     projectRoot: string,
     domainId?: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    inventory?: SourceInventory
   ): Promise<VerticalSliceCandidate[]> | VerticalSliceCandidate[];
 }

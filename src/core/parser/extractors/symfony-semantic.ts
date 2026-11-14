@@ -1,3 +1,4 @@
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Parser from "web-tree-sitter";
@@ -56,10 +57,10 @@ export class SymfonySemanticExtractor implements SemanticSliceExtractor {
   public async extractSlices(
     projectRoot: string = this.projectRoot,
     domainId?: number,
-    signal?: AbortSignal
+    signal?: AbortSignal, inventory?: SourceInventory
   ): Promise<VerticalSliceCandidate[]> {
     const root = path.resolve(projectRoot);
-    const controllerFiles = this.collectControllerFiles(root);
+    const controllerFiles = listSourceFiles(fs.existsSync(path.join(root, 'src/Controller')) ? path.join(root, 'src/Controller') : path.join(root, 'src'), /\.php$/, inventory);
     const slices: VerticalSliceCandidate[] = [];
     const resolver = new ImportResolver(root);
 
@@ -189,40 +190,6 @@ export class SymfonySemanticExtractor implements SemanticSliceExtractor {
     }
 
     return slices;
-  }
-
-  private collectControllerFiles(root: string): string[] {
-    const files: string[] = [];
-    const controllerDir = path.join(root, "src/Controller");
-
-    const scanDir = (dir: string, depth = 0) => {
-      if (depth > 5 || !fs.existsSync(dir)) return;
-      try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.name.startsWith(".") || entry.name === "vendor" || entry.name === "var" || entry.name === "tests") {
-            continue;
-          }
-          const fullPath = path.join(dir, entry.name);
-          if (entry.isDirectory()) {
-            scanDir(fullPath, depth + 1);
-          } else if (entry.isFile() && entry.name.endsWith(".php")) {
-            files.push(fullPath);
-          }
-        }
-      } catch {}
-    };
-
-    if (fs.existsSync(controllerDir)) {
-      scanDir(controllerDir);
-    } else {
-      const srcDir = path.join(root, "src");
-      if (fs.existsSync(srcDir)) {
-        scanDir(srcDir);
-      }
-    }
-
-    return files;
   }
 
   private extractRouteAttributeFromNode(node: Parser.SyntaxNode): ParsedRouteAttribute | null {

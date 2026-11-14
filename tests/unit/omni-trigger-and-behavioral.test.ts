@@ -147,14 +147,11 @@ class SendOrderInvoiceListener {
     const traceJob = tracer.trace("JOB ProcessPaymentJob");
     expect(traceJob.found).toBe(true);
     expect(traceJob.entrypoint?.controller).toBe("ProcessPaymentJob");
-    expect(traceJob.message).toContain("[INGRESS]");
-    expect(traceJob.message).toContain("JOB ProcessPaymentJob");
-    expect(traceJob.message).toContain("[CONTROLLER]");
-    expect(traceJob.message).toContain("ProcessPaymentJob::handle");
-    expect(traceJob.message).toContain("[unknown; unknown]");
-    expect(traceJob.message).toContain("[mutates: order.status]");
-    expect(traceJob.message).toContain("[EVENT]");
-    expect(traceJob.message).toContain("PaymentCompleted");
+    expect(traceJob.message).toContain("JOB job:ProcessPaymentJob -> ProcessPaymentJob@handle");
+    expect(traceJob.chain?.some((c) => c.symbol === "JOB ProcessPaymentJob")).toBe(true);
+    expect(traceJob.chain?.some((c) => c.stage === "controller" && c.symbol.includes("ProcessPaymentJob::handle"))).toBe(true);
+    expect(traceJob.chain?.some((c) => c.mutations?.includes("order.status"))).toBe(true);
+    expect(traceJob.chain?.some((c) => c.stage === "event" && c.symbol.includes("PaymentCompleted"))).toBe(true);
 
     // Test natural language query
     const traceNL = tracer.trace("ProcessPaymentJob");

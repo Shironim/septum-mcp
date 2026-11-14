@@ -1,3 +1,4 @@
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -30,7 +31,7 @@ export class McpCliSemanticExtractor implements SemanticSliceExtractor {
     return false;
   }
 
-  public extractSlices(projectRoot: string, domainId?: number): VerticalSliceCandidate[] {
+  public extractSlices(projectRoot: string, domainId?: number, signal?: AbortSignal, inventory?: SourceInventory): VerticalSliceCandidate[] {
     const slices: VerticalSliceCandidate[] = [];
     const { toolPrefix, cliBinName } = this.resolveProjectNaming(projectRoot);
     const registeredTools = this.scanRegisteredMcpToolNames(projectRoot);
@@ -39,9 +40,7 @@ export class McpCliSemanticExtractor implements SemanticSliceExtractor {
     const mcpToolsDir = path.join(projectRoot, "src/mcp/tools");
     if (fs.existsSync(mcpToolsDir)) {
       try {
-        const toolFiles = fs
-          .readdirSync(mcpToolsDir)
-          .filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
+        const toolFiles = listSourceFiles(mcpToolsDir, /\.[jt]s$/, inventory).filter(file => path.dirname(file) === mcpToolsDir).map(file => path.basename(file));
 
         for (const file of toolFiles) {
           const fullPath = path.join(mcpToolsDir, file);
@@ -140,9 +139,7 @@ export class McpCliSemanticExtractor implements SemanticSliceExtractor {
     const cliCommandsDir = path.join(projectRoot, "src/cli/commands");
     if (fs.existsSync(cliCommandsDir)) {
       try {
-        const commandFiles = fs
-          .readdirSync(cliCommandsDir)
-          .filter((f) => f.endsWith(".ts") || f.endsWith(".js"));
+        const commandFiles = listSourceFiles(cliCommandsDir, /\.[jt]s$/, inventory).filter(file => path.dirname(file) === cliCommandsDir).map(file => path.basename(file));
 
         for (const file of commandFiles) {
           const fullPath = path.join(cliCommandsDir, file);
@@ -322,10 +319,12 @@ export class McpCliSemanticExtractor implements SemanticSliceExtractor {
     let match: RegExpExecArray | null;
 
     while ((match = importRegex.exec(content)) !== null) {
+      if (/^import\s+type\b/.test(match[0])) continue;
       const clause = match[1];
       const spec = match[2];
       const identifiers = clause
         .split(",")
+        .filter(s => !/^\s*type\s+/.test(s))
         .map((s) => s.trim().split(/\s+as\s+/)[0].trim())
         .filter(Boolean);
 

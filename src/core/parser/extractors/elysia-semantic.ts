@@ -1,7 +1,7 @@
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import type Parser from "web-tree-sitter";
 import { parseWithTreeSitter } from "../wasm-loader.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
-import { isIgnoredDirectory } from "../../resources/ignore.ts";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -83,10 +83,10 @@ export class ElysiaSemanticExtractor implements SemanticSliceExtractor {
   public async extractSlices(
     projectRoot: string,
     domainId?: number,
-    signal?: AbortSignal
+    signal?: AbortSignal, inventory?: SourceInventory
   ): Promise<VerticalSliceCandidate[]> {
     const slices: VerticalSliceCandidate[] = [];
-    const sourceFiles = this.findSourceFiles(projectRoot);
+    const sourceFiles = listSourceFiles(projectRoot, /\.(?:[cm]?[jt]sx?)$/, inventory).filter(file => !file.endsWith('.d.ts'));
     const resolver = new ImportResolver(projectRoot);
 
     const allRoutes: ExtractedRoute[] = [];
@@ -512,27 +512,6 @@ export class ElysiaSemanticExtractor implements SemanticSliceExtractor {
     }
 
     return prefixesByRouter;
-  }
-
-  private findSourceFiles(dir: string): string[] {
-    const results: string[] = [];
-    const traverse = (current: string) => {
-      if (!fs.existsSync(current)) return;
-      try {
-        const entries = fs.readdirSync(current, { withFileTypes: true });
-        for (const entry of entries) {
-          if (isIgnoredDirectory(entry.name)) continue;
-          const full = path.join(current, entry.name);
-          if (entry.isDirectory()) {
-            traverse(full);
-          } else if (entry.isFile() && /\.(ts|js|tsx|jsx)$/.test(entry.name) && !entry.name.endsWith(".d.ts")) {
-            results.push(full);
-          }
-        }
-      } catch {}
-    };
-    traverse(dir);
-    return results;
   }
 }
 
