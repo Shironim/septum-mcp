@@ -1,98 +1,44 @@
-# Feature SSOT: Workspace Lifecycle, SQLite Database & Invalidation Engine
+# Workspace Lifecycle, Policy Ownership and Index Freshness
 
-## 1. Background & Business Requirements
+## Policy and database location
 
-As a static code analysis engine for backends, Septum's central engineering challenge is **guaranteeing data freshness** without placing unnecessary loads on CPU and disk I/O.
-1. **Zero Stale State:** If a developer edits a file in their editor, the AI agent must never receive shifted line numbers or deleted method references.
-2. **Incremental Sync Efficiency:** Reparsing the entire repository on every single-file modification is prohibitively expensive. Septum must isolate only modified files.
-3. **Transitive Dependency & Type Invalidation:** If an external type file (`types.ts`) or barrel export (`index.ts`) is modified, consumers must be automatically refreshed or marked stale.
-4. **Global Configuration Responsiveness:** Changes to project manifests (such as path aliases `@/*` in `tsconfig.json` or PSR-4 autoload rules in `composer.json`) must trigger deterministic re-evaluation of import graphs.
+`ConfigLoader.load()` reads configuration without discovery, initialization or policy writes. When `septum.config.json` exists, it owns policy. Otherwise registered SQLite domains and settings supply it. `resolveDatabasePath()` resolves `settings.db_path` consistently for CLI commands, hooks and MCP workspaces.
 
----
+`init` performs explicit discovery/scaffolding and initial sync. Ingestion with no configured domains can discover topology. `map register` updates the authoritative owner and returns `policy_owner`. See [registration](septum-map.md) for persistence and recovery limits.
 
-## 2. SQLite Embedded Database Architecture (`septum.db`)
+## Stored state
 
-Septum utilizes an embedded SQLite database located at `.septum/septum.db`, operating in **WAL (Write-Ahead Logging)** mode to facilitate high-concurrency read operations:
+SQLite uses WAL, foreign keys and a busy timeout.
 
-* **`domains` table:** Stores registered bounded contexts, root directories, and boundary policies (`allowed_deps_json`, `forbidden_deps_json`, `archetypes_json`).
-* **`files` table:** Stores file metadata, archetype classifications, SHA-256 content hashes (`content_hash`), line counts, byte sizes, and modification timestamps (`mtime_ms`).
-* **`symbols` table:** Stores symbols extracted via Tree-Sitter (name, kind, signature, visibility, `line_start`, `line_end`).
-* **`dependencies` table:** Stores file-to-file import edges (`source_file_id`, `target_symbol_or_path`, `import_statement`, `is_external`).
-* **`vertical_slices` table:** Caches vertical route-to-database execution slices generated from semantic analysis.
-* **`repo_meta` table:** Stores global repository state, including configuration revisions, parser fingerprints, and indexing status.
+| Table | Facts |
+| --- | --- |
+| `domains` | Domain roots and effective dependency rules |
+| `files` | Ownership, content hash, mtime, size and archetype |
+| `symbols` | Declarations, signatures and line spans |
+| `dependencies` | Import targets and source coordinates |
+| `vertical_slices` | Static entrypoint catalog |
+| `repo_meta` | Sync status, revisions, observed inputs and diagnostics |
 
----
+No schema migration is needed for the consistency refactor; extraction reports use existing metadata storage.
 
-## 3. Transitive Invalidation: Type & Barrel Files
+## Source inventory and ingestion
 
-### Problem Scenario:
-A backend service `UserService.ts` imports `UserDTO` from a type file `types.ts` or through a barrel export `index.ts`. A developer updates `types.ts` (e.g., adding `role: string`), but does not modify `UserService.ts`.
+`resources/source-inventory.ts` owns membership for ingestion and semantic adapters, applying configured ignores, containment and a common symlink policy. Contained file symlinks are eligible; directory symlinks are not traversed. Permission/I/O errors propagate instead of becoming an apparently empty scan. Semantic source can be outside registered domain roots.
 
-### Septum Solution:
-```
-types.ts / index.ts (Modified on disk)
-       │
-       ▼
-1. File Watcher / Incremental Hashing
-       │  └── Hash for types.ts updates in `files` table
-       │  └── Sets `slices_dirty = 1` flag in SQLite database
-       │
-2. Dual-Layer Edge Invalidation (`dependencies` & `import_relationships`)
-       │  └── Edge relation UserService -> types.ts marked as `freshness: "stale"`
-       │
-3. Stale-Reference Refusal
-       │  └── If agent queries symbol using outdated hash,
-       │      Septum refuses: `status: "stale_reference"` and triggers sync
-       │
-4. Dynamic On-The-Fly AST Binding (`retrieveContext`)
-       └── Parser loads updated AST for types.ts into memory
-       └── Emits new `type_contract` reflecting the added field immediately!
-```
+Warm ingestion skips parsing after metadata and previously verified content agree. Verification/rebuild reads content. Changed files are stored in bounded transactions after hashes are checked. A later failure can follow earlier committed batches: inspect `sync_state` and `sync_error` rather than assuming workspace-wide rollback.
 
-1. **Edge Freshness Tracking:** Every relationship in `dependencies` and `import_relationships` binds an `indexed_content_hash`. During context queries, Septum compares actual disk content hashes against index hashes. Mismatches automatically transition edges to `freshness: "stale"`.
-2. **Stale Reference Refusal:** Septum refuses to return stale cached signatures, emitting `status: "stale_reference"` so agents never hallucinate outdated type contracts.
-3. **Dynamic AST Binding:** When functions in `UserService.ts` are inspected, the `context` engine reads the modified `types.ts` directly from disk and projects updated `type_contract` interfaces on the fly.
+Source byte limits produce skipped-file diagnostics. Changes to types/barrels can dirty semantics. Import freshness describes the importing source hash; it does not promise every transitive consumer was reparsed. Deep context checks the hashes of declarations it reads and diagnoses source/index differences. An outdated `symbol_ref` is rejected when its indexed source identity no longer matches. Synchronize before retrieving current contracts from modified source.
 
----
+## Slice publication
 
-## 4. Global Configuration Changes (*Config Fingerprint*)
+`resolver/slice-catalog.ts` owns extraction and transactional catalog publication for ingestion and query refresh. It records input hashes, path/directory observations, membership and adapter counts. Failure retains a dirty catalog and is surfaced to callers.
 
-### Problem Scenario:
-A developer modifies project configuration files such as `tsconfig.json` (rerouting `@/*` path aliases), `composer.json` (changing PSR-4 namespace mappings), `go.mod`, or `pyproject.toml`.
+Generic routes complement uncovered files as described in [slice](septum-slice.md). Generic chains are built to maximum supported depth once; query depth limits returned expansion. Adapter counts describe the last successful extraction of supported patterns, not complete framework coverage.
 
-### Septum Solution:
-Septum uses a **Manifest Hashing Engine** and **Multi-Tier Cryptographic Revisions**:
+## Revisions, watchers and telemetry
 
-1. **Manifest Hashing Map (`manifests`):**
-   Whenever configuration manifests are loaded (`tsconfig.json`, `composer.json`, `go.mod`, etc.), Septum computes SHA-256 hashes and caches them in memory:
-   ```typescript
-   manifests[path.relative(this.root, file)] = computeContentHash(text);
-   ```
-   Supports recursive traversal for `extends` clauses in `tsconfig.json` (e.g., `tsconfig.base.json`).
-2. **Deterministic `config_revision` Computation:**
-   Import resolution results bind a deterministic revision token:
-   $$\text{config\_revision} = \text{SHA256}(\text{root} + \text{RESOLVER\_REVISION} + \text{manifests})$$
-   A single character change in any manifest causes `config_revision` to invalidate completely.
-3. **Multi-Tier Revisions:**
-   * `PARSER_FINGERPRINT`: Compiled Tree-Sitter parser logic and WASM binary assets.
-   * `SEMANTIC_FINGERPRINT`: Code revision for the 12 semantic framework extractors.
-   * `RESOLVER_REVISION`: Version token for path and alias resolution logic.
-4. **Automatic Clean Rebuild & Cache Flush:**
-   If any revision token or manifest configuration differs from values stored in `repo_meta`:
-   * Stale route caches are cleared (`clearVerticalSlices()`).
-   * The `slices_dirty` flag is set to `"1"`.
-   * `TopologyDetector.detect()` is re-executed to discover new topology.
-   * All import resolution graphs are rebuilt from a clean state.
+Implementation fingerprints bind loaded code/runtime and grammar assets. Resolution records manifests it used. A daemon must restart to load implementation changes.
 
----
+Watchers coalesce source/config events and periodically verify content. Watch exhaustion falls back to polling. A bounded serial queue orders work; leases prevent active-workspace eviction. These controls do not guarantee zero filesystem-event latency.
 
-## 5. File Watcher Mechanics & JIT Delta Sync
-
-To optimize system resource consumption, Septum synchronizes workspace state across two modes:
-
-1. **Bounded Watch Budget:**
-   * Uses native `fs.watch` with safe file-descriptor limits to guard against descriptor exhaustion (`EMFILE`).
-   * If directory watch counts exceed limits, Septum falls back gracefully to bounded polling.
-2. **Just-In-Time (JIT) Delta Sync on Query:**
-   * When `septum_slice` or `septum_symbol` is called, if `slices_dirty === "1"` or input files have uncommitted changes, Septum executes a rapid re-trace within a single SQLite transaction.
-   * Agents always receive consistent, accurate data without requiring manual server restarts.
+Telemetry records sizes, timing, transport status and selected options. Analysis outcome (`partial`, `unknown`, `rejected`, etc.) is separate from transport success. Raw arguments, errors and previews are omitted by default. `SEPTUM_DEBUG_TELEMETRY=1` enables those details for local debugging.

@@ -11,7 +11,7 @@ The primary purpose of the `context` action in `septum_symbol` is to provide tar
 
 ## 2. Retrieval Policy (`referenced-typescript-declarations/v4`)
 
-Regulated by the [context.ts](../../src/core/retrieval/context.ts) and [typescript-references.ts](../../src/core/retrieval/typescript-references.ts) engines:
+Selection is owned by [context.ts](../../src/core/retrieval/context.ts) and [typescript-references.ts](../../src/core/retrieval/typescript-references.ts); byte accounting, fragment pagination and response serialization are owned by [context-page.ts](../../src/core/retrieval/context-page.ts).
 
 1. **File Format Support:**
    Supports `.ts`, `.mts`, and `.cts` targets. For other formats (`.php`, `.py`, `.go`), queries route to bounded inspection mode (`source_start_line`, `source_line_limit`).
@@ -20,6 +20,7 @@ Regulated by the [context.ts](../../src/core/retrieval/context.ts) and [typescri
 3. **In-Memory TypeScript Compiler Host:**
    Septum constructs an in-memory compiler program (`noLib: true`, `noResolve: true`) avoiding disk thrashing and global library resolution overhead.
 4. **Local Reference Traversal & Import Bindings:**
+   Output ordering prioritizes the target, supporting implementation declarations, then type contracts. `selection_role` distinguishes supporting source implementations and contracts; ordering does not enlarge the dependency closure or remove continuation requirements.
    The engine maps local declaration identifiers, helper functions, constants, named imports, aliases, defaults, and type-only bindings. Traversal is constrained to 3 import edge hops (maximum 64 files, 256 items, and 8 MiB source).
 5. **Type-Only Class Signature Projection:**
    Supporting classes imported as types are projected into clean public interface contracts:
@@ -45,8 +46,9 @@ Regulated by the [context.ts](../../src/core/retrieval/context.ts) and [typescri
 ### Configuration Options:
 * `budget_bytes`: Output byte quota (default: 16,384 bytes, range: 2,048 – 2,097,152 bytes).
 * `continuation`: Base64url continuation token to retrieve subsequent context pages when content exceeds the budget.
-* `include_source`: Whether to include symbol implementation source code (default: `true`).
-* `source_line_limit`: Maximum number of source lines returned (default: 120 lines).
+* `context_mode: "deep"`: Select this TypeScript policy explicitly. It rejects `include_source`, `source_start_line` and `source_line_limit` rather than silently switching engines.
+* `context_mode: "source"`: Select bounded inspection. This uses `include_source`, `source_start_line` and `source_line_limit` (default: 120 lines; maximum: 200); it does not accept `budget_bytes` or continuation.
+* Without `context_mode`, legacy language/option-based selection is retained. Successful results identify `context_mode`. `inspect` remains an alias for `context`.
 
 ---
 

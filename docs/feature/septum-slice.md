@@ -14,7 +14,7 @@ When an AI agent needs to understand an endpoint such as `POST /orders`, it conv
 This consumes 5–8 separate tool calls and burns thousands of tokens from the agent's context window.
 
 **The `septum_slice` Solution:**
-`septum_slice` provides **end-to-end vertical execution tracing in a single tool call**. The engine traces connections deterministically from the external entrypoint down to data persistence layers.
+`septum_slice` returns a bounded static catalog around supported entrypoints. Each relationship carries its evidence kind and derivation. Target-match confidence does not prove sequential execution or complete runtime reachability.
 
 ---
 
@@ -53,14 +53,13 @@ This consumes 5–8 separate tool calls and burns thousands of tokens from the a
          │         Extractor (Laravel, NestJS, etc.)    │
          └──────────────────────┬───────────────────────┘
                                 │
-                      Matching Adapter Found?
-                       ├── YES ──> Extracts Ingress, DTO props, Controller, Service, DB Table
-                       └── NO
+                    Extract supported adapter patterns
+                    then identify uncovered entrypoint files
                                 │
                                 ▼
          ┌──────────────────────────────────────────────┐
          │ Tier 2: Generic Tree-Sitter Call-Graph       │
-         │         Tracer (Universal AST Fallback)      │
+         │         Tracer (bounded static fallback)    │
          └──────────────────────────────────────────────┘
 ```
 
@@ -84,7 +83,9 @@ Septum includes semantic adapters tailored to framework decorators, routing cons
   * Extracts request struct bindings (`c.ShouldBindJSON(&req)`), handler functions, service structs, and DB queries (GORM / sqlx).
 
 ### Tier 2: Generic Call-Graph Fallback
-For custom frameworks or proprietary architectures, Septum executes `CallGraphTracer` using Tree-Sitter WASM parsers covering:
+`slice-catalog.ts` owns extraction and publication for both ingestion and query refresh. Generic declarative routes complement files not already covered by an adapter. Router files already covered by an adapter are excluded to avoid inventing unprefixed duplicates of mounted routes. Inferred controller entrypoints are retained only when no adapter slices were produced.
+
+The shared source inventory applies ignore patterns, containment and scan-error handling to adapters and ingestion. Semantic files can be outside registered domain roots. The fallback uses available indexed declarations and static heuristics; parsing a language does not establish complete call resolution. Languages with declaration support include:
 * **Rust** (`.rs`)
 * **Java** (`.java`)
 * **C# / .NET** (`.cs`)

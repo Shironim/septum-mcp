@@ -73,9 +73,10 @@ Used by AI agents **before writing changes to disk** to simulate whether candida
 ```
 
 ### B. Git Staged Audit Mode (`scope: "staged"`)
-Evaluates only files indexed in the git staging area (`git add`) prior to committing ([staged-auditor.ts](../../src/core/boundary/staged-auditor.ts)).
-* Highly efficient, ignoring hundreds of untouched files.
-* Guarantees that new commits introduce zero circular dependencies and zero boundary violations.
+Freezes the Git index as a tree before analysis ([staged-auditor.ts](../../src/core/boundary/staged-auditor.ts)). Source and interpretation inputs are read from that snapshot, including unchanged source needed to resolve imports and cycles. Binary assets are inventoried without materializing their bytes or applying the source-size cap to them.
+* Reports violations relevant to changed files; manifest changes can widen the affected scope.
+* Unresolved or unsupported evidence yields `unknown`; approval applies to the analyzed static scope and does not certify runtime behavior.
+* Snapshot file-count/total-byte limits and source-size limits remain enforced. Symlinks and submodules are conservatively rejected.
 
 ```json
 // Request
@@ -95,4 +96,5 @@ Evaluates only files indexed in the git staging area (`git add`) prior to commit
 ```
 
 ### C. Full Codebase / Domain Scope (`scope: "all"` or `scope: "domain"`)
+Incomplete-resolution output includes up to ten relationship examples, total/returned/omitted accounting, reason counts and a recovery hint. A resolved import can still yield `unknown` if its target source is not indexed; registering/indexing the target root can resolve that uncertainty. Sampling diagnostics does not change the underlying decision.
 Executes a comprehensive audit across the entire SQLite dependency graph to ensure ongoing architectural health across the repository.

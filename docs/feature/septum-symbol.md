@@ -62,7 +62,7 @@ AI Coding Agents performing code modifications frequently struggle with 3 critic
 ## 3. Sub-Operation 2: `action: "context"` (Bounded Slicing & DTO Extraction)
 
 ### Internal Mechanics & Algorithms
-`action: "context"` (or alias `"inspect"`) automatically routes between two specialized engines depending on target language and options:
+`action: "context"` (or alias `"inspect"`) accepts explicit `context_mode: "deep" | "source"`. Without that option, legacy automatic selection by language and bounded options remains available. Responses identify the selected mode:
 1. **In-Memory TypeScript Compiler Host (`.ts`, `.mts`, `.cts` when bounded line options are omitted):**
    Runs the `referenced-typescript-declarations/v4` policy ([context.ts](../../src/core/retrieval/context.ts)) within a strict byte budget (`budget_bytes`, default: 16 KB), returning `items` (`source`, `type_contract`, `relationship`, `selection`, `diagnostic`) and pagination `continuation` tokens (see [symbol-context-contract.md](./symbol-context-contract.md)).
 2. **Bounded Source Slicing (Polyglot files or when `include_source` / `source_line_limit` is specified):**
@@ -117,14 +117,16 @@ AI Coding Agents performing code modifications frequently struggle with 3 critic
 ---
 
 ## 4. Sub-Operation 3: `action: "impact"` (Blast Radius & Inbound Callers)
+`call_sites` separately reports supported TypeScript/JavaScript identifier calls bound to a named import, including aliases. Comments, strings and locally shadowed bindings are excluded by AST symbol identity. Method dispatch and namespace/default imports without a proven binding remain limited; this is not a complete caller graph. `inbound_callers` retains legacy evidence for compatibility. Risk remains advisory and explicitly states its scope.
+
 
 ### Internal Mechanics & Algorithms
 1. **Inverse Dependency, Same-File & Same-Package Traversal:**
    Scans the repository for all files that import the file declaring the target symbol, plus same-file callers (outside the target symbol's own declaration line span) and same-package/namespace files in `.go`, `.php`, `.java`, and `.cs` that invoke the target without explicit import statements.
 2. **Batch Enclosing Symbol Resolution (Zero N+1 Query):**
    Septum loads symbols from calling files in a single batch SQLite query to resolve callers: *“Which method encloses line 115?”* Output provides concrete caller method identifiers rather than plain line numbers.
-3. **Method-Level Invocation Verification:**
-   Differentiates files that *merely import a class* from files that *actually invoke the specific method*, validating call syntax:
+3. **Method-Level Invocation Hints:**
+   Import dependencies are returned separately from lexical caller hints. Matching the following syntax does not prove receiver identity, runtime dispatch or a complete caller set:
    * `->methodName(` (PHP)
    * `.methodName(` (TypeScript, JavaScript, Python, Go)
    * `::methodName(` (Static calls in PHP, C++)
@@ -132,6 +134,8 @@ AI Coding Agents performing code modifications frequently struggle with 3 critic
    * **`low`:** Invoked by < 2 files within the same domain.
    * **`medium`:** Invoked by 2–5 files or spans 2 domains.
    * **`high`:** Invoked by > 5 files or spans > 2 architectural domains.
+
+Caller scanning and risk calculation live in `core/resolver/symbol-impact.ts`; database candidate queries remain in `DependencyRepository`. Results retain `coverage: "partial"` and `inbound_callers_complete: false`. Per-target `capabilities` distinguish declaration extraction, import resolution, source/deep context and heuristic caller analysis.
 
 ### Input & Output Schema
 ```json

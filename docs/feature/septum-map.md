@@ -1,66 +1,50 @@
 # Feature SSOT: `septum_map` (Macro Architecture & Domain Catalog)
 
-## 1. Background & Business Requirements
+## 1. Navigation contract (`navigation/v1`)
 
-When first working in a large backend repository, AI Coding Agents encounter the **"Cold Start"** dilemma:
-1. The agent lacks awareness of the project's architectural pattern (*Clean Architecture*, *Modular DDD*, *Layered MVC*, or *Monorepo*).
-2. The agent is unfamiliar with module boundaries (*bounded contexts*) and dependency permissions between domains.
-3. The agent frequently issues ad-hoc terminal commands (`ls`, `find`, `grep`) that burn tokens and waste latency.
+`septum_map` answers where to look and which paths connect. `septum_symbol` inspects declarations, signatures, contracts and implementation after a target is selected. Catalog responses no longer include per-file symbol arrays, source bodies, full declarations, or the complete capability registry by default.
 
-`septum_map` eliminates this friction by delivering an **instant macro architectural map (*Telescope View*)** and **structured per-domain file catalogs** before an agent ever touches source code.
-
----
-
-## 2. Two Primary Modes for `action: "catalog"`
-
-### Mode A: Macro Bird's-Eye View (When `domain` is omitted)
-Provides a high-level architectural overview of the entire system:
-* **Telescope View:** Displays project classification (`project_type`), detected framework (`framework`), architectural style (`architecture_style`), and total execution slices (`total_vertical_slices`).
-* **Bounded Domain List:** Surfaces registered domains, root directories, detected archetypes, and declared dependency constraints (`allowed_dependencies` and `forbidden_dependencies`).
-* **Scanned vs Ignored Folders:** Distinguishes indexed source directories from deliberately excluded directories (e.g., `tests`, `public`, `dist`, `vendor`).
+### Workspace overview
 
 ```json
-// Request
 { "action": "catalog" }
-
-// Response
-{
-  "telescope_view": {
-    "project_type": "backend",
-    "framework": "nestjs",
-    "architecture_style": "modular-ddd",
-    "total_domains": 3,
-    "total_vertical_slices": 48,
-    "scanned_folders": ["src/modules/ordering", "src/modules/billing", "src/modules/common"],
-    "ignored_folders": ["node_modules", "dist", "tests", "coverage"]
-  },
-  "domains": [
-    {
-      "name": "ordering",
-      "root": "src/modules/ordering",
-      "archetypes": ["controller", "service", "repository", "dto", "entity"],
-      "allowed_dependencies": ["common"],
-      "forbidden_dependencies": ["billing"]
-    },
-    {
-      "name": "billing",
-      "root": "src/modules/billing",
-      "archetypes": ["controller", "service", "repository", "dto"],
-      "allowed_dependencies": ["common", "ordering"],
-      "forbidden_dependencies": []
-    }
-  ]
-}
 ```
 
-### Mode B: Granular Domain Catalog (When `domain: "<name>"` is provided)
-When an agent zooms in on a specific bounded context:
-* **`detail_level: "compact"` (Default, Token-Efficient):** Lists files in the target domain, their archetype (controller, service, model), line counts, and symbol summaries (`methods_count`, `properties_count`, line span).
-* **`detail_level: "full"`:** Returns full symbol declarations, method signatures, and file import dependency edges.
-* **Archetype Filtering (`archetype_filter`):** Enables filtering by specific layer components:
-  ```json
-  { "action": "catalog", "domain": "ordering", "archetype_filter": "controller" }
-  ```
+Returns domain roots, indexed file counts and declared dependency policies. `dependencies` aggregates resolved static imports between domains; each edge carries `from`, `to`, `relation: "imports"` and `count`. Workspace `files` is empty because domain records are the navigation nodes. `entrypoints` provides up to 20 static catalog targets, with `runtime_verified: false`.
+
+### Domain and file navigation
+
+```json
+{ "action": "catalog", "domain": "ordering" }
+```
+
+Each file contains `path`, `domain`, `archetype`, `symbol_count` and one indexed symbol-name `anchor` (or null). Anchors support targeted symbol lookup; they are not declaration inventories. Dependencies use actual file paths and include both incoming and outgoing imports touching the selected scope. A neighboring path can belong to another domain.
+
+```json
+{ "action": "catalog", "domain": "ordering", "file_filter": "order.service.ts" }
+```
+
+`file_filter` is a case-insensitive path substring; `archetype_filter` narrows the architectural layer. Files are ordered by static entrypoint membership, connection degree, then path. `next` offers a slice lookup for an entrypoint or a symbol lookup using a real indexed anchor and its file.
+
+### Detail and omission accounting
+
+Compact selects up to 40 files; `detail_level: "full"` selects up to 100. Full expands navigation coverage, not declaration detail. `file_limit` (maximum 100) and `file_offset` remain available, but `pagination` appears only when more matching files remain. Continue with `pagination.next_file_offset` and unchanged filters. Dependency edges are capped at 100 and entrypoints at 20. `accounting` exposes returned and omitted counts; refine the scope to recover relevant edges or entrypoints. These are item limits, not a strict serialized-byte budget.
+
+`health` reports sync state, sync-needed status, unresolved import count, unsupported/skipped file counts and bounded reasons. Coverage remains `partial`: an import edge is not a call, execution order, or runtime proof. Static entrypoints can be inferred. Missing and unindexed targets remain uncertain.
+
+### Optional diagnostics
+
+```json
+{ "action": "catalog", "file_filter": "src/orders/order.service.ts", "include_evidence": true }
+```
+
+Evidence requires a filter matching exactly one indexed file. It returns at most 20 raw import relationships with explicit accounting, plus up to five unresolved diagnostic examples. The raw evidence describes imports originating in that file; incoming connections remain available in the navigation edges.
+
+`include_capabilities: true` explicitly adds parser and semantic-adapter capabilities. With `detail_level: "full"`, that registry is expanded. Normal navigation includes the small runtime-version metadata but omits the registry.
+
+### Compatibility
+
+Catalog input aliases and registration behavior remain supported. The response shape changes intentionally to `navigation/v1`: consumers reading `telescope_view`, `connections`, file symbol arrays or full declarations must migrate. Use `dependencies`, `files`, `health` and `next`, then `septum_symbol` for depth. The programmatic repository declaration-catalog API remains available; MCP map does not call it. No database migration is required.
 
 ---
 
@@ -78,8 +62,12 @@ When engineers or AI agents introduce a new module or bounded context, domains c
   "ingest_now": true
 }
 ```
-* **Root Collision Validation:** Septum verifies that `root` does not overlap or conflict with existing domain paths.
-* **Instant Persistence:** Configuration is saved directly to the SQLite `domains` table; if `ingest_now: true`, contained files are indexed immediately.
+* **Root Collision Validation:** Two names cannot own the same physical root. Nested roots are supported.
+* **Policy Ownership:** With `septum.config.json`, registration updates the file and records the effective domain in SQLite. Without it, SQLite owns policy. The response identifies `policy_owner` (`file` or `database`). Omitted fields retain the current owner's values; explicit empty arrays clear them.
+* **Write Failures:** A lock or stale file snapshot rejects registration. A failed file write rolls back the database update. The file is replaced atomically, but the filesystem and SQLite do not form a distributed transaction; the file remains authoritative after a crash between their commits.
+* **Ingestion:** With `ingest_now: true`, registration also synchronizes source. Registration success without ingestion does not certify index freshness.
+
+Catalog construction returns structured data first; shared guidance is derived from its status and the MCP handler serializes it. Full capabilities distinguish registered adapters, applicability and counts from the last successful extraction. Those counts describe supported patterns, not runtime completeness.
 
 ---
 
