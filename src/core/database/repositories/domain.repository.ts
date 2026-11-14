@@ -142,6 +142,27 @@ export class DomainRepository {
     return this.db.query<DomainRecord, []>("SELECT * FROM domains ORDER BY name ASC").all();
   }
 
+  /** Delete domains not present in activeNames (case-insensitive) and return removed counts. */
+  public pruneDomainsNotIn(activeNames: string[]): { prunedDomains: number; removedFiles: number } {
+    const activeSet = new Set(activeNames.map((n) => n.trim().toLowerCase()));
+    return this.db.transaction(() => {
+      const existing = this.getAllDomains();
+      const stale = existing.filter((d) => !activeSet.has(d.name.trim().toLowerCase()));
+      if (stale.length === 0) return { prunedDomains: 0, removedFiles: 0 };
+
+      let removedFiles = 0;
+      const countFilesStmt = this.db.query<{ cnt: number }, [number]>(
+        "SELECT COUNT(*) AS cnt FROM files WHERE domain_id = ?"
+      );
+      const deleteDomainStmt = this.db.query("DELETE FROM domains WHERE id = ?");
+      for (const domain of stale) {
+        removedFiles += countFilesStmt.get(domain.id)?.cnt ?? 0;
+        deleteDomainStmt.run(domain.id);
+      }
+      return { prunedDomains: stale.length, removedFiles };
+    }).immediate();
+  }
+
   public getDomainCatalog(
     domainName: string,
     archetypeFilter?: string,

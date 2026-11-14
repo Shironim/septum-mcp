@@ -562,7 +562,59 @@ export class TopologyDetector {
       }
     }
 
-    // Persist Macro Metadata SSOT
+    if (forceResetPolicies) {
+      repo.domains.pruneDomainsNotIn(Object.keys(topology.domains));
+    }
+
+    return this.persistMacroMetadata(repo, topology);
+  }
+
+  /**
+   * Synchronize explicit domains from septum.config.json as the SSOT without
+   * writing auto-discovered domains, while still updating macro metadata and
+   * reporting any detected framework sub-domains shadowed by coarse roots.
+   */
+  public static syncExplicitConfigDomains(
+    repo: SeptumRepository,
+    projectRoot: string,
+    explicitDomains: Record<string, DomainConfig>
+  ): {
+    domains: Record<string, DomainConfig>;
+    shadowedSubdomains: Array<{ explicitDomain: string; explicitRoot: string; detectedNames: string[] }>;
+  } {
+    assertUniqueDomainRoots(explicitDomains, projectRoot);
+    for (const [name, config] of Object.entries(explicitDomains)) {
+      repo.domains.upsertDomain(name, config, projectRoot);
+    }
+    repo.domains.pruneDomainsNotIn(Object.keys(explicitDomains));
+
+    const topology = this.detect(projectRoot);
+    const domains = this.persistMacroMetadata(repo, topology);
+
+    const shadowedSubdomains: Array<{ explicitDomain: string; explicitRoot: string; detectedNames: string[] }> = [];
+    for (const [explicitDomain, explicitCfg] of Object.entries(explicitDomains)) {
+      const parentAbs = path.resolve(projectRoot, explicitCfg.root);
+      const detectedNames: string[] = [];
+      for (const [detectedName, detectedCfg] of Object.entries(topology.domains)) {
+        if (domainNameKey(detectedName) === domainNameKey(explicitDomain)) continue;
+        const childAbs = path.resolve(projectRoot, detectedCfg.root);
+        const rel = path.relative(parentAbs, childAbs);
+        if (rel !== "" && rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel)) {
+          detectedNames.push(detectedName);
+        }
+      }
+      if (detectedNames.length > 0) {
+        shadowedSubdomains.push({ explicitDomain, explicitRoot: explicitCfg.root, detectedNames });
+      }
+    }
+
+    return { domains, shadowedSubdomains };
+  }
+
+  private static persistMacroMetadata(
+    repo: SeptumRepository,
+    topology: DiscoveredProjectTopology
+  ): Record<string, DomainConfig> {
     repo.setMeta("project_type", topology.projectType);
     repo.setMeta("architecture_style", topology.architectureStyle);
     repo.setMeta("framework", topology.framework);

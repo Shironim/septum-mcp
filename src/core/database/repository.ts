@@ -5,6 +5,8 @@ import type {
   DomainCatalogResponse,
   DomainConfig,
   DomainRecord,
+  NavigationFile,
+  NavigationEntrypoint,
   ExtractedDependency,
   ExtractedSymbol,
   FileRecord,
@@ -71,6 +73,24 @@ export class SeptumRepository {
     }
   }
 
+  public getNavigationFiles(): NavigationFile[] {
+    return this.db.query<NavigationFile, []>(`
+      SELECT f.path, d.name AS domain, f.archetype, COUNT(s.id) AS symbol_count,
+        (SELECT name FROM symbols WHERE file_id = f.id AND kind IN ('function','class','struct','interface') ORDER BY line_start, name LIMIT 1) AS anchor
+      FROM files f JOIN domains d ON d.id = f.domain_id
+      LEFT JOIN symbols s ON s.file_id = f.id
+      GROUP BY f.id ORDER BY f.path
+    `).all();
+  }
+
+  public getNavigationEntrypoints(): NavigationEntrypoint[] {
+    return this.db.query<NavigationEntrypoint, []>(`
+      SELECT DISTINCT http_method AS method, route_uri AS target,
+        controller_file AS file, action_name AS handler
+      FROM vertical_slices ORDER BY controller_file, http_method, route_uri, action_name
+    `).all();
+  }
+
   /** Stable content identity without materializing/sorting the index in JS.
    * SQLite counters invalidate the cache for local writes and other connections;
    * the digest excludes insertion IDs and operational timestamps.
@@ -118,6 +138,10 @@ export class SeptumRepository {
 
   public getAllDomains(): DomainRecord[] {
     return this.domains.getAllDomains();
+  }
+
+  public pruneDomainsNotIn(activeNames: string[]): { prunedDomains: number; removedFiles: number } {
+    return this.domains.pruneDomainsNotIn(activeNames);
   }
 
   // --- File Methods ---
