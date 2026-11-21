@@ -17,7 +17,7 @@ export function symbolWorkspace(repo: SeptumRepository, explicit?: string): stri
 }
 
 type TextResult = { content: Array<{ type: string; text: string }>; metadata?: unknown };
-type EvidenceQuery = { operation: "locate" | "inspect" | "impact"; requested?: SymbolReference; diagnostics?: string[] };
+type EvidenceQuery = { operation: "locate" | "inspect" | "impact"; requested?: SymbolReference; diagnostics?: string[]; includeCapabilities?: boolean };
 
 /** Checks the selected source and observed reads, without certifying a legacy caller/dependency closure. */
 export function withSymbolEvidence<T extends TextResult>(repo: SeptumRepository, root: string, query: EvidenceQuery, build: () => T): T {
@@ -88,10 +88,10 @@ export function withSymbolEvidence<T extends TextResult>(repo: SeptumRepository,
     payload.summary = `${payload.summary} | ${note}`;
     payload.message = `${payload.message} | ${note}`;
   }
-  const enriched = { ...payload, ...(target ? { capabilities: getOperationCapabilities(target.file_path) } : {}), retrieval: leanRetrieval };
+  const enriched = { ...payload, ...(target && query.includeCapabilities ? { capabilities: getOperationCapabilities(target.file_path) } : {}), retrieval: leanRetrieval };
   return {
     ...result,
-    content: [{ ...result.content[0]!, text: JSON.stringify(enriched, null, 2) }, ...result.content.slice(1)],
+    content: [{ ...result.content[0]!, text: JSON.stringify(enriched) }, ...result.content.slice(1)],
     ...("metadata" in result ? { metadata: enriched } : { metadata: enriched }),
   } as T;
 }

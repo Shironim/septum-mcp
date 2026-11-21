@@ -3,6 +3,7 @@ import type { ContextValue } from "./typescript-references.ts";
 
 export type SourceItem = {
   selection_role?: "implementation" | "contract";
+  depth?: number;
   kind: "source";
   name: string;
   reason: "target_implementation" | "direct_import_declaration" | "local_dependency";
@@ -11,7 +12,7 @@ export type SourceItem = {
 };
 type DiagnosticItem = { kind: "diagnostic"; reason: string; file_path?: string; detail?: string };
 export type ContextItem = SourceItem | DiagnosticItem | { kind: "relationship"; reason: "target_file_import"; relationship: ImportRelationship } |
-  { kind: "type_contract"; name: string; file_path: string; indexed_content_hash: string; start_line: number; end_line: number;
+  { kind: "type_contract"; depth?: number; name: string; file_path: string; indexed_content_hash: string; start_line: number; end_line: number;
     projection: "public_instance_signatures"; text: string; inferred_types: "unknown" | "explicit"; fragment?: SourceItem["fragment"] } |
   { kind: "selection"; reason: "known_call_arguments"; file_path: string; start_line: number; arguments: ContextValue[]; pruned_branches: number };
 
@@ -87,9 +88,15 @@ export function pageContext(options: PageOptions) {
         while (low <= high) {
           const middle = Math.floor((low + high) / 2);
           let stop = middle;
-          // Keep UTF-16 surrogate pairs and CRLF boundaries intact.
-          if (stop > offset && ((text.charCodeAt(stop - 1) >= 0xd800 && text.charCodeAt(stop - 1) <= 0xdbff) || text[stop - 1] === "\r" && text[stop] === "\n")) stop--;
-          if (stop === offset && offset + 2 < text.length) stop = offset + 2;
+          // Prefer clean line boundaries so fragments do not cut mid-identifier.
+          const lastNewline = text.lastIndexOf("\n", middle - 1);
+          if (lastNewline >= offset) {
+            stop = lastNewline + 1;
+          } else {
+            // Keep UTF-16 surrogate pairs and CRLF boundaries intact.
+            if (stop > offset && ((text.charCodeAt(stop - 1) >= 0xd800 && text.charCodeAt(stop - 1) <= 0xdbff) || text[stop - 1] === "\r" && text[stop] === "\n")) stop--;
+            if (stop === offset && offset + 2 < text.length) stop = offset + 2;
+          }
           const partial = stop > offset ? budgetedResponse(envelope([...page, fragment(stop)], end, stop), budget) : undefined;
           if (partial && JSON.parse(partial.content[0]!.text).status !== "budget_too_small") {
             result = partial; low = middle + 1;

@@ -16,7 +16,7 @@ export function bindContextFile(path: string, text: string) {
     readFile: name => name === path ? text : undefined, getCanonicalFileName: name => name,
     useCaseSensitiveFileNames: () => true, getNewLine: () => "\n",
   };
-  const program = ts.createProgram([path], { noLib: true, noResolve: true }, host);
+  const program = ts.createProgram([path], { allowJs: true, noLib: true, noResolve: true, jsx: ts.JsxEmit.Preserve }, host);
   const checker = program.getTypeChecker();
   function top(node: ts.Node): ts.Node {
     while (node.parent && node.parent !== source) node = node.parent;
@@ -24,6 +24,7 @@ export function bindContextFile(path: string, text: string) {
   }
   return {
     source,
+    checker,
     hasErrors: program.getSyntacticDiagnostics(source).length > 0,
     declaration(start: number, end: number) {
       return source.statements.find(node => source.getLineAndCharacterOfPosition(node.getStart()).line + 1 <= start &&
