@@ -10,27 +10,29 @@ Septum indexes selected source declarations, imports, domain ownership and stati
 
 ## Select the tool
 
+All 4 tools default to \`format: "text"\` (token-efficient compact markdown summary); pass \`format: "json"\` when structured JSON is required.
+
 | Need | Request | Read from the result |
 | --- | --- | --- |
-| Workspace/domain/file navigation | \`septum_map\`, \`action: "catalog"\`, \`detail_level: "compact"\`, optional \`domain\`/\`file_filter\` | \`navigation/v1\` files/anchors, directed \`dependencies\`, static \`entrypoints\`, \`health\`, \`accounting\`, \`next\` |
-| Domain policy registration | \`septum_map\`, \`action: "register"\`, \`name\`, \`root\`, dependency lists | Recorded policy, \`policy_owner\` and any ingestion result |
-| Declaration lookup | \`septum_symbol\`, \`action: "locate"\`, \`query\` | Indexed coordinates, \`symbol_ref\`, candidates/suggestions and retrieval freshness |
-| TypeScript reference context | \`septum_symbol\`, \`action: "context"\`, \`context_mode: "deep"\` | Source/contracts, relationships, diagnostics, accounting and continuation |
+| Workspace/domain/file navigation | \`septum_map\`, \`action: "catalog"\`, \`detail_level: "compact"\`, optional \`domain\`/\`file_filter\`/\`format\` | \`submodules\` + aggregated dependencies (for large domains >25 files), files/anchors, directed \`dependencies\`, static \`entrypoints\`, \`health\`, \`next\` |
+| Domain policy registration | \`septum_map\`, \`action: "register"\`, \`domain\`, \`root\`, dependency lists | Recorded policy, \`policy_owner\` and any ingestion result |
+| Declaration lookup | \`septum_symbol\`, \`action: "locate"\`, \`query\` | Indexed coordinates, \`symbol_ref\`, token/camelCase-ranked suggestions and retrieval freshness |
+| TypeScript reference context | \`septum_symbol\`, \`action: "context"\`, \`context_mode: "deep"\`, optional \`max_depth\` (1–4, default 2) | True hop-ordered (\`hop 0→1→2\`, direct local/imported callees & contracts first) source/contracts, diagnostics, accounting and continuation |
 | Source/signature inspection | \`septum_symbol\`, \`action: "context"\`, \`context_mode: "source"\` | Source slice or signature/dependency details and source status |
-| Potential consumers | \`septum_symbol\`, \`action: "impact"\` | Import dependents, supported static call sites, legacy caller hints and uncertainty |
-| Supported route/handler/job/CLI/event | \`septum_slice\`, \`query\`, optional \`controller_file\` and \`max_depth\` | Catalog target, related nodes, relationship evidence and diagnostics |
+| Potential consumers | \`septum_symbol\`, \`action: "impact"\` | Separated \`call_sites\`, \`runtime_imports\`, \`type_only_imports\`, warnings and uncertainty |
+| Supported route/handler/job/CLI/event | \`septum_slice\`, \`query\`, optional \`controller_file\`, \`max_depth\`, \`format\` | Catalog target (\`exact\` match for \`METHOD target\`), indented parent-attributed chain and diagnostics |
 | Proposed imports | \`septum_boundary\`, \`scope: "file"\`, \`file_path\`, \`proposed_imports\` | Proposal decision and evaluated scope |
 | Existing indexed or staged imports | \`septum_boundary\`, \`scope: "all" / "domain" / "staged"\` | Scoped violations, incomplete resolution and recovery hints |
 
 ## Context selection
 
-Deep context supports indexed \`.ts\`, \`.mts\` and \`.cts\` declarations. It follows bounded supported references and can project public type contracts. It does not establish a complete business dependency closure.
+Deep context supports indexed \`.ts\`, \`.tsx\`, \`.mts\` and \`.cts\` declarations. It follows bounded supported references up to \`max_depth\` import edges (default \`2\`, max \`4\`), ranks items hop-first (\`depth 0 → 1 → 2\`, direct calls and contracts ahead of transitive helpers), and can project public type contracts. It does not establish a complete business dependency closure.
 
-Use \`budget_bytes\` only for deep context. Do not combine it with \`include_source\`, \`source_start_line\` or \`source_line_limit\`. Those options select bounded source inspection when no explicit mode is supplied. \`inspect\` is an alias for \`context\`.
+Use \`budget_bytes\` and \`max_depth\` only for deep context. Do not combine them with \`include_source\`, \`source_start_line\` or \`source_line_limit\`. Those options select bounded source inspection when no explicit mode is supplied. \`inspect\` is an alias for \`context\`.
 
-Source mode includes target source by default. Use \`include_source: false\` for signature/dependency details. When a source slice is truncated, follow \`next_start_line\`. One-hop delegation expansion is heuristic; inspect the selected dependency before treating it as a callee.
+Source mode includes target source by default. Use \`include_source: false\` for signature/dependency details. When a source slice is truncated, follow \`next_start_line\`. One-hop delegation expansion (including same-file local helper delegation for polyglot files) is heuristic; inspect the selected dependency before treating it as a callee.
 
-For deep-context pages, pass the returned \`continuation\` with unchanged target, workspace, configuration and budget. Restart retrieval on invalid/stale continuation. Capacity omissions are distinct from pagination.
+For deep-context pages, pass the returned \`continuation\` with unchanged target, workspace, configuration, \`max_depth\` and budget. Restart retrieval on invalid/stale continuation. Capacity omissions are distinct from pagination.
 
 ## Workflow and evidence limits
 
@@ -48,6 +50,11 @@ Boundary \`approved\` describes the evaluated static scope. \`rejected\` reports
 Language declaration support does not imply equivalent module resolution. Rust/Cargo, Ruby requires, Java source projects and C# namespaces have bounded resolver support; dynamic loaders, macros, conditional builds and missing binary metadata remain limited.
 
 Set \`workspace_path\` when selecting among repositories. If the MCP tools are unavailable or insufficient, use direct source inspection and appropriate project verification.
+
+## Resources & Prompts
+
+- **MCP Resources (initial workspace):** \`septum://domains\`, \`septum://health\`, \`septum://boundaries\`, and \`septum://domain/{name}\` provide read-only JSON snapshots for the server's initial workspace; use the 4 MCP tools with \`workspace_path\` for multi-root queries.
+- **MCP Prompts:** \`septum-pre-edit-check\` and \`septum-architecture-audit\` provide step-by-step verification playbooks.
 
 Describe the operation and observed result. Do not promise token savings, response speed, memory savings, complete caller discovery or universal language/framework coverage.
 `;

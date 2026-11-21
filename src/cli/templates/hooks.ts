@@ -12,18 +12,6 @@ export const SEPTUM_HOOKS_CONFIG = {
         ],
       },
     ],
-    "PostToolUse": [
-      {
-        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|Write|Edit|MultiEdit|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'ROOT=\"$(pwd -P)\"; for d in .gemini .claude .codex opencode .agents; do if [ -f \"$ROOT/$d/hooks/septum-post-write.sh\" ]; then exec \"$ROOT/$d/hooks/septum-post-write.sh\" \"$@\"; fi; done; exit 0'",
-            "timeout": 15,
-          },
-        ],
-      },
-    ],
   },
 };
 
@@ -32,7 +20,7 @@ export const SEPTUM_PRE_WRITE_SCRIPT = `#!/usr/bin/env sh
 # Passes supported edit payloads to the CLI before the client writes them
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
-if [ ! -f "$ROOT_DIR/.septum/septum.db" ]; then
+if [ ! -f "$ROOT_DIR/.septum/septum.db" ] && [ ! -f "$ROOT_DIR/septum.config.json" ]; then
   exit 0
 fi
 
@@ -57,12 +45,13 @@ export const SEPTUM_POST_WRITE_SCRIPT = `#!/usr/bin/env sh
 # Syncs modified AST into SQLite SSOT after file mutations
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
-if [ ! -f "$ROOT_DIR/.septum/septum.db" ]; then
+if [ ! -f "$ROOT_DIR/.septum/septum.db" ] && [ ! -f "$ROOT_DIR/septum.config.json" ]; then
   exit 0
 fi
 
 # Sync always belongs to the workspace containing this generated wrapper.
 cd "$ROOT_DIR" || exit 1
+mkdir -p "$ROOT_DIR/.septum" 2>/dev/null || true
 
 LOCK_DIR="$ROOT_DIR/.septum/sync.lock"
 PENDING_FILE="$ROOT_DIR/.septum/sync.pending"

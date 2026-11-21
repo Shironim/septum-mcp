@@ -9,6 +9,7 @@ import { SeptumDatabase } from "../../core/database/client.ts";
 import { SeptumRepository } from "../../core/database/repository.ts";
 import { ASTParserEngine } from "../../core/parser/tree-sitter.ts";
 import { ModuleResolver } from "../../core/resolver/module-resolver.ts";
+import { SeptumTelemetry } from "../../core/telemetry/telemetry.ts";
 
 interface ToolCallInfo {
   name?: string;
@@ -92,9 +93,13 @@ function blockHook(db: SeptumDatabase | null, reason: string): never {
 async function runPreWriteHook(): Promise<void> {
   const callerRoot = process.cwd();
   const workspaceRoot = path.resolve(process.env.SEPTUM_HOOK_ROOT || callerRoot);
-  const config = ConfigLoader.load(undefined, workspaceRoot);
+  const configFilePath = path.join(workspaceRoot, "septum.config.json");
+  const hasDiskConfig = fs.existsSync(configFilePath);
+  const config = hasDiskConfig
+    ? ConfigLoader.loadFromDisk(configFilePath)
+    : ConfigLoader.load(undefined, workspaceRoot);
   const dbPath = resolveDatabasePath(workspaceRoot, config.settings.db_path);
-  if (!fs.existsSync(dbPath)) {
+  if (!hasDiskConfig && !fs.existsSync(dbPath)) {
     process.exit(0);
   }
 
@@ -128,8 +133,10 @@ async function runPreWriteHook(): Promise<void> {
   const targetFile = path.relative(workspaceRoot, path.resolve(callerRoot, edit.target)).replace(/\\/g, "/");
   const content = edit.content;
 
-  const db = new SeptumDatabase(dbPath);
-  const repo = new SeptumRepository(db.raw);
+  // Zero-SQLite fast path: when septum.config.json owns policy, evaluate proposed imports
+  // in-memory without opening SQLite on every edit.
+  const db = hasDiskConfig ? null : new SeptumDatabase(dbPath);
+  const repo = db ? new SeptumRepository(db.raw) : undefined;
   const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(workspaceRoot, repo));
 
   try {
@@ -154,6 +161,20 @@ async function runPreWriteHook(): Promise<void> {
 
       if (boundaryViolations.length > 0) {
         const v = boundaryViolations[0];
+        SeptumTelemetry.recordSystemEvent({
+          level: "WARN",
+          component: "hook",
+          event: "hook_decision",
+          fields: {
+            decision: "deny",
+            rule: v.rule,
+            source_domain: v.source_domain,
+            target_domain: v.target_domain,
+            zero_sqlite: hasDiskConfig,
+          },
+          workspaceRoot,
+          emitStderr: false,
+        });
         blockHook(
           db,
           `\n[SEPTUM BOUNDARY VIOLATION - Forbidden Cross-Domain Import]\n` +
@@ -166,7 +187,21 @@ async function runPreWriteHook(): Promise<void> {
       }
     }
 
-    db.close();
+    db?.close();
+
+    SeptumTelemetry.recordSystemEvent({
+      level: "INFO",
+      component: "hook",
+      event: "hook_decision",
+      fields: {
+        decision: "allow",
+        coverage: edit.coverage,
+        evaluated: sourceDomain ? "proposed_imports" : "unmapped_domain",
+        zero_sqlite: hasDiskConfig,
+      },
+      workspaceRoot,
+      emitStderr: false,
+    });
 
     // If running in Antigravity or standard JSON IPC mode, emit allow decision
     try {
@@ -176,7 +211,7 @@ async function runPreWriteHook(): Promise<void> {
     }
     process.exit(0);
   } catch (err) {
-    db.close();
+    db?.close();
     const message = err instanceof Error ? err.message : String(err);
     console.error(`\x1b[31m[Septum Hook Error]\x1b[0m ${message}`);
     process.exit(configuredExitCode);

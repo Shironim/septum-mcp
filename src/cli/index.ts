@@ -67,6 +67,12 @@ export async function runCLI(argv: string[]): Promise<void> {
         break;
       }
 
+      case "stats": {
+        const { handleStatsCommand } = await import("./commands/stats.ts");
+        handleStatsCommand(positionals[1] ?? process.cwd(), Boolean(flags.json));
+        break;
+      }
+
       case "serve": {
         const { handleServeCommand } = await import("./commands/serve.ts");
         await handleServeCommand();
@@ -116,6 +122,7 @@ COMMANDS:
 
   Daemon & Protocol:
     serve                 Start Model Context Protocol (MCP) server over stdio
+    stats [workspace]     Summarize recent MCP tool logs (supports --json)
 
 GLOBAL FLAGS:
   -h, --help              Show this help message

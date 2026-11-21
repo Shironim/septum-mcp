@@ -1,3 +1,4 @@
+import { evaluateBoundary } from "../../core/boundary/audit.ts";
 import { BoundaryEvaluator } from "../../core/boundary/evaluator.ts";
 import { ConfigLoader, resolveDatabasePath } from "../../core/config/loader.ts";
 import { SeptumDatabase } from "../../core/database/client.ts";
@@ -66,18 +67,21 @@ export async function handleCheckCommand(
       }
     } else {
       await new IngestionPipeline(repo, workspaceRoot).run(config, { verifyContent: true });
-      const unsupported = JSON.parse(repo.getMeta("unsupported_files") || "[]") as string[];
-      if (unsupported.length > 0) {
-        throw new Error(`Cannot complete boundary audit: unsupported source files: ${unsupported.join(", ")}`);
+      const { payload } = await evaluateBoundary(evaluator, config, { scope: "all" }, repo, workspaceRoot);
+      if ("unsupported_files" in payload) {
+        throw new Error(`Cannot complete boundary audit: unsupported source files: ${payload.unsupported_files.join(", ")}`);
       }
-      const skipped = JSON.parse(repo.getMeta("skipped_files") || "[]") as {path: string}[];
-      if (skipped.length) throw new Error(`Cannot complete boundary audit: files exceed resource limits: ${skipped.map(file => file.path).join(", ")}`);
-      violations = evaluator.auditCodebase(config);
-      const incomplete = repo.getImportRelationships(workspaceRoot).filter(edge => edge.freshness !== "current" || edge.index_coverage !== "complete" || !["resolved","external"].includes(edge.resolution.status) || edge.resolution.coverage === "conditional");
-      if (incomplete.length && violations.length === 0) {
+      if ("skipped_files" in payload) {
+        throw new Error(`Cannot complete boundary audit: files exceed resource limits: ${payload.skipped_files.map(file => file.path).join(", ")}`);
+      }
+      violations = "violations" in payload ? payload.violations : [];
+      if (payload.status === "unknown") {
         const strict = options.strict || config.settings.enforcement === "strict";
-        const payload = { status: "unknown", relationships: incomplete, message: "Import resolution is incomplete; boundary approval is unknown." };
-        console.warn(options.json ? JSON.stringify(payload) : payload.message);
+        console.warn(options.json ? JSON.stringify({
+          status: payload.status,
+          ...("relationships" in payload && { relationships: payload.relationships }),
+          message: payload.message,
+        }) : payload.message);
         if (strict) process.exitCode = 1;
         return;
       }
