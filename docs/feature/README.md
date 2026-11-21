@@ -1,8 +1,8 @@
 # Septum MCP: implemented features
 
-This directory describes the source checkout reviewed on 2026-11-14. The package declares version `0.3.0` in [package.json](../../package.json). It documents implemented behavior and current limitations; it does not establish which revision an installed binary or running MCP process has loaded.
+This directory documents implemented behavior, tool contracts, and known limitations for version `0.4.0` ([package.json](../../package.json)). Installed binaries or running MCP processes may differ if built from another revision.
 
-Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. It exposes four MCP tools over stdio and CLI commands for initialization, synchronization, boundary checks and hook execution. It does not execute the application being analyzed or establish complete runtime call graphs.
+Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. The stdio server exposes four MCP tools, three resources and two prompts. CLI commands initialize and synchronize the index, audit boundaries and run hooks. The index describes static source evidence.
 
 ## Feature documents
 
@@ -15,6 +15,7 @@ Septum indexes selected source declarations, imports, domain ownership and stati
 | [Boundary](septum-boundary.md) | Proposal, workspace, domain and Git-index checks |
 | [Import resolution](import-resolution.md) | Language-specific static targets, manifests, project references and uncertainty |
 | [Hooks](septum-hooks.md) | Candidate reconstruction, pre-write decisions and background sync |
+| [MCP resources and prompts](mcp-resources-and-prompts.md) | Workspace resources, prompt arguments and JSON-RPC responses |
 | [Workspace lifecycle](workspace-lifecycle.md) | Policy, database, ingestion, watchers, resource limits and telemetry |
 
 ## Entry points
@@ -25,6 +26,7 @@ Septum indexes selected source declarations, imports, domain ownership and stati
 | --- | --- |
 | `init` | Discover/configure the workspace, scaffold selected integrations and synchronize the index; `--force` regenerates Septum-owned artifacts |
 | `sync` | Synchronize source and static slice catalog; `--json` emits metrics |
+| `stats [workspace]` | Summarize recent MCP tool logs with optional `--json` output |
 | `check` | Synchronize and audit boundaries; supports `--strict`, `--staged` and `--json` |
 | `serve` | Start the stdio MCP server |
 | `hook pre-write` | Read a supported JSON edit payload from stdin and evaluate candidate imports |
@@ -39,18 +41,19 @@ The package script named `ingest` invokes `sync`; `ingest` is not a CLI subcomma
 - An exact slice match refers to query-to-catalog matching, not execution order.
 - `unknown`, `partial`, stale-source diagnostics and omitted counts are material parts of a result.
 - A successful MCP transport response can contain an analysis rejection or incomplete result.
-- Limits differ by operation: map uses item caps, source context uses line limits, and deep context uses a serialized byte budget.
+- Map uses item limits. Source context uses line limits and can apply a byte budget to source text in automatic mode. Deep context measures the serialized tool response.
+- All four MCP tools default to `format: "text"` (compact markdown summary) and accept `format: "json"` for structured JSON payloads. MCP resources always return `application/json`.
 
-Use `workspace_path` explicitly when working across repositories. The server resolves workspace roots, awaits workspace readiness and flushes pending watcher work before dispatch. An uninitialized workspace receives a map diagnostic; other operations are rejected except domain registration. These checks do not eliminate filesystem-event latency.
+Pass `workspace_path` when calling tools across repositories. The server resolves workspace roots, awaits readiness and flushes pending watcher work before indexed queries. An uninitialized workspace can return a map diagnostic or accept domain registration. Resources use the initial workspace and have their own initialization responses.
 
 ## Language coverage
 
 [language-capabilities.ts](../../src/core/parser/language-capabilities.ts) registers partial declaration extraction for TypeScript, JavaScript, PHP, Python, Go, Rust, Java, C#, Ruby, Blade and embedded scripts in Vue/Astro/Svelte. Declaration support, import resolution, deep context and caller analysis have different coverage.
 
-Kotlin, Scala and Zig are recognized for unsupported-file diagnostics, with no registered extractor. Rust, Ruby, Java and C# have bounded import resolvers with language-specific limitations; see [import resolution](import-resolution.md). Extractor `is_external` flags do not override the resolver's final relationship evidence. Deep context accepts only `.ts`, `.mts` and `.cts` targets.
+Kotlin, Scala and Zig are recognized for unsupported-file diagnostics, with no registered extractor. Rust, Ruby, Java and C# have bounded import resolvers with language-specific limitations; see [import resolution](import-resolution.md). Extractor `is_external` flags do not override the resolver's final relationship evidence. Deep context accepts `.ts`, `.tsx`, `.mts` and `.cts` targets.
 
 ## Source and verification owners
 
 Public normalization and validation live in [schemas.ts](../../src/mcp/schemas.ts); MCP dispatch lives in [server.ts](../../src/mcp/server.ts); CLI dispatch lives in [cli/index.ts](../../src/cli/index.ts). Each feature document links its implementation and regression tests.
 
-The rewrite was checked against source, the local unit suite and targeted handler fixtures. Those checks do not certify installed-binary parity, live harness interception or every framework syntax. Known implementation gaps are documented where they affect behavior.
+Feature behavior is backed by source inspection, unit tests, and targeted handler fixtures, which do not certify installed-binary parity, live client hook interception, or every framework syntax. Known gaps are noted in each document where they affect behavior.

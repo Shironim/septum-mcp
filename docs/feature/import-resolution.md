@@ -23,9 +23,11 @@ Reads are workspace-contained, including symlink destinations. Missing inputs an
 | Java | Local source package/type lookup; nested types; selected static members/wildcards; literal Maven reactor dependencies/source roots; conventional Gradle project references | No build evaluation or complete binary classpath; external package ownership is not inferred from Maven group/artifact names; profiles/recognized conditional configuration remain conditional, custom Gradle layouts/source sets remain unsupported |
 | C# | Local namespace/type file sets; using aliases; literal csproj project references; default and explicit Compile includes/removes, including linked files | MSBuild conditions/imports and source preprocessor conditions remain conditional; package names are not treated as proof of assembly namespaces |
 
-TypeScript/JavaScript and PHP keep their existing relative/alias/workspace-package and PSR-4/manifest resolution paths. Parser declaration coverage is separate from resolver coverage; see [the feature index](README.md).
+TypeScript and JavaScript resolution handles relative imports, selected TypeScript aliases and workspace package entries. PHP resolution uses supported PSR-4 mappings and Composer metadata. Parser declaration coverage is documented separately in [the feature index](README.md).
 
 ## Manifest ownership and freshness
+
+For TypeScript and JavaScript, the nearest `tsconfig.json` supplies compiler options. Explicit `extends` can bring in parent options. A nearer empty config leaves root aliases out of scope unless it inherits them. If package lookup also finds no declaration, the import stays `unresolved` with reason `package_not_declared`.
 
 Python selects the nearest directory containing a supported manifest or lockfile. That owner supplies external dependency declarations; a nested application does not inherit unrelated root dependencies. Explicit registered roots can still contribute local source candidates. Mapping distributions such as PyJWT to `jwt` is separate from reading a lockfile's transitive package list.
 

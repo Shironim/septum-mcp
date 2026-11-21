@@ -1,6 +1,6 @@
 # Septum
 
-> **Architecture boundary guard and codebase intelligence for AI coding agents.**
+> **Local codebase intelligence and architecture boundary guard for AI coding agents.**
 
 [![Version: 0.3.0](https://img.shields.io/badge/Version-0.3.0-blue)](package.json)
 [![Runtime: Bun](https://img.shields.io/badge/Runtime-Bun-black?logo=bun)](https://bun.sh)
@@ -8,9 +8,24 @@
 [![Database: SQLite WAL](https://img.shields.io/badge/Database-SQLite%20(bun:sqlite)-003B57?logo=sqlite)](https://sqlite.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
-Septum provides architecture maps, declaration context, and boundary checks for AI coding agents before and after edits. It indexes source in a local SQLite database and evaluates configured domain dependency rules. Results describe detected relationships and analysis limits; application behavior still requires application verification.
+Septum is a local static-analysis MCP server and CLI that keeps AI coding agents oriented and within architectural boundaries. Instead of reading entire files or guessing module rules, agents query a local SQLite AST index (`.septum/septum.db`) for compact domain maps, budget-bounded symbol context, static flow slices, and deterministic import/boundary checks before and after edits.
 
-Start with the [implemented feature documentation](docs/feature/README.md), which describes the reviewed source checkout, tool behavior and known limits. Installed binaries and running MCP processes can use a different revision.
+---
+
+## What It Does
+
+- **Domain Map & Discovery (`septum_map`):** Provides a compact navigation catalog of domains, file import relationships, static entrypoints, and index health—and lets you register or update allowed/forbidden domain dependencies.
+- **Bounded Symbol Context & Impact (`septum_symbol`):** Locates declarations across the codebase, retrieves bounded implementation context (deep TypeScript reference context within `budget_bytes`, or bounded polyglot source inspection), and reports static dependents and caller hints.
+- **Static Flow Tracing (`septum_slice`):** Traces static relationship chains from supported application entrypoints (`query`, `controller_file`, `max_depth`) across layers, showing relationship evidence or `unknown` for each node.
+- **Architecture Boundary Guard (`septum_boundary`):** Validates proposed file imports against domain rules before writing (`scope: "file"`), checks staged Git changes before commit (`scope: "staged"`), and audits circular or cross-domain violations (`scope: "domain"`, `scope: "all"`).
+
+### Language Support & Analysis Scope
+
+- **AST & Declarations (`web-tree-sitter`):** Partial declaration extraction for TypeScript, JavaScript, PHP, Python, Go, Rust, Java, C#, Ruby, Blade, and embedded scripts in Vue, Astro, and Svelte. Deep context (`context_mode: "deep"`) targets `.ts`, `.tsx`, `.mts`, and `.cts` files.
+- **Entrypoint Adapters:** Selected patterns in Laravel, Symfony, MCP/CLI, NestJS, Express, Fastify, Hono, Elysia, FastAPI, Django, Flask, and Go.
+- **Import Resolution:** Supported patterns across JS/TS, PHP, Python manifests/lockfiles, Go workspaces/replacements, Rust Cargo/modules, Ruby literal requires/gems, Java source projects, and C# namespaces/project references.
+
+> **Static Analysis Scope:** Septum evaluates source files and dependency policies statically—it does not execute the target application or establish complete runtime call graphs. Application behavior still requires application tests. See [implemented features](docs/feature/README.md) and [import resolution](docs/feature/import-resolution.md) for full tool contracts and known limits.
 
 ---
 
@@ -18,7 +33,7 @@ Start with the [implemented feature documentation](docs/feature/README.md), whic
 
 ### Option 1: Standalone Binary
 
-The standalone executable bundles its runtime. The installation scripts select a release executable for the platform:
+Precompiled executables bundle the runtime:
 
 **Linux & macOS:**
 ```bash
@@ -30,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/Shironim/septum-mcp/master/install.
 irm https://raw.githubusercontent.com/Shironim/septum-mcp/master/install.ps1 | iex
 ```
 
-> **Manual Downloads:** Precompiled binaries are also available on [GitHub Releases](https://github.com/Shironim/septum-mcp/releases) for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, and `windows-x64.exe`.
+> **Manual Downloads:** Binaries are also available on [GitHub Releases](https://github.com/Shironim/septum-mcp/releases) for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, and `windows-x64.exe`.
 
 ### Option 2: Via Bun
 
@@ -40,7 +55,7 @@ If you already use [Bun](https://bun.sh):
 bun add -g @dimassetoid/septum-mcp
 ```
 
-You can invoke the package with `bunx @dimassetoid/septum-mcp <command>`.
+You can also invoke it directly with `bunx @dimassetoid/septum-mcp <command>`.
 
 ---
 
@@ -48,7 +63,7 @@ You can invoke the package with `bunx @dimassetoid/septum-mcp <command>`.
 
 ### 1. Initialize a Workspace
 
-Run `septum init` from the workspace directory you want Septum to manage:
+Run `septum init` in your project root:
 
 ```bash
 septum init
@@ -56,26 +71,20 @@ septum init
 bunx @dimassetoid/septum-mcp init
 ```
 
-Initialization:
+Initialization performs three steps:
 
-1. **Infers Project Structure:** Uses supported manifests and directory layouts to propose domains and dependency policies.
-2. **Indexes Supported Source:** Stores extracted declarations, imports and static entrypoints in the configured database; the default is `.septum/septum.db`.
-3. **Scaffolds Selected Agent Configurations:** Writes MCP configuration, skills and hook artifacts for supported environments:
+1. **Infers Project Structure:** Uses supported manifests and directory layouts to propose domain boundaries and dependency policies.
+2. **Indexes Supported Source:** Extracts declarations, imports, and static entrypoints into `.septum/septum.db`.
+3. **Scaffolds Agent Integrations:** Writes MCP configs, skills, and hook artifacts for supported clients:
    - **Antigravity** (`.gemini/`)
    - **Claude Code** (`.claude/`, `.mcp.json`, `CLAUDE.md`)
    - **Codex** (`.codex/`)
    - **Opencode** (`opencode/`, `opencode.json`)
    - **.agents Standard** (`.agents/`, `AGENTS.md`)
 
-Semantic adapters cover selected patterns in Laravel, Symfony, MCP/CLI, NestJS, Express, Fastify, Hono, Elysia, FastAPI, Django, Flask and Go. Their applicability and extraction results depend on repository syntax and configuration.
-
-Import resolution includes supported Python manifests/lockfiles, Go workspaces/replacements, Rust Cargo/modules, Ruby literal requires/gems, Java source projects and C# namespaces/project references. See [import resolution](docs/feature/import-resolution.md) for supported cases and unresolved boundaries.
-
-Detection and scaffolding do not certify every framework pattern or active client hook. See the [feature specifications and architecture contracts](docs/feature/README.md) for full scope and technical details.
-
 ### 2. Manual MCP Client Configuration (Optional)
 
-If your MCP client is not configured via `septum init`, add Septum to your MCP configuration (`.mcp.json` or `claude_desktop_config.json`):
+If your MCP client is not configured via `septum init`, add Septum to `.mcp.json` or `claude_desktop_config.json`:
 
 ```json
 {
@@ -87,7 +96,7 @@ If your MCP client is not configured via `septum init`, add Septum to your MCP c
   }
 }
 ```
-*(Or use `"command": "bunx", "args": ["@dimassetoid/septum-mcp", "serve"]` when invoking the package through Bun).*
+*(Or use `"command": "bunx", "args": ["@dimassetoid/septum-mcp", "serve"]` when invoking through Bun.)*
 
 ---
 
@@ -95,49 +104,22 @@ If your MCP client is not configured via `septum init`, add Septum to your MCP c
 
 | Command | Description |
 |---|---|
-| `septum init [--force]` | Scaffold agent integrations and build initial symbol catalog. `--force` regenerates Septum-managed configs while preserving existing database and user git hooks |
-| `septum sync [--json]` | Synchronize AST and update symbol catalog into `.septum/septum.db` (full or incremental) |
+| `septum init [--force]` | Scaffold agent integrations and build the initial symbol catalog. `--force` regenerates Septum-managed configs while preserving the existing database and user git hooks |
+| `septum sync [--json]` | Synchronize AST and update the symbol catalog in `.septum/septum.db` (full or incremental) |
 | `septum check [--strict] [--staged] [--json]` | Verify boundary rules and detect cross-domain or circular dependency violations |
-| `septum hook pre-write` | Reconstruct supported candidate edits from stdin and evaluate their imports; interception depends on the client and hook configuration |
-| `septum serve` | Start stdio Model Context Protocol (MCP) server |
+| `septum hook pre-write` | Reconstruct supported candidate edits from stdin and evaluate their imports (interception depends on client hook configuration) |
+| `septum serve` | Start the stdio Model Context Protocol (MCP) server |
 
 ---
 
-## MCP Tools
+## Documentation
 
-All tools provide structured schemas via the Model Context Protocol:
-
-- **Domain Map & Discovery (`septum_map`):**
-  - `action: "catalog"`: Navigation map (`navigation/v1`): domain/file import paths, static entrypoints, health and targeted next steps. `full` expands navigation; inspect signatures and source with `septum_symbol`.
-  - `action: "register"`: Register or update domain boundaries with allowed and forbidden dependencies.
-- **Symbol Inspection & Impact Analysis (`septum_symbol`):**
-  - `action: "locate"`: Search and find symbols across the codebase.
-  - `action: "context"` (accepts `action: "inspect"` as alias): Retrieve declaration implementation and supporting declarations (deep TypeScript context retrieval within `budget_bytes`, or bounded polyglot source inspection).
-  - `action: "impact"`: Inspect static dependent/caller hints. Imports are reported separately and do not prove executed calls or a complete runtime blast radius.
-- **Execution Flow Tracer (`septum_slice`):**
-  - Navigate static context across application layers from supported entrypoints (`query`, `controller_file`, `max_depth`). Each node shows its relationship evidence or `unknown`.
-- **Dependency & Boundary Validator (`septum_boundary`):**
-  - Validate proposed file imports against defined architectural rules (`scope: "file"`).
-  - Check staged files in the Git index before commit (`scope: "staged"`).
-  - Audit circular dependencies and boundary violations for a specific domain (`scope: "domain"`) or the entire codebase (`scope: "all"`).
-
----
-
-## Select context before editing
-
-Locate a declaration, select its returned `symbol_ref` when names are ambiguous, then request context:
-
-```json
-{"action":"context","query":"submit","file_path":"src/submit.ts","budget_bytes":65536}
-```
-
-Send these arguments to `septum_symbol` with an explicit `workspace_path` when needed. Context v4 supports `.ts/.mts/.cts` and selects supporting declarations through bounded local/import bindings. Set `context_mode: "deep"` explicitly for this policy, or `context_mode: "source"` for bounded source inspection. Omission preserves legacy automatic selection; responses identify the selected mode. TSX and complete business dependency closure are outside the deep-context policy.
-
-Read evidence scope, freshness and omissions before editing. Context inspection returns source/contracts; lookup and server freshness guards can synchronize the local index. Use impact for potential consumers and application checks for behavior. Budget, paging, source identity and recovery semantics have one owner: the [symbol context contract](docs/feature/symbol-context-contract.md). Per-action requirements are in [septum_symbol](docs/feature/septum-symbol.md).
+- [Implemented Features & Limits](docs/feature/README.md) — Tool behaviors, language coverage, and verification scope
+- [Symbol Context Contract](docs/feature/symbol-context-contract.md) — Deep context selection, byte budgets, and pagination
+- [Import Resolution](docs/feature/import-resolution.md) — Supported static targets and unresolved boundaries
 
 ---
 
 ## License
 
 [MIT](LICENSE) © shironim
-
