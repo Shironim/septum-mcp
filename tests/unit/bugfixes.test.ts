@@ -9,10 +9,10 @@ import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
-import { handleGetDomainCatalog } from "../../src/mcp/tools/get-domain-catalog.ts";
-import { handleGetSymbolImpact } from "../../src/mcp/tools/get-symbol-impact.ts";
+import { handleGetDomainCatalog } from "../../src/mcp/tools/map.ts";
+import { handleGetSymbolImpact } from "../../src/mcp/tools/symbol.ts";
 import { GoExtractor } from "../../src/core/parser/extractors/go.ts";
-import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
+import { handleCheckBoundary } from "../../src/mcp/tools/boundary.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 
 describe("Septum Bugfixes Regression Suite (SP-1 to SP-7)", () => {
@@ -162,7 +162,7 @@ describe("Septum Bugfixes Regression Suite (SP-1 to SP-7)", () => {
     it("should return found_in_index: false and diagnostic warning for unindexed/fictional symbols", () => {
       const toolRes = handleGetSymbolImpact(repo, mockConfig, {
         symbol: "FictionalNonExistentService::ghostMethod",
-      });
+       format: "json"});
 
       const body = JSON.parse(toolRes.content[0].text);
       expect(body.target_symbol).toBe("FictionalNonExistentService::ghostMethod");
@@ -207,7 +207,7 @@ describe("Septum Bugfixes Regression Suite (SP-1 to SP-7)", () => {
 
       const toolRes = handleGetSymbolImpact(repo, mockConfig, {
         symbol: "processPayment",
-      });
+       format: "json"});
 
       const body = JSON.parse(toolRes.content[0].text);
       expect(body.target_symbol).toBe("processPayment");
@@ -346,7 +346,7 @@ import (
       const res = await handleCheckBoundary(
         evaluator,
         emptyConfig,
-        { file_paths: ["src/file1.ts", "src/file2.ts"] },
+        { file_paths: ["src/file1.ts", "src/file2.ts"] , format: "json"},
         repo
       );
 

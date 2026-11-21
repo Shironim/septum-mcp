@@ -10,7 +10,7 @@ import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
 import { auditStagedFiles } from "../../src/core/boundary/staged-auditor.ts";
 import { BehavioralAnalyzer } from "../../src/core/parser/behavioral-analyzer.ts";
 import { LaravelMigrationSchemaProvider } from "../../src/core/parser/schema/providers/laravel-migration-provider.ts";
-import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
+import { handleCheckBoundary } from "../../src/mcp/tools/boundary.ts";
 import { SEPTUM_POST_WRITE_SCRIPT } from "../../src/cli/templates/hooks.ts";
 import { SEMANTIC_FINGERPRINT } from "../../src/core/parser/semantic-revision.ts";
 import { VerticalSliceTracer } from "../../src/core/resolver/vertical-slice-tracer.ts";
@@ -57,7 +57,7 @@ test("staged aliases, inherited config and target membership ignore unstaged edi
 test("proposal approval declares omitted and explicit empty imports without certifying existing imports", async () => {
   const f = fixture(); await new IngestionPipeline(f.repo, f.root).run(f.config);
   for (const supplied of [false, true]) {
-    const args = { file_path: "src/orders/Order.ts", ...(supplied ? { proposed_imports: [] } : {}) };
+    const args = { file_path: "src/orders/Order.ts", format: "json", ...(supplied ? { proposed_imports: [] } : {}) };
     const result = JSON.parse((await handleCheckBoundary(f.evaluator, f.config, args as any, f.repo, f.root)).content[0].text);
     expect(result.status).toBe("approved"); expect(result.evaluated_scope.existing_imports_checked).toBe(false);
     expect(result.evaluated_scope.proposed_imports_supplied).toBe(supplied);

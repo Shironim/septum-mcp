@@ -8,9 +8,9 @@ import {
   LocateSymbolSchema,
   TraceVerticalSliceSchema,
 } from "../../src/mcp/schemas.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
-import { handleGetSymbolImpact } from "../../src/mcp/tools/get-symbol-impact.ts";
-import { handleLocateSymbol } from "../../src/mcp/tools/locate-symbol.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
+import { handleGetSymbolImpact } from "../../src/mcp/tools/symbol.ts";
+import { handleLocateSymbol } from "../../src/mcp/tools/symbol.ts";
 
 describe("Symbol & Query Parameter Symmetry", () => {
   let db: SeptumDatabase;
@@ -86,7 +86,7 @@ describe("Symbol & Query Parameter Symmetry", () => {
   describe("Handler-Level Runtime Fallback Symmetry", () => {
     it("handleGetSymbol resolves successfully when caller provides 'query' instead of 'symbol'", () => {
       // @ts-expect-error test fallback
-      const result = handleGetSymbol(repo, mockConfig, { query: "MissingEntity" });
+      const result = handleGetSymbol(repo, mockConfig, { query: "MissingEntity" , format: "json"});
       const payload = JSON.parse(result.content[0].text);
 
       expect(payload.found).toBe(false);
@@ -96,7 +96,7 @@ describe("Symbol & Query Parameter Symmetry", () => {
 
     it("handleGetSymbolImpact resolves successfully when caller provides 'query' instead of 'symbol'", () => {
       // @ts-expect-error test fallback
-      const result = handleGetSymbolImpact(repo, mockConfig, { query: "MissingEntity" });
+      const result = handleGetSymbolImpact(repo, mockConfig, { query: "MissingEntity" , format: "json"});
       const payload = JSON.parse(result.content[0].text);
 
       expect(payload.target_symbol).toBe("MissingEntity");
@@ -106,7 +106,7 @@ describe("Symbol & Query Parameter Symmetry", () => {
     it("handleLocateSymbol resolves successfully when caller provides 'symbol' instead of 'query'", async () => {
       const result = await handleLocateSymbol(repo, mockConfig, {
         symbol: "MissingEntity",
-      });
+       format: "json"});
 
       expect(result.content[0].type).toBe("text");
       const json = JSON.parse(result.content[0].text);

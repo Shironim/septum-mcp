@@ -38,7 +38,7 @@ describe("BehavioralAnalyzer - Side-Effect & Semantic Digest", () => {
 });
 
 describe("Omni-Trigger Vertical Slices - Jobs, Commands, and Listeners", () => {
-  it("should extract Queue Job, Console Command, and Event Listener slices", () => {
+  it("should extract Queue Job, Console Command, and Event Listener slices", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "septum-omni-test-"));
     const jobsDir = path.join(tmpDir, "app", "Jobs");
     const commandsDir = path.join(tmpDir, "app", "Console", "Commands");
@@ -84,7 +84,7 @@ class SendOrderInvoiceListener {
     fs.writeFileSync(path.join(listenersDir, "SendOrderInvoiceListener.php"), listenerContent);
 
     const extractor = new LaravelSemanticExtractor(tmpDir);
-    const result = extractor.extractSlices(tmpDir);
+    const result = await extractor.extractSlices(tmpDir);
     const slices = result.slices;
 
     // Check Job Slice

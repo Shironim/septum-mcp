@@ -21,6 +21,8 @@ describe("TS-04 — Express Router Composition Extractor", () => {
 
     // 1. Direct App Fixture
     fs.mkdirSync(path.join(directAppDir, "src"), { recursive: true });
+    fs.mkdirSync(path.join(directAppDir, "src/handlers"), { recursive: true });
+    fs.writeFileSync(path.join(directAppDir, "src/handlers/auth.ts"), "export function authHandler() {}\n");
     fs.writeFileSync(
       path.join(directAppDir, "src/app.ts"),
       `
@@ -37,6 +39,9 @@ app.post("/login", rateLimiter, authHandler);
 
     // 2. Mounted App Fixture across multiple files
     fs.mkdirSync(path.join(mountedAppDir, "src/routes"), { recursive: true });
+    fs.mkdirSync(path.join(mountedAppDir, "src/controllers"), { recursive: true });
+    fs.writeFileSync(path.join(mountedAppDir, "src/controllers/user.ts"),
+      "export function getUser() {}\nexport function create() {}\n");
     fs.writeFileSync(
       path.join(mountedAppDir, "src/app.ts"),
       `

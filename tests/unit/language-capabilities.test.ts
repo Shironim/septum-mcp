@@ -9,7 +9,7 @@ import { WASM_ASSETS } from "../../src/core/parser/wasm-assets.ts";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
-import { handleGetDomainCatalog } from "../../src/mcp/tools/get-domain-catalog.ts";
+import { handleGetDomainCatalog } from "../../src/mcp/tools/map.ts";
 
 const fixtures = [
   ["sample.ts", "export function okay() {}"],
@@ -30,7 +30,7 @@ function catalog(full = false, registered = false, domain?: string) {
     const repo = new SeptumRepository(db.raw);
     const config = ConfigLoader.getDefaultConfig();
     if (registered) repo.upsertDomain("core", { root: "src", archetypes: {}, allowed_dependencies: [], forbidden_dependencies: [] });
-    return JSON.parse(handleGetDomainCatalog(repo, config, { detail_level: full ? "full" : "compact", domain, include_capabilities: true }, "/tmp").content[0].text);
+    return JSON.parse(handleGetDomainCatalog(repo, config, { detail_level: full ? "full" : "compact", domain, include_capabilities: true , format: "json"}, "/tmp").content[0].text);
   } finally { db.close(); }
 }
 

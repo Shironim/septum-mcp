@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
-import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
+import { handleCheckBoundary } from "../../src/mcp/tools/boundary.ts";
 import { CheckBoundarySchema } from "../../src/mcp/schemas.ts";
 
 describe("boundary scope contract", () => {
@@ -40,6 +40,25 @@ describe("boundary scope contract", () => {
   afterEach(() => {
     db?.close();
     if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reuses import evidence while reporting both a known violation and a stale file without imports", async () => {
+    const stalePath = "src/orders/Other.ts";
+    writeFileSync(join(root, stalePath), "export const other = 2;");
+    const collect = spyOn(repo, "getImportEvidence");
+    const resolveImport = spyOn(evaluator.getResolver(), "resolveImport");
+    try {
+      const result = await handleCheckBoundary(evaluator, config, { scope: "all" , format: "json"}, repo, root);
+      const payload = JSON.parse(result.content[0]!.text);
+      expect(payload.status).toBe("rejected");
+      expect(payload.stale_files).toContain(stalePath);
+      expect(payload.violations).toContainEqual(expect.objectContaining({ rule: "forbidden_dependency" }));
+      expect(collect).toHaveBeenCalledTimes(1);
+      expect(resolveImport).not.toHaveBeenCalled();
+    } finally {
+      collect.mockRestore();
+      resolveImport.mockRestore();
+    }
   });
 
   const invalidInputs: Array<[string, Record<string, unknown>]> = [
@@ -78,11 +97,28 @@ describe("boundary scope contract", () => {
   }
 
   it("keeps a default whole-repository audit", async () => {
-    const result = await handleCheckBoundary(evaluator, config, {}, repo, root);
+    const result = await handleCheckBoundary(evaluator, config, { format: "json" }, repo, root);
     const payload = JSON.parse(result.content[0].text);
     expect(payload.scope).toBe("all");
     expect(payload.status).toBe("rejected");
     expect(payload.violations[0].rule).toBe("forbidden_dependency");
+  });
+
+  it("reports an inconclusive audit when synchronization completed with no domain policy", async () => {
+    repo.pruneDomainsNotIn([]);
+    const result = await handleCheckBoundary(evaluator, { ...config, domains: {} }, { scope: "all" , format: "json"}, repo, root);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe("unknown");
+    expect(payload.total_domains_checked).toBe(0);
+  });
+
+  it("reports an inconclusive domain audit when the entire file index is empty", async () => {
+    repo.pruneDomainsNotIn([]);
+    repo.upsertDomain("orders", config.domains.orders!);
+    const result = await handleCheckBoundary(evaluator, config, { scope: "domain", domain: "orders" , format: "json"}, repo, root);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe("unknown");
+    expect(payload.message).toContain("0 indexed files");
   });
 
   it("rejects forbidden imports through inherited and middle-wildcard aliases", async () => {
@@ -100,7 +136,7 @@ describe("boundary scope contract", () => {
       writeFileSync(join(root, "tsconfig.json"), JSON.stringify(tsconfig));
       writeFileSync(join(root, "src/orders/Order.ts"), `import { invoice } from '${alias}';\nexport const total = invoice;\n`);
       await new IngestionPipeline(repo, root).run(config, { verifyContent: true });
-      const result = await handleCheckBoundary(evaluator, config, { scope: "all" }, repo, root);
+      const result = await handleCheckBoundary(evaluator, config, { scope: "all" , format: "json"}, repo, root);
       const payload = JSON.parse(result.content[0].text);
       expect(payload.status).toBe("rejected");
       expect(payload.violations.some((violation: any) => violation.target_domain === "billing")).toBe(true);
@@ -118,7 +154,7 @@ describe("boundary scope contract", () => {
       writeFileSync(join(root, "src/orders/Order.ts"), `import { invoice } from '${alias}';\nexport const total = invoice;\n`);
       await new IngestionPipeline(repo, root).run(config, { verifyContent: true });
       expect(Bun.spawnSync(["git", "add", "src", "tsconfig.json", "Invoice.ts"], { cwd: root }).exitCode).toBe(0);
-      for (const args of [{ scope: "all" }, { scope: "staged" }, { file_path: "src/orders/Order.ts", proposed_imports: [alias] }]) {
+      for (const args of [{ scope: "all", format: "json" }, { scope: "staged", format: "json" }, { file_path: "src/orders/Order.ts", proposed_imports: [alias], format: "json" }]) {
         const result = await handleCheckBoundary(evaluator, config, args as any, repo, root);
         expect(JSON.parse(result.content[0].text).status).toBe(expected);
       }
@@ -128,7 +164,7 @@ describe("boundary scope contract", () => {
   it("keeps an implicit file preflight and its proposed imports", async () => {
     const result = await handleCheckBoundary(evaluator, config, {
       file_path: "src/orders/Other.ts", proposed_imports: ["../billing/Invoice"],
-    }, repo, root);
+     format: "json"}, repo, root);
     const payload = JSON.parse(result.content[0].text);
     expect(payload.file).toBe("src/orders/Other.ts");
     expect(payload.status).toBe("rejected");
@@ -139,7 +175,7 @@ describe("boundary scope contract", () => {
     const result = await handleCheckBoundary(evaluator, config, {
       scope: "file", file_paths: ["src/orders/Order.ts", "src/orders/Other.ts"],
       proposed_imports: ["../billing/Invoice"],
-    }, repo, root);
+     format: "json"}, repo, root);
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe("rejected");
     expect(payload.total_checked).toBe(2);
@@ -147,7 +183,7 @@ describe("boundary scope contract", () => {
   });
 
   it("keeps implicit domain audit and canonicalizes domain case", async () => {
-    const result = await handleCheckBoundary(evaluator, config, { domain: "ORDERS" }, repo, root);
+    const result = await handleCheckBoundary(evaluator, config, { domain: "ORDERS" , format: "json"}, repo, root);
     const payload = JSON.parse(result.content[0].text);
     expect(payload.scope).toBe("domain");
     expect(payload.domain).toBe("orders");
@@ -159,7 +195,7 @@ describe("boundary scope contract", () => {
     expect(Bun.spawnSync(["git", "add", "src"], { cwd: root }).exitCode).toBe(0);
     writeFileSync(join(root, "src/orders/Order.ts"), "export const total = 1;\n");
     await new IngestionPipeline(repo, root).run(config);
-    const result = await handleCheckBoundary(evaluator, config, { scope: "staged", domain: "orders" }, repo, root);
+    const result = await handleCheckBoundary(evaluator, config, { scope: "staged", domain: "orders" , format: "json"}, repo, root);
     const payload = JSON.parse(result.content[0].text);
     expect(payload.scope).toBe("staged");
     expect(payload.status).toBe("rejected");
@@ -178,7 +214,7 @@ describe("boundary scope contract", () => {
 
   it("does not hide unsupported files when a domain filter uses different case", async () => {
     repo.setMeta("unsupported_files", '["src/orders/unsupported.rs"]');
-    const result = await handleCheckBoundary(evaluator, config, { domain: "ORDERS" }, repo, root);
+    const result = await handleCheckBoundary(evaluator, config, { domain: "ORDERS" , format: "json"}, repo, root);
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe("unknown");
     expect(payload.unsupported_files).toEqual(["src/orders/unsupported.rs"]);

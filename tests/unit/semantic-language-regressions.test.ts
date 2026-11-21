@@ -43,10 +43,10 @@ def static_path(request): pass
 @api_view(["GET"])
 def escaped_path(request): pass
 urlpatterns = [
-path(f"orders/{kind}", views.dynamic),
-path(b"bytes", views.bytes_path),
-path("sta" "tic", views.static_path),
-path("esc\\x61ped", views.escaped_path),
+path(f"orders/{kind}", dynamic),
+path(b"bytes", bytes_path),
+path("sta" "tic", static_path),
+path("esc\\x61ped", escaped_path),
 ]`],
   ] as const) {
     it(`${framework} accepts static string values and excludes interpolated/bytes route targets`, async () => {
@@ -110,7 +110,9 @@ def orders(): pass
   });
 
   it("extracts annotated FastAPI handlers with multiline parameters and nested defaults", async () => {
-    writeFileSync(join(root, "api.py"), `@app.post("/orders")
+    writeFileSync(join(root, "api.py"), `from fastapi import FastAPI
+app = FastAPI()
+@app.post("/orders")
 async def create(
     order: OrderCreate,
     user = Depends(get_current_user),
@@ -119,7 +121,7 @@ async def create(
 `);
     const slices = await new FastApiSemanticExtractor().extractSlices(root);
     expect(slices).toHaveLength(1);
-    expect(slices[0].controller_line).toBe(2);
+    expect(slices[0].controller_line).toBe(4);
     const chain = JSON.parse(slices[0].execution_chain_json);
     expect(chain.some((s: any) => s.stage === "validation" && s.symbol === "OrderCreate")).toBe(true);
     expect(chain.some((s: any) => s.stage === "guard" && s.symbol === "get_current_user")).toBe(true);
@@ -127,7 +129,8 @@ async def create(
 
   it("keeps NestJS DTO bindings across nested decorator arguments", async () => {
     mkdirSync(join(root, "src"));
-    writeFileSync(join(root, "src/orders.controller.ts"), `@Controller('orders')
+    writeFileSync(join(root, "src/orders.controller.ts"), `import { Controller, Post, Body, ValidationPipe, Headers, Get } from "@nestjs/common";
+@Controller('orders')
 export class OrdersController {
   @Post()
   create(
@@ -140,7 +143,7 @@ export class OrdersController {
     const slices = await new NestJsSemanticExtractor().extractSlices(root);
     expect(slices).toHaveLength(2);
     const create = slices.find(s => s.action_name === "create")!;
-    expect(create.controller_line).toBe(4);
+    expect(create.controller_line).toBe(5);
     expect(JSON.parse(create.execution_chain_json).some((s: any) => s.stage === "validation" && s.symbol === "CreateOrderDto")).toBe(true);
   });
 
@@ -151,7 +154,12 @@ export class OrdersController {
   ] as const) {
     it(`does not invent CRUD actions for ${base}`, async () => {
       writeFileSync(join(root, "views.py"), `class OrderViewSet(${base}):\n    serializer_class = OrderSerializer\n    queryset = Order.objects.all()\n`);
-      writeFileSync(join(root, "urls.py"), 'router.register("orders", OrderViewSet, basename="order")');
+      writeFileSync(join(root, "urls.py"), `from rest_framework.routers import SimpleRouter
+from views import OrderViewSet
+router = SimpleRouter()
+router.register("orders", OrderViewSet, basename="order")
+urlpatterns = router.urls
+`);
       const slices = await new DjangoSemanticExtractor().extractSlices(root);
       expect(slices.map(s => s.action_name)).toEqual([...actions]);
       expect(slices.some(s => s.http_method === "POST")).toBe(false);

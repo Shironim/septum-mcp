@@ -62,7 +62,8 @@ class McpSession:
         raise AssertionError(f'RPC timed out: {method}')
 
     def tool(self, name, args):
-        result = self.request('tools/call', {'name': name, 'arguments': {**args, 'workspace_path': str(self.root)}})
+        payload = {'format': 'json', **args, 'workspace_path': str(self.root)}
+        result = self.request('tools/call', {'name': name, 'arguments': payload})
         assert not result.get('isError'), result
         return json.loads(result['content'][0]['text'])
 

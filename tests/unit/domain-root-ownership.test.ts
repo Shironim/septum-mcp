@@ -6,7 +6,7 @@ import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
-import { handleRegisterDomain } from "../../src/mcp/tools/register-domain.ts";
+import { handleRegisterDomain } from "../../src/mcp/tools/map.ts";
 import { sliceIntegrityCases } from "../fixtures/slice-integrity-cases.ts";
 import { TopologyDetector } from "../../src/core/discovery/topology-detector.ts";
 import { pathToFileURL } from "node:url";

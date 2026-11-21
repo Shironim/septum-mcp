@@ -6,7 +6,7 @@ import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
 import { CallGraphTracer } from "../../src/core/resolver/call-graph-tracer.ts";
 import { VerticalSliceTracer } from "../../src/core/resolver/vertical-slice-tracer.ts";
 import { shouldIgnoreSourcePath } from "../../src/core/resources/ignore.ts";
@@ -82,7 +82,7 @@ class RecordPembayaranAction {
         {
           symbol: "PenjualanService::recordPembayaran",
           include_source: true,
-        },
+         format: "json"},
         tempDir
       );
 
@@ -302,7 +302,7 @@ class PenjualanController {
         {
           symbol: "OrderController::submit",
           include_source: true,
-        },
+         format: "json"},
         tempDir
       );
 
@@ -356,7 +356,7 @@ class PenjualanController {
         {
           symbol: "OrderHandler::Create",
           include_source: true,
-        },
+         format: "json"},
         tempDir
       );
 

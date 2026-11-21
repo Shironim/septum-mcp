@@ -7,9 +7,9 @@ import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { BoundaryEvaluator } from "../../src/core/boundary/evaluator.ts";
 import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
-import { handleRegisterDomain } from "../../src/mcp/tools/register-domain.ts";
-import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
-import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
+import { handleRegisterDomain } from "../../src/mcp/tools/map.ts";
+import { handleCheckBoundary } from "../../src/mcp/tools/boundary.ts";
+import { handleTraceVerticalSlice } from "../../src/mcp/tools/slice.ts";
 import { extractPathHint } from "../../src/mcp/server.ts";
 
 describe("Multi-Root Workspace Resolution & WorkspaceRoot Propagation", () => {
@@ -62,7 +62,6 @@ describe("Multi-Root Workspace Resolution & WorkspaceRoot Propagation", () => {
     const violations = evaluator.evaluate(
       "packages/orders/Service.php",
       ["packages/billing/PaymentService.php"],
-      undefined,
       mockConfig
     );
 
@@ -77,7 +76,7 @@ describe("Multi-Root Workspace Resolution & WorkspaceRoot Propagation", () => {
     const result = await handleCheckBoundary(
       evaluator,
       mockConfig,
-      { file_path: "packages/orders/Service.php" },
+      { file_path: "packages/orders/Service.php" , format: "json"},
       repo,
       tempWorkspace1
     );
@@ -91,7 +90,7 @@ describe("Multi-Root Workspace Resolution & WorkspaceRoot Propagation", () => {
     const result = await handleTraceVerticalSlice(
       repo,
       mockConfig,
-      { query: "GET /api/cart" },
+      { query: "GET /api/cart" , format: "json"},
       tempWorkspace2
     );
 

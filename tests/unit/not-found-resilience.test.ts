@@ -2,11 +2,11 @@ import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
-import { handleGetDomainCatalog } from "../../src/mcp/tools/get-domain-catalog.ts";
-import { handleLocateSymbol } from "../../src/mcp/tools/locate-symbol.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
-import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
-import { handleGetSymbolImpact } from "../../src/mcp/tools/get-symbol-impact.ts";
+import { handleGetDomainCatalog } from "../../src/mcp/tools/map.ts";
+import { handleLocateSymbol } from "../../src/mcp/tools/symbol.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
+import { handleTraceVerticalSlice } from "../../src/mcp/tools/slice.ts";
+import { handleGetSymbolImpact } from "../../src/mcp/tools/symbol.ts";
 
 describe("Unified Not-Found Protocol & Recovery Guidance Resilience", () => {
   let db: SeptumDatabase;
@@ -49,7 +49,7 @@ describe("Unified Not-Found Protocol & Recovery Guidance Resilience", () => {
 
   describe("handleGetDomainCatalog Not-Found Protocol", () => {
     it("returns structured JSON with found: false, suggestions, and recovery action instead of throwing", async () => {
-      const result = handleGetDomainCatalog(repo, mockConfig, { domain: "order" });
+      const result = handleGetDomainCatalog(repo, mockConfig, { domain: "order" , format: "json"});
 
       expect(result.content[0].type).toBe("text");
       const json = JSON.parse(result.content[0].text);
@@ -68,7 +68,7 @@ describe("Unified Not-Found Protocol & Recovery Guidance Resilience", () => {
     it("returns structured JSON with found: false, suggestions, and summary when symbol is not found", async () => {
       const result = await handleLocateSymbol(repo, mockConfig, {
         query: "UnknownPaymentProcessor",
-      });
+       format: "json"});
 
       expect(result.content[0].type).toBe("text");
       const json = JSON.parse(result.content[0].text);
@@ -86,7 +86,7 @@ describe("Unified Not-Found Protocol & Recovery Guidance Resilience", () => {
     it("returns structured JSON with found: false and ranked suggestions", async () => {
       const result = handleGetSymbol(repo, mockConfig, {
         symbol: "MissingOrderHandler",
-      });
+       format: "json"});
 
       expect(result.content[0].type).toBe("text");
       const json = JSON.parse(result.content[0].text);
@@ -102,7 +102,7 @@ describe("Unified Not-Found Protocol & Recovery Guidance Resilience", () => {
     it("returns structured JSON with found: false and alternatives list", async () => {
       const result = await handleTraceVerticalSlice(repo, mockConfig, {
         query: "POST /unregistered/route",
-      });
+       format: "json"});
 
       expect(result.content[0].type).toBe("text");
       const json = JSON.parse(result.content[0].text);
@@ -119,7 +119,7 @@ describe("Unified Not-Found Protocol & Recovery Guidance Resilience", () => {
     it("returns structured JSON with found_in_index: false and zero dependents", async () => {
       const result = handleGetSymbolImpact(repo, mockConfig, {
         symbol: "GhostSymbol",
-      });
+       format: "json"});
 
       expect(result.content[0].type).toBe("text");
       const json = JSON.parse(result.content[0].text);

@@ -4,8 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
-import { handleLocateSymbol } from "../../src/mcp/tools/locate-symbol.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
+import { handleLocateSymbol } from "../../src/mcp/tools/symbol.ts";
 import { CallGraphTracer } from "../../src/core/resolver/call-graph-tracer.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
 
@@ -121,7 +121,7 @@ class OrderController {
     const res = await handleLocateSymbol(repo, mockConfig, {
       query: "OrderController::submit",
       workspace_path: tmpDir,
-    });
+     format: "json"});
 
     const parsed = JSON.parse(res.content[0].text);
     expect(parsed.found).toBe(true);

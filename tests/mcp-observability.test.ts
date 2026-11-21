@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SeptumTelemetry } from "../src/core/telemetry/telemetry.ts";
+
+import { summarizeToolCalls } from "../src/core/telemetry/summary.ts";
 
 describe("SeptumTelemetry Engine", () => {
   const testDir = join(import.meta.dir, "temp-telemetry-test");
@@ -144,4 +146,89 @@ describe("SeptumTelemetry Engine", () => {
     expect(long.sample_preview?.length).toBeLessThan(400);
     expect(long.sample_preview).toContain("chars omitted");
   });
+  it("measures the final wire result and interprets its explicit outcome", () => {
+    const response = { content: [{ type: "text", text: "é\nsource-preview-secret" }], metadata: { status: "NOT_INDEXED" } };
+    SeptumTelemetry.recordToolResponse({
+      tool: "septum_map", stage: "workspace", duration_ms: 3, input: { query: "input-secret" },
+    }, response, testDir, false);
+    const line = readFileSync(logFile, "utf8");
+    expect(line).not.toContain("secret");
+    expect(JSON.parse(line)).toMatchObject({
+      outcome: "NOT_INDEXED", status: "success",
+      metrics: {
+        bytes_out: Buffer.byteLength(response.content[0]!.text),
+        lines_out: 2,
+        response_bytes: Buffer.byteLength(JSON.stringify(response)),
+      },
+    });
+  });
+
+  it("prefers explicit exception and result codes over request stage labels", () => {
+    const base = { tool: "septum_boundary", duration_ms: 1, input: {} };
+    SeptumTelemetry.recordToolResponse({ ...base, stage: "workspace", error: { code: "SERVER_BUSY", message: "busy" } },
+      { isError: true }, testDir);
+    SeptumTelemetry.recordToolResponse({ ...base, stage: "execution" },
+      { isError: true, metadata: { code: "BUDGET_RESPONSE_TOO_LARGE" } }, testDir);
+    const codes = readFileSync(logFile, "utf8").trim().split("\n").map(line => JSON.parse(line).error.code);
+    expect(codes).toEqual(["SERVER_BUSY", "BUDGET_RESPONSE_TOO_LARGE"]);
+  });
+
+  it("bounds oversized debug events and rotates before an append crosses the limit", () => {
+    process.env.SEPTUM_DEBUG_TELEMETRY = "1";
+    writeFileSync(logFile, "X".repeat(SeptumTelemetry.MAX_LOG_SIZE_BYTES - 8));
+    SeptumTelemetry.recordToolCall({
+      event: "tool_call_completed", tool: "septum_map", duration_ms: 1,
+      status: "success", input: { query: "🌐".repeat(10000), action: "catalog" },
+    }, testDir);
+    expect(statSync(logFile + ".1").size).toBe(SeptumTelemetry.MAX_LOG_SIZE_BYTES - 8);
+    expect(statSync(logFile).size).toBeLessThanOrEqual(SeptumTelemetry.MAX_EVENT_BYTES);
+    expect(JSON.parse(readFileSync(logFile, "utf8")).input).toEqual({ action: "catalog" });
+  });
+
+  it("summarizes current and rotated tool events, skipping older missing measurements and corrupt lines", () => {
+    const older = { event: "tool_call_completed", status: "success", tool: "septum_map", action: "catalog", duration_ms: 1 };
+    const recent = { event: "tool_call_failed", status: "error", tool: "septum_map", action: "catalog",
+      duration_ms: 4, trace_id: "recent", metrics: { response_bytes: 32 }, error: { code: "TOOL_ERROR", message: "private" } };
+    writeFileSync(logFile + ".1", JSON.stringify(older) + "\n" + JSON.stringify(recent) + "\n");
+    writeFileSync(logFile, JSON.stringify(recent) + "\n{torn\n");
+    const summary = summarizeToolCalls(testDir);
+    expect(summary).toMatchObject({
+      calls: 2, errors: 1,
+      duration_ms: { samples: 2, p50: 1, p95: 4 },
+      response_bytes: { samples: 1, p50: 32, p95: 32 },
+      tools: { septum_map: { actions: { catalog: { calls: 2, errors: 1 } } } },
+      recent_errors: [{ code: "TOOL_ERROR", trace_id: "recent" }],
+    });
+    expect(JSON.stringify(summary)).not.toContain("private");
+  });
+
+  it("propagates trace_id via AsyncLocalStorage to recordSystemEvent without breaking summarizeToolCalls", async () => {
+    await SeptumTelemetry.withTrace("trace-abc-123", async () => {
+      await Promise.resolve();
+      SeptumTelemetry.recordSystemEvent({
+        level: "INFO",
+        component: "ingestion",
+        event: "ingestion_completed",
+        fields: { state_previous: "running", state_current: "complete", files_updated: 3 },
+        emitStderr: false,
+      });
+    }, testDir);
+
+    const logContent = readFileSync(SeptumTelemetry.getLogPath(testDir), "utf-8");
+    const lines = logContent.trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      severity_text: "INFO",
+      trace_id: "trace-abc-123",
+      component: "ingestion",
+      event: "ingestion_completed",
+      state_previous: "running",
+      state_current: "complete",
+      files_updated: 3,
+    });
+
+    const summary = summarizeToolCalls(testDir);
+    expect(summary.calls).toBe(0);
+  });
+
 });

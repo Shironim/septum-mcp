@@ -1,3 +1,4 @@
+import { parseToolRequest } from "../../src/mcp/tool-catalog.ts";
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -14,7 +15,7 @@ import { BoundaryEvaluator } from "../../src/core/boundary/evaluator.ts";
 import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
 import { auditStagedFiles } from "../../src/core/boundary/staged-auditor.ts";
 import { handleSymbolTool } from "../../src/mcp/tools/symbol.ts";
-import { SymbolToolSchema, CheckBoundarySchema, parseToolRequest } from "../../src/mcp/schemas.ts";
+import { SymbolToolSchema, CheckBoundarySchema } from "../../src/mcp/schemas.ts";
 import { getOperationCapabilities } from "../../src/core/parser/language-capabilities.ts";
 import { normalizeHookEdit } from "../../src/cli/hook-payload.ts";
 
@@ -121,7 +122,7 @@ test("explicit context modes select their engine and reject contradictory option
     const repo = new SeptumRepository(db.raw); await new IngestionPipeline(repo, root).run(config);
     for (const mode of ["deep", "source"] as const) {
       const args = SymbolToolSchema.parse({ query: "target", context_mode: mode });
-      const response = await handleSymbolTool(repo, config, args, undefined, root);
+      const response = await handleSymbolTool(repo, config, { ...args, format: "json" as const }, undefined, root);
       expect(JSON.parse(response.content[0]!.text).context_mode).toBe(mode);
     }
     expect(SymbolToolSchema.safeParse({ action: "context", context_mode: "deep", include_source: false }).success).toBe(false);
@@ -137,7 +138,7 @@ test("boundary canonicalization retains whether imports were supplied and their 
 test("language capability separates declarations from resolver and dispatch support", () => {
   expect(getOperationCapabilities("main.rs")).toMatchObject({ declarations: "partial", import_resolution: "partial", deep_context: "unsupported", runtime_dispatch: "unverified" });
   expect(getOperationCapabilities("main.ts").deep_context).toBe("bounded_references");
-  expect(getOperationCapabilities("main.tsx").deep_context).toBe("unsupported");
+  expect(getOperationCapabilities("main.tsx").deep_context).toBe("bounded_references");
   expect(getOperationCapabilities("main.kt").declarations).toBe("unsupported");
 });
 

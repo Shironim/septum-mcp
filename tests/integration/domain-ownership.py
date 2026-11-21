@@ -7,14 +7,27 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from importlib.util import module_from_spec, spec_from_file_location
 
 sys.dont_write_bytecode = True
+from mcp_fixture import McpSession as RecordedSession, snapshot
+
 PROJECT = Path(__file__).resolve().parents[2]
-spec = spec_from_file_location('slice_integrity', PROJECT / 'tests/integration/slice-integrity.py')
-integrity = module_from_spec(spec)
-spec.loader.exec_module(integrity)
-RecordedSession = integrity.RecordedSession
+
+
+def manifests(fixture):
+    framework = fixture['framework']
+    if framework in ('nestjs', 'express', 'fastify', 'hono', 'elysia'):
+        package = '@nestjs/core' if framework == 'nestjs' else framework
+        return {'package.json': json.dumps({'dependencies': {package: '*'}})}
+    if framework in ('fastapi', 'django', 'flask'):
+        return {'requirements.txt': framework + '\n'}
+    if fixture['adapter'] == 'golang':
+        return {'go.mod': 'module fixture\n\ngo 1.22\n'}
+    if framework == 'laravel':
+        return {'artisan': '<?php\n', 'composer.json': json.dumps({'require': {'laravel/framework': '*'}, 'autoload': {'psr-4': {'App\\': 'app/'}}})}
+    if framework == 'symfony':
+        return {'composer.json': json.dumps({'require': {'symfony/framework-bundle': '*'}})}
+    return {}
 
 
 def state(root):
@@ -31,11 +44,11 @@ def rejected(client, tool, arguments):
 
 
 def run(command, fixture, root):
-    for file, source in {**integrity.manifests(fixture), **fixture['files']}.items():
+    for file, source in {**manifests(fixture), **fixture['files']}.items():
         target = root / file
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source)
-    record = {'framework': fixture['framework'], 'requests': [], 'fixture': integrity.snapshot(root)}
+    record = {'framework': fixture['framework'], 'requests': [], 'fixture': snapshot(root)}
     with RecordedSession(command, root, record['requests']) as client:
         client.tool('septum_map', {'action': 'register', 'domain': 'root', 'root': '.',
                     'forbidden_dependencies': ['blocked'], 'ingest_now': True})

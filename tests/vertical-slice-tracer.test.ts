@@ -6,7 +6,7 @@ import type { VerticalSliceRecord } from "../src/types/index.ts";
 describe("LaravelSemanticExtractor Route Parser", () => {
   const extractor = new LaravelSemanticExtractor("/tmp/mock-project");
 
-  test("parses Route::post with controller array and route name", () => {
+  test("parses Route::post with controller array and route name", async () => {
     const routeContent = `
       <?php
       use Illuminate\\Support\\Facades\\Route;
@@ -15,7 +15,7 @@ describe("LaravelSemanticExtractor Route Parser", () => {
       Route::post('/orders/{id}/status', [OrderController::class, 'updateStatus'])->name('orders.update_status');
     `;
 
-    const parsed = extractor.parseRoutesContent(routeContent);
+    const parsed = await extractor.parseRoutesContent(routeContent);
     expect(parsed.length).toBe(1);
     expect(parsed[0].httpMethod).toBe("POST");
     expect(parsed[0].uri).toBe("/orders/{id}/status");
@@ -24,12 +24,12 @@ describe("LaravelSemanticExtractor Route Parser", () => {
     expect(parsed[0].routeName).toBe("orders.update_status");
   });
 
-  test("parses Route::resource and expands RESTful actions", () => {
+  test("parses Route::resource and expands RESTful actions", async () => {
     const routeContent = `
       Route::resource('orders', OrderController::class);
     `;
 
-    const parsed = extractor.parseRoutesContent(routeContent);
+    const parsed = await extractor.parseRoutesContent(routeContent);
     expect(parsed.length).toBe(7);
     const showRoute = parsed.find((r) => r.actionName === "show");
     expect(showRoute).toBeDefined();
@@ -127,6 +127,20 @@ describe("VerticalSliceTracer End-to-End Tracing", () => {
     expect(multiple.trace("/users/{id}").diagnostics).toContain("ambiguous_target");
     expect(multiple.trace("/users/{id}").entrypoint).toBeUndefined();
     expect(multiple.trace("/users/{id}").alternatives?.length).toBe(2);
+  });
+
+  test("matches an unrestricted method on the root path and preserves ambiguity", () => {
+    const wildcard = { ...mockSlice, http_method: "ANY", route_uri: "/" };
+    const options = { ...wildcard, id: 2, http_method: "OPTIONS", controller_class: "OptionsController" };
+    const rootTracer = new VerticalSliceTracer({ getAllVerticalSlices: () => [wildcard, options] } as any);
+
+    expect(rootTracer.trace("ANY /").confidence).toBe("exact");
+    const post = rootTracer.trace("POST /");
+    expect(post.confidence).toBe("inferred");
+    expect(post.entrypoint?.method).toBe("ANY");
+    const ambiguous = rootTracer.trace("OPTIONS /");
+    expect(ambiguous.diagnostics).toContain("ambiguous_target");
+    expect(ambiguous.alternatives?.map(candidate => candidate.method).sort()).toEqual(["ANY", "OPTIONS"]);
   });
 
   test("resolves vertical slice via Controller@action syntax", () => {

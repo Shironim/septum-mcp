@@ -154,11 +154,11 @@ class Penjualan
     } catch {}
   });
 
-  it("should extract full execution chain with [ACTION], [SERVICE], and Inertia props", () => {
+  it("should extract full execution chain with [ACTION], [SERVICE], and Inertia props", async () => {
     const extractor = new LaravelSemanticExtractor(tempDir);
     expect(extractor.canHandle(tempDir, "laravel")).toBe(true);
 
-    const slices = extractor.extractSlices(tempDir);
+    const slices = await extractor.extractSlices(tempDir);
     expect(slices.length).toBeGreaterThanOrEqual(2);
 
     const storeSlice = slices.find((s) => s.http_method === "POST" && s.route_uri === "/penjualan");
@@ -194,9 +194,9 @@ class Penjualan
     expect(egressNode?.payload_props).toContain("stats");
   });
 
-  it("should trace vertical slice end-to-end and provide slice compatibility alias", () => {
+  it("should trace vertical slice end-to-end and provide slice compatibility alias", async () => {
     const extractor = new LaravelSemanticExtractor(tempDir);
-    const slices = extractor.extractSlices(tempDir);
+    const slices = await extractor.extractSlices(tempDir);
     for (const s of slices) {
       repo.upsertVerticalSlice(s);
     }

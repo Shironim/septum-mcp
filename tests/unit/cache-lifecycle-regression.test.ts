@@ -6,8 +6,8 @@ import { ConfigLoader } from "../../src/core/config/loader.ts";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
-import { handleRegisterDomain } from "../../src/mcp/tools/register-domain.ts";
-import { handleGetDomainCatalog } from "../../src/mcp/tools/get-domain-catalog.ts";
+import { handleRegisterDomain } from "../../src/mcp/tools/map.ts";
+import { handleGetDomainCatalog } from "../../src/mcp/tools/map.ts";
 import { PARSER_FINGERPRINT } from "../../src/core/parser/language-capabilities.ts";
 import { SEMANTIC_FINGERPRINT } from "../../src/core/parser/semantic-revision.ts";
 
@@ -74,7 +74,7 @@ describe("index cache lifecycle", () => {
     const file = repo.getFileByPath("src/a.ts")!;
     expect(file.archetype).toBe("unknown");
     await handleRegisterDomain(repo, config, { domain: "app", root: "src", archetypes: { controller: "src/*.ts" }, ingest_now: true }, root);
-    const catalog = handleGetDomainCatalog(repo, config, { domain: "app", archetype_filter: "controller" }, root);
+    const catalog = handleGetDomainCatalog(repo, config, { domain: "app", archetype_filter: "controller" , format: "json"}, root);
     expect(JSON.parse(catalog.content[0].text).files.map((entry: { path: string }) => entry.path)).toEqual(["src/a.ts"]);
     expect(repo.getSymbolsByFileId(file.id).map(symbol => symbol.name)).toContain("alpha");
     expect((await pipeline.run(config, { verifyContent: true })).files_updated).toBe(0);

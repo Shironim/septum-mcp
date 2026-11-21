@@ -77,7 +77,7 @@ def run(command, root):
         return result
 
     def tool(args, expected_error=False):
-        result = request('tools/call', {'name': 'septum_symbol', 'arguments': {**args, 'workspace_path': str(root)}})
+        result = request('tools/call', {'name': 'septum_symbol', 'arguments': {'format': 'json', **args, 'workspace_path': str(root)}})
         assert bool(result.get('isError')) == expected_error, result
         if expected_error:
             return result
@@ -107,7 +107,7 @@ def run(command, root):
             ('septum_boundary', {'scope': 'all'}, {'violations', 'total_violations'}),
         ]
         for name, arguments, required in probes:
-            result = request('tools/call', {'name': name, 'arguments': {**arguments, 'workspace_path': str(root)}})
+            result = request('tools/call', {'name': name, 'arguments': {'format': 'json', **arguments, 'workspace_path': str(root)}})
             assert not result.get('isError'), result
             assert len(result.get('content', [])) > 0, result
             analytical = json.loads(result['content'][0]['text'])
@@ -157,13 +157,22 @@ def run(command, root):
         for action in ['inspect', 'context']:
             details = tool({'action': action, 'symbol_ref': reference, 'include_source': False})
             assert 'source_slice' not in details and 'items' not in details, details
-        # This config is outside source inventory and changes interpretation only.
+        # The nearest config shadows the root alias without changing any source file.
         nested = root / 'src/tsconfig.json'
         nested.write_text('{}\n')
         assert tool({**base, 'continuation': first['continuation']})['status'] == 'stale_continuation'
         partial = tool({'action': 'context', 'symbol_ref': reference})
         assert partial['freshness'] == 'current' and partial['completeness'] == 'partial'
-        assert any('nested_tsconfig' in item.get('detail', '') for item in partial['items'])
+        alias_edges = [item['relationship'] for item in partial['items']
+                       if item['kind'] == 'relationship'
+                       and item['relationship']['resolution']['source']['target'] == '@rules/validator']
+        assert len(alias_edges) == 1, partial
+        resolution = alias_edges[0]['resolution']
+        assert (alias_edges[0]['freshness'], resolution['status'], resolution['reason'], resolution['targets']) == (
+            'current', 'unresolved', 'package_not_declared', []), alias_edges[0]
+        assert any(item['kind'] == 'diagnostic' and item['reason'] == 'referenced_import_not_expanded'
+                   and item['file_path'] == 'src/target.ts' and '@rules/validator' in item['detail']
+                   for item in partial['items']), partial
         assert not any(item.get('name') == 'validate' for item in partial['items'])
         nested.unlink()
         assert tool({'action': 'context', 'symbol_ref': reference})['items'] == full['items']

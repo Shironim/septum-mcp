@@ -1,3 +1,5 @@
+import { RESOURCE_LIMITS } from "../../src/core/resources/limits.ts";
+import { waitForSharedWork } from "../../src/core/resources/work-queue.ts";
 import {describe,expect,it} from 'bun:test';
 import {mkdtempSync,mkdirSync,writeFileSync,rmSync,symlinkSync} from 'node:fs';
 import {tmpdir,homedir} from 'node:os';
@@ -15,4 +17,40 @@ describe('workspace admission and leases',()=>{
  it('keeps explicit unmarked directories exact, canonicalizes aliases and rejects broad roots',()=>{
   const f=fixture();try{const plain=join(f.parent,'plain');mkdirSync(plain);const alias=join(f.parent,'alias');symlinkSync(plain,alias);expect(resolveServerWorkspace({workspacePath:plain})).toBe(plain);expect(resolveServerWorkspace({workspacePath:alias})).toBe(plain);expect(()=>resolveServerWorkspace({workspacePath:homedir()})).toThrow();expect(()=>resolveServerWorkspace({workspacePath:'/'})).toThrow();expect(()=>resolveServerWorkspace({initial:true,cwd:plain})).toThrow('SEPTUM_WORKSPACE_ROOT');}finally{rmSync(f.parent,{recursive:true,force:true});}
  });
+});
+
+it("a cancelled request detaches while another request can finish waiting for the same workspace work", async () => {
+  const controller = new AbortController();
+  const shared = Promise.withResolvers<string>();
+  const first = waitForSharedWork(shared.promise, controller.signal);
+  const second = waitForSharedWork(shared.promise, new AbortController().signal);
+  controller.abort(new Error("client cancelled"));
+  await expect(first).rejects.toThrow("client cancelled");
+  shared.resolve("index ready");
+  await expect(second).resolves.toBe("index ready");
+});
+
+it("limits requests waiting for workspace readiness and recovers admission after cancellation", async () => {
+  const f = fixture();
+  const manager = new WorkspaceManager();
+  const lease = manager.acquire(f.roots[0]!);
+  const readiness = Promise.withResolvers<void>();
+  const waitingContext = { ...lease.context, ready: readiness.promise };
+  const cancellation = new AbortController();
+  const waiting = Array.from({ length: RESOURCE_LIMITS.maxQueuePending }, () =>
+    manager.runInWorkspace(waitingContext, async () => {}, { signal: cancellation.signal }));
+  const settled = Promise.allSettled(waiting);
+  try {
+    await expect(manager.runInWorkspace(waitingContext, async () => {})).rejects.toThrow("workspace request limit");
+    cancellation.abort();
+    expect((await settled).every(result => result.status === "rejected")).toBe(true);
+    await expect(manager.runInWorkspace(lease.context, async () => "admitted")).resolves.toBe("admitted");
+  } finally {
+    cancellation.abort();
+    await settled;
+    readiness.resolve();
+    lease.release();
+    await manager.close();
+    rmSync(f.parent, { recursive: true, force: true });
+  }
 });

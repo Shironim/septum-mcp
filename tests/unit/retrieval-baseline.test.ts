@@ -49,7 +49,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
   afterEach(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
 
   async function tool(args: Parameters<typeof handleSymbolTool>[2]) {
-    return JSON.parse((await handleSymbolTool(repo, config, args, undefined, root)).content[0]!.text);
+    return JSON.parse((await handleSymbolTool(repo, config, { ...args, format: "json" }, undefined, root)).content[0]!.text);
   }
   function semanticSnapshot(repository: SeptumRepository) {
     return {
@@ -131,7 +131,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
   it("returns the required implementation and direct import declarations without caller or decoy source", async () => {
     await pipeline.run(config);
     const args = SymbolToolSchema.parse({ action: "context", query: "submit", file_path: "src/submit.ts" });
-    const result = await handleSymbolTool(repo, config, args, undefined, root);
+    const result = await handleSymbolTool(repo, config, { ...args, format: "json" }, undefined, root);
     const context = JSON.parse(result.content[0]!.text);
     expect(context.status).toBe("success");
     expect(context.freshness).toBe("current");
@@ -213,7 +213,10 @@ describe("TypeScript selective retrieval manual oracle", () => {
     const deep = await tool({ action: "context", query: "deep0" });
     expect(deep.completeness).toBe("partial");
     expect(deep.items.some((i: any) => i.reason === "dependency_depth_or_binding_limit")).toBe(true);
-    expect(deep.items.filter((i: any) => i.kind === "source").map((i: any) => i.name)).toEqual(["deep0", "deep1", "deep2", "deep3"]);
+    expect(deep.items.filter((i: any) => i.kind === "source").map((i: any) => i.name)).toEqual(["deep0", "deep1", "deep2"]);
+    const deep3 = await tool({ action: "context", query: "deep0", max_depth: 3 });
+    expect(deep3.completeness).toBe("partial");
+    expect(deep3.items.filter((i: any) => i.kind === "source").map((i: any) => i.name)).toEqual(["deep0", "deep1", "deep2", "deep3"]);
   });
 
   it("accounts for complete response bytes and traverses pages without dropping or duplicating items", async () => {
@@ -225,7 +228,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
     const snapshots: string[] = [];
     let pages = 0;
     do {
-      const result = await handleSymbolTool(repo, config, SymbolToolSchema.parse({ ...base, continuation }), undefined, root);
+      const result = await handleSymbolTool(repo, config, SymbolToolSchema.parse({ ...base, continuation, format: "json" }), undefined, root);
       const page = JSON.parse(result.content[0]!.text);
       expect(["success", "partial"]).toContain(page.status);
       expect(page.output_bytes).toBe(Buffer.byteLength(JSON.stringify(result), "utf8"));
@@ -272,7 +275,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
     put("src/large.ts", `export function huge() { return "${"😀".repeat(2000)}"; }\n`);
     await pipeline.run(config);
     const args = SymbolToolSchema.parse({ action: "context", query: "huge", budget_bytes: 3500 });
-    const result = await handleSymbolTool(repo, config, args, undefined, root);
+    const result = await handleSymbolTool(repo, config, { ...args, format: "json" }, undefined, root);
     const oversized = JSON.parse(result.content[0]!.text);
     expect(oversized.status).toBe("partial");
     expect(oversized.items[0].fragment.start_utf16).toBe(0);
@@ -494,11 +497,11 @@ describe("TypeScript selective retrieval manual oracle", () => {
     put("src/normal.ts", 'export function normal() { return "ordinary files"; }');
     put("src/entries.ts", 'import { forward } from "./forward";\nexport function fixed() { return forward({}); }\nexport function dynamic(options: { domainOnly?: boolean }) { return forward(options); }\nexport function both() { return [forward({}), forward({ domainOnly: true })]; }');
     await pipeline.run(config);
-    const fixed = await tool({ action: "context", query: "fixed", budget_bytes: 65536 });
+    const fixed = await tool({ action: "context", query: "fixed", budget_bytes: 65536, max_depth: 3 });
     expect(fixed.items.filter((i: any) => i.kind === "source").map((i: any) => i.name).sort()).toEqual(["choose", "fixed", "forward", "normal"]);
     expect(fixed.items.some((i: any) => i.kind === "selection" && i.pruned_branches === 1)).toBe(true);
     for (const query of ["dynamic", "both"]) {
-      const ctx = await tool({ action: "context", query, budget_bytes: 65536 });
+      const ctx = await tool({ action: "context", query, budget_bytes: 65536, max_depth: 3 });
       const names = ctx.items.filter((i: any) => i.kind === "source").map((i: any) => i.name);
       expect(names).toContain("expensive");
       expect(names).toContain("normal");
@@ -547,7 +550,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
     let snapshot: string | undefined;
     let count = 0;
     do {
-      const result = await handleSymbolTool(repo, config, { ...base, continuation }, undefined, root);
+      const result = await handleSymbolTool(repo, config, { ...base, continuation, format: "json" }, undefined, root);
       const page = JSON.parse(result.content[0]!.text);
       expect(["partial", "success"]).toContain(page.status);
       if (page.accounting.source_offset > 0) expect(page.completeness).toBe("partial");

@@ -187,11 +187,11 @@ describe("Septum Version & Update Notification Suite", () => {
         action: "register",
         domain: "billing",
         root: "src/billing",
-      });
+       format: "json"});
 
       const result = await handleMapTool(repo, config, {
         action: "catalog",
-      });
+       format: "json"});
 
       expect(result.content).toBeDefined();
       expect(result.runtime_version).toBeDefined();

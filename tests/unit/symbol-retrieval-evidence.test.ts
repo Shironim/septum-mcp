@@ -7,8 +7,8 @@ import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 import { handleSymbolTool } from "../../src/mcp/tools/symbol.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
-import { handleGetSymbolImpact } from "../../src/mcp/tools/get-symbol-impact.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
+import { handleGetSymbolImpact } from "../../src/mcp/tools/symbol.ts";
 import { SymbolToolSchema } from "../../src/mcp/schemas.ts";
 
 describe("symbol retrieval evidence parity", () => {
@@ -27,7 +27,7 @@ describe("symbol retrieval evidence parity", () => {
   afterEach(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
   async function tool(args: Record<string, unknown>, jit?: IngestionPipeline) {
     return JSON.parse((await handleSymbolTool(repo, config, SymbolToolSchema.parse({
-      ...(args.action === "inspect" ? { include_source: true } : {}), ...args,
+      ...(args.action === "inspect" ? { include_source: true } : {}), format: "json", ...args,
     }), jit, root)).content[0]!.text);
   }
 
@@ -45,7 +45,7 @@ describe("symbol retrieval evidence parity", () => {
       expect(result.retrieval.completeness).toBe("partial");
       expect(result.retrieval.analysis_freshness).toBe("unavailable");
     }
-    const raw = await handleSymbolTool(repo, config, SymbolToolSchema.parse({ action: "locate", symbol_ref: located.symbol_ref }), undefined, root);
+    const raw = await handleSymbolTool(repo, config, SymbolToolSchema.parse({ action: "locate", symbol_ref: located.symbol_ref, format: "json" }), undefined, root);
     expect((raw as any).metadata.retrieval).toEqual(JSON.parse(raw.content[0]!.text).retrieval);
     expect(await tool({ action: "inspect", symbol_ref: located.symbol_ref, include_source: true })).toEqual(inspected);
   });

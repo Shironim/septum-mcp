@@ -64,7 +64,7 @@ describe("Bugfix Verifications: 4 Root Cause Fixes", () => {
         query: "cleanLiteral",
       };
       const parsedArgs = SymbolToolSchema.parse(rawAmbiguousArgs);
-      const ambiguousResult = await handleSymbolTool(repo, config, parsedArgs);
+      const ambiguousResult = await handleSymbolTool(repo, config, { ...parsedArgs, format: "json" as const });
       const parsedAmbiguous = JSON.parse(ambiguousResult.content[0].text);
       expect(parsedAmbiguous.status).toBe("ambiguous");
       expect(parsedAmbiguous.candidates.length).toBe(2);
@@ -79,7 +79,7 @@ describe("Bugfix Verifications: 4 Root Cause Fixes", () => {
         action: "impact",
         symbol_ref: candidateA.symbol_ref,
       });
-      const resolvedWithRefResult = await handleSymbolTool(repo, config, schemaParsedWithRef);
+      const resolvedWithRefResult = await handleSymbolTool(repo, config, { ...schemaParsedWithRef, format: "json" as const });
       const parsedRefResult = JSON.parse(resolvedWithRefResult.content[0].text);
       expect(parsedRefResult.target_symbol).toBe("cleanLiteral");
       expect(parsedRefResult.found_in_index).toBe(true);
@@ -92,7 +92,7 @@ describe("Bugfix Verifications: 4 Root Cause Fixes", () => {
         action: "impact",
         symbol_ref: candidateB.symbol_ref,
       });
-      const resultB = await handleSymbolTool(repo, config, schemaParsedB);
+      const resultB = await handleSymbolTool(repo, config, { ...schemaParsedB, format: "json" as const });
       const parsedB = JSON.parse(resultB.content[0].text);
       expect(parsedB.impact_summary.total_dependents).toBe(0);
       expect(parsedB.inbound_callers.length).toBe(0);
@@ -102,7 +102,7 @@ describe("Bugfix Verifications: 4 Root Cause Fixes", () => {
         action: "impact",
         query: "cleanLiteral",
         file_path: "src\\core\\parser\\a.ts",
-      }));
+       format: "json"}));
       const parsedWinResult = JSON.parse(resolvedWindowsResult.content[0].text);
       expect(parsedWinResult.found_in_index).toBe(true);
       expect(parsedWinResult.impact_summary.total_dependents).toBe(1);
@@ -112,7 +112,7 @@ describe("Bugfix Verifications: 4 Root Cause Fixes", () => {
         action: "impact",
         query: "cleanLiteral",
         file_path: "src/core/parser/nonexistent.ts",
-      }));
+       format: "json"}));
       const parsedNonExistent = JSON.parse(nonExistentResult.content[0].text);
       expect(parsedNonExistent.found_in_index).toBe(false);
       expect(parsedNonExistent.impact_summary.total_dependents).toBe(0);

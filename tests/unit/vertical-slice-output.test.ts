@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
-import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
+import { handleTraceVerticalSlice } from "../../src/mcp/tools/slice.ts";
 import { SEMANTIC_FINGERPRINT } from "../../src/core/parser/semantic-revision.ts";
 
 describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
@@ -45,7 +45,7 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
     });
     // A package import traversal must not be requested for a Go handler.
     repo.getAllFiles = () => { throw new Error("unexpected package expansion"); };
-    const result = JSON.parse((await handleTraceVerticalSlice(repo, mockConfig, { query: "POST /orders" })).content[0].text);
+    const result = JSON.parse((await handleTraceVerticalSlice(repo, mockConfig, { query: "POST /orders" , format: "json"})).content[0].text);
     expect(result.status).toBe("success");
     expect(result.chain.map((node: { symbol: string }) => node.symbol)).toEqual(["OrderHandler::Create", "orders::Checkout"]);
     expect(result.message).toContain("Go package import expansion is omitted");
@@ -54,7 +54,7 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
   it("returns parseable JSON string in content[0].text when slice is not found", async () => {
     const result = await handleTraceVerticalSlice(repo, mockConfig, {
       query: "POST /unregistered/order",
-    });
+     format: "json"});
 
     expect(result.content[0].type).toBe("text");
     const json = JSON.parse(result.content[0].text);
@@ -70,7 +70,7 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
 
   it("does not label incomplete extraction as not found", async () => {
     repo.setMeta("sync_state", "error");
-    const result = await handleTraceVerticalSlice(repo, mockConfig, { query: "GET /orders" });
+    const result = await handleTraceVerticalSlice(repo, mockConfig, { query: "GET /orders" , format: "json"});
     const json = JSON.parse(result.content[0].text);
     expect(json.status).toBe("unknown");
     expect(json.summary).toContain("UNKNOWN");
@@ -99,7 +99,7 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
 
     const result = await handleTraceVerticalSlice(repo, mockConfig, {
       query: "POST /orders/{id}/status",
-    });
+     format: "json"});
 
     const json = JSON.parse(result.content[0].text);
 
@@ -127,7 +127,7 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
         { stage: "service", symbol: "Service.run", relationship: { kind: "calls", derivation: "inferred", reason: "fixture" } },
         { stage: "entity", symbol: "Order", relationship: { kind: "schema_binding", derivation: "source", reason: "fixture" } },
       ]) });
-    const result = await handleTraceVerticalSlice(repo, mockConfig, { query: "GET /mixed", max_depth: 1 });
+    const result = await handleTraceVerticalSlice(repo, mockConfig, { query: "GET /mixed", max_depth: 1 , format: "json"});
     const payload = JSON.parse(result.content[0].text);
     for (const label of ["route_binding; source", "calls; inferred", "schema_binding; source"]) {
       expect(payload.summary).toContain(label);
@@ -143,7 +143,7 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
     const result = await handleTraceVerticalSlice(
       repo,
       mockConfig,
-      { query: "GET /health" },
+      { query: "GET /health" , format: "json"},
       "/custom/workspace/root"
     );
 
@@ -154,7 +154,7 @@ describe("Vertical Slice Output Standardization (JSON Contracts)", () => {
 
   it("rejects empty query by throwing actionable error", async () => {
     expect(() =>
-      handleTraceVerticalSlice(repo, mockConfig, { query: "" })
+      handleTraceVerticalSlice(repo, mockConfig, { query: "" , format: "json"})
     ).toThrow("Missing required argument: 'query'");
   });
 });

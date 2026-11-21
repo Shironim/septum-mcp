@@ -11,7 +11,145 @@ function createTempDir(prefix: string): string {
 describe("GoSemanticExtractor (Gin, Echo, Chi)", () => {
   const extractor = new GoSemanticExtractor();
 
-  it("resolves constructor-wired Chi handlers and service fields without naming suffixes", () => {
+  it("binds imported handlers and aliases by declaration, rejecting non-router calls and decoys", async () => {
+    const root = createTempDir("ast-net-http");
+    try {
+      fs.writeFileSync(path.join(root, "go.mod"), "module fixture\n");
+      for (const owner of ["first", "second"]) {
+        fs.mkdirSync(path.join(root, owner));
+        fs.writeFileSync(path.join(root, owner, "handler.go"), `package ${owner}
+import web "net/http"
+func Show(w web.ResponseWriter, r *web.Request) {}
+type Handler struct{}
+func (h *Handler) Show(w web.ResponseWriter, r *web.Request) {}`);
+      }
+      fs.writeFileSync(path.join(root, "main.go"), `package main
+import (
+  web "net/http"
+  "fixture/first"
+  alt "fixture/second"
+)
+type Decoy struct{}
+func (Decoy) HandleFunc(string, web.HandlerFunc) {}
+func routes() {
+  mux := web.NewServeMux()
+  show := alt.Show
+  mux.HandleFunc("GET /actual", show)
+  // web.HandleFunc("GET /comment", first.Show)
+  _ = \`web.HandleFunc("GET /string", first.Show)\`
+  decoy := Decoy{}
+  decoy.HandleFunc("GET /wrong-receiver", first.Show)
+  h := &first.Handler{}
+  web.HandleFunc("POST /method", h.Show)
+  web.HandleFunc("PUT /direct", first.Show)
+  web.DefaultServeMux.Handle("PATCH /wrapped", web.HandlerFunc(first.Show))
+  if random() { show = first.Show }
+  mux.HandleFunc("GET /uncertain", show)
+}`);
+      const slices = await extractor.extractSlices(root);
+      expect(slices.map(s => s.route_uri).sort()).toEqual(["/actual", "/direct", "/method", "/uncertain", "/wrapped"]);
+      expect(slices.find(s => s.route_uri === "/actual")).toMatchObject({
+        http_method: "GET", controller_file: "second/handler.go", controller_line: 3, action_name: "Show",
+      });
+      expect(slices.find(s => s.route_uri === "/method")).toMatchObject({
+        http_method: "POST", controller_class: "Handler", controller_file: "first/handler.go", controller_line: 5,
+      });
+      expect(slices.find(s => s.route_uri === "/direct")?.controller_file).toBe("first/handler.go");
+      expect(slices.find(s => s.route_uri === "/wrapped")?.controller_file).toBe("first/handler.go");
+      expect(JSON.parse(slices.find(s => s.route_uri === "/uncertain")!.execution_chain_json).map((node: { stage: string }) => node.stage))
+        .toEqual(["ingress"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const [framework, dependency, factory, verb, params, returns] of [
+    ["gin", "github.com/gin-gonic/gin", "Default", "GET", "*router.Context", "{}"],
+    ["echo", "github.com/labstack/echo/v4", "New", "GET", "router.Context", "error { return nil }"],
+    ["fiber", "github.com/gofiber/fiber/v2", "New", "Get", "*router.Ctx", "error { return nil }"],
+  ]) {
+    it(`binds nested groups and shadowed receivers for ${framework}`, async () => {
+      const root = createTempDir(`ast-${framework}`);
+      try {
+        fs.writeFileSync(path.join(root, "go.mod"), "module fixture\n");
+        fs.writeFileSync(path.join(root, "routes.go"), `package fixture
+import router "${dependency}"
+func handler(c ${params}) ${returns}
+func setup(prefix string) {
+  r := router.${factory}()
+  group := r.Group("/api")
+  resources := group.Group("/v1")
+  resources.${verb}("/items", handler)
+  {
+    group := r.Group("/other")
+    group.${verb}("/items", handler)
+  }
+  group.${verb}("/summary", handler)
+  dynamic := r.Group(prefix)
+  dynamic.${verb}("/unresolved", handler)
+}`);
+        const slices = await extractor.extractSlices(root);
+        expect(slices.map(s => s.route_uri).sort()).toEqual(["/api/summary", "/api/v1/items", "/other/items"]);
+        expect(slices.every(s => s.controller_file === "routes.go" && s.controller_line === 3)).toBe(true);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("resolves Chi subrouter mounts and helper delegation in each literal scope", async () => {
+    const root = createTempDir("ast-chi-mount");
+    try {
+      fs.writeFileSync(path.join(root, "go.mod"), "module fixture\n");
+      fs.writeFileSync(path.join(root, "routes.go"), `package fixture
+import (
+  "net/http"
+  router "github.com/go-chi/chi/v5"
+)
+func handler(w http.ResponseWriter, r *http.Request) {}
+func setup() {
+  r := router.NewRouter()
+  sub := router.NewRouter()
+  sub.Get("/mounted", handler)
+  r.Mount("/left", sub)
+  r.Mount("/right", sub)
+  r.Route("/first", func(r router.Router) { nested(r) })
+  r.Route("/second", func(r router.Router) { nested(r) })
+}
+func nested(r router.Router) { r.With(middleware).Get("/helper", handler) }`);
+      const slices = await extractor.extractSlices(root);
+      expect(slices.map(s => s.route_uri).sort()).toEqual([
+        "/first/helper", "/left/mounted", "/right/mounted", "/second/helper",
+      ]);
+      expect(slices.every(s => s.controller_line === 6)).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a Fiber sub-app mount with its nested group", async () => {
+    const root = createTempDir("ast-fiber-mount");
+    try {
+      fs.writeFileSync(path.join(root, "go.mod"), "module fixture\n");
+      fs.writeFileSync(path.join(root, "main.go"), `package fixture
+import fiber "github.com/gofiber/fiber/v2"
+func handler(c *fiber.Ctx) error { return nil }
+func setup(prefix string) {
+  app := fiber.New()
+  child := fiber.New()
+  api := child.Group("/v1")
+  api.Get("/items", handler)
+  app.Mount("/shop", child)
+  app.Mount(prefix, child)
+}`);
+      const slices = await extractor.extractSlices(root);
+      expect(slices.map(s => [s.route_uri, s.controller_line])).toEqual([["/shop/v1/items", 3]]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves constructor-wired Chi handlers and service fields without naming suffixes", async () => {
     const root = createTempDir("constructor-wiring");
     try {
       const files: Record<string, string> = {
@@ -68,7 +206,7 @@ func (s *PaymentService) Confirm(ctx context.Context) {
         fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
         fs.writeFileSync(path.join(root, file), content);
       }
-      const slices = extractor.extractSlices(root);
+      const slices = await extractor.extractSlices(root);
       for (const [uri, controller, service, file] of [
         ["/api/v1/orders", "OrderHandler", "orders::Checkout", "handler/orders.go"],
         ["/api/v1/payments/{id}/konfirmasi", "PaymentHandler", "svc::Confirm", "handler/payments.go"],
@@ -94,7 +232,7 @@ func (s *PaymentService) Confirm(ctx context.Context) {
     }
   });
 
-  it("should detect Gin / Echo / Chi frameworks in go.mod and extract full execution slices", () => {
+  it("should detect Gin / Echo / Chi frameworks in go.mod and extract full execution slices", async () => {
     const tempDir = createTempDir("golang");
 
     try {
@@ -186,7 +324,7 @@ func SetupRouter(h *http.OrderHandler) *gin.Engine {
       fs.writeFileSync(path.join(cmdDir, "router.go"), routerCode);
 
       // 4. Extract slices
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
       expect(slices.length).toBe(2);
 
       // Verify POST /api/v1/orders
@@ -212,7 +350,7 @@ func SetupRouter(h *http.OrderHandler) *gin.Engine {
     }
   });
 
-  it("should extract Chi router endpoint slices", () => {
+  it("should extract Chi router endpoint slices", async () => {
     const tempDir = createTempDir("chi");
 
     try {
@@ -246,7 +384,7 @@ func Routes(h *ArticleHandler) chi.Router {
 
       fs.writeFileSync(path.join(tempDir, "main.go"), chiCode);
 
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
       expect(slices.length).toBe(2);
 
       const getSlice = slices.find((s) => s.http_method === "GET");
@@ -263,7 +401,7 @@ func Routes(h *ArticleHandler) chi.Router {
     }
   });
 
-  it("should extract net/http standard library routes with Go 1.22+ patterns (GO-03)", () => {
+  it("should extract net/http standard library routes with Go 1.22+ patterns (GO-03)", async () => {
     const tempDir = createTempDir("nethttp");
 
     try {
@@ -299,7 +437,7 @@ func RegisterRoutes(mux *http.ServeMux, h *UserHandler) {
 
       fs.writeFileSync(path.join(tempDir, "main.go"), code);
 
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
       expect(slices.length).toBe(3);
 
       // Verify /ping (method ANY)
@@ -326,7 +464,7 @@ func RegisterRoutes(mux *http.ServeMux, h *UserHandler) {
     }
   });
 
-  it("should isolate group prefixes across different files to prevent collision (GO-04)", () => {
+  it("should isolate group prefixes across different files to prevent collision (GO-04)", async () => {
     const tempDir = createTempDir("scope-collision");
 
     try {
@@ -372,7 +510,7 @@ func GetMetrics(c *gin.Context) {
       `.trim();
       fs.writeFileSync(path.join(adminDir, "admin.go"), fileBCode);
 
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
       expect(slices.length).toBe(2);
 
       const orderSlice = slices.find((s) => s.action_name === "CreateOrder");
@@ -387,7 +525,7 @@ func GetMetrics(c *gin.Context) {
     }
   });
 
-  it("should not hallucinate DTO names when request type is unresolvable (GO-04)", () => {
+  it("should not hallucinate DTO names when request type is unresolvable (GO-04)", async () => {
     const tempDir = createTempDir("nodto-hallucination");
 
     try {
@@ -418,7 +556,7 @@ func SetupRouter(r *gin.Engine, h *DynamicHandler) {
 
       fs.writeFileSync(path.join(tempDir, "main.go"), code);
 
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
       expect(slices.length).toBe(1);
 
       const slice = slices[0];
@@ -432,7 +570,7 @@ func SetupRouter(r *gin.Engine, h *DynamicHandler) {
     }
   });
 
-  it("should extract Echo router group and DTO binding slices (GO-05a)", () => {
+  it("should extract Echo router group and DTO binding slices (GO-05a)", async () => {
     const tempDir = createTempDir("echo");
 
     try {
@@ -469,7 +607,7 @@ func Routes(e *echo.Echo, h *AuthHandler) {
 
       fs.writeFileSync(path.join(tempDir, "main.go"), code);
 
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
       expect(slices.length).toBe(1);
 
       const slice = slices[0];
@@ -486,7 +624,7 @@ func Routes(e *echo.Echo, h *AuthHandler) {
     }
   });
 
-  it("should extract routes from method-based setup and anonymous closures (edge cases)", () => {
+  it("should extract routes from method-based setup and anonymous closures (edge cases)", async () => {
     const tempDir = createTempDir("server-methods");
 
     try {
@@ -518,7 +656,7 @@ func (s *Server) SetupRoutes() {
 
       fs.writeFileSync(path.join(tempDir, "main.go"), code);
 
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
       expect(slices.length).toBe(2);
 
       const pingSlice = slices.find((s) => s.route_uri === "/ping");
@@ -534,7 +672,7 @@ func (s *Server) SetupRoutes() {
     }
   });
 
-  it("should extract Fiber routes and c.BodyParser(&req) DTO validation", () => {
+  it("should extract Fiber routes and c.BodyParser(&req) DTO validation", async () => {
     const tempDir = createTempDir("fiber");
 
     try {
@@ -571,7 +709,7 @@ func SetupFiber(h *FiberOrderHandler) *fiber.App {
 
       fs.writeFileSync(path.join(tempDir, "main.go"), code);
 
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
       expect(slices.length).toBe(1);
 
       const slice = slices[0];
@@ -692,8 +830,8 @@ func SetupRoutes(r *gin.Engine, h *OrderHandler) {
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
-    it("resolves physical service, repository, and entity files across Clean Architecture layers (L5)", () => {
-      const slices = extractor.extractSlices(tempDir);
+    it("resolves physical service, repository, and entity files across Clean Architecture layers (L5)", async () => {
+      const slices = await extractor.extractSlices(tempDir);
       expect(slices).toHaveLength(1);
 
       const slice = slices[0];
@@ -723,7 +861,7 @@ func SetupRoutes(r *gin.Engine, h *OrderHandler) {
     });
   });
 
-  it("handles monorepo nested go.mod, delegated Chi r.Route helpers, and r.With(...).Get chaining", () => {
+  it("handles monorepo nested go.mod, delegated Chi r.Route helpers, and r.With(...).Get chaining", async () => {
     const root = createTempDir("monorepo-chi");
     try {
       const files: Record<string, string> = {
@@ -762,7 +900,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {}`,
       }
 
       expect(extractor.canHandle(root)).toBe(true);
-      const slices = extractor.extractSlices(root);
+      const slices = await extractor.extractSlices(root);
       expect(slices.some((s) => s.http_method === "GET" && s.route_uri === "/api/v1/invoices")).toBe(true);
       expect(slices.some((s) => s.http_method === "POST" && s.route_uri === "/api/v1/invoices")).toBe(true);
     } finally {

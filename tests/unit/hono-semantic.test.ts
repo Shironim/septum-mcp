@@ -127,7 +127,7 @@ app.route("/api/v1/users", userRoutes);
     expect(slices).toHaveLength(1);
 
     const userSlice = slices[0];
-    expect(userSlice.route_uri).toBe("/api/v1/users/");
+    expect(userSlice.route_uri).toBe("/api/v1/users");
     expect(userSlice.http_method).toBe("GET");
     expect(userSlice.controller_file).toBe("src/controllers/user.controller.ts");
     expect(userSlice.action_name).toBe("listUsers");

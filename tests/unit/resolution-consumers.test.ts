@@ -10,9 +10,9 @@ import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 import { BoundaryEvaluator } from "../../src/core/boundary/evaluator.ts";
 import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
 import { CallGraphTracer } from "../../src/core/resolver/call-graph-tracer.ts";
-import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
-import { handleGetSymbolImpact } from "../../src/mcp/tools/get-symbol-impact.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
+import { handleCheckBoundary } from "../../src/mcp/tools/boundary.ts";
+import { handleGetSymbolImpact } from "../../src/mcp/tools/symbol.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
 
 describe("resolution evidence across consumers", () => {
  let root: string, db: SeptumDatabase, repo: SeptumRepository, pipeline: IngestionPipeline;
@@ -20,15 +20,15 @@ describe("resolution evidence across consumers", () => {
  beforeEach(()=>{root=mkdtempSync(join(tmpdir(),"septum-consumers-"));db=new SeptumDatabase(":memory:");repo=new SeptumRepository(db.raw);pipeline=new IngestionPipeline(repo,root);});
  afterEach(()=>{db.close();rmSync(root,{recursive:true,force:true});});
  function put(file:string,text:string){mkdirSync(dirname(join(root,file)),{recursive:true});writeFileSync(join(root,file),text);}
- const boundary=async(file?:string)=>JSON.parse((await handleCheckBoundary(new BoundaryEvaluator(repo,new ModuleResolver(root,repo)),config,file?{file_path:file}:{scope:"all"},repo,root)).content[0].text);
+ const boundary=async(file?:string)=>JSON.parse((await handleCheckBoundary(new BoundaryEvaluator(repo,new ModuleResolver(root,repo)),config,file?{file_path:file, format: "json"}:{scope:"all", format: "json"},repo,root)).content[0].text);
  it("shares a Go package target across catalog, inspect, impact and boundary",async()=>{
   put("go.mod","module myapp\ngo 1.22\n"); put("app/main.go",'package app\nimport "myapp/shared"\nfunc Run() {}'); put("shared/a.go","package shared\nfunc A() {}");put("shared/b.go","package shared\nfunc B() {}");
   await pipeline.run(config);
   const edges=repo.getImportRelationships(root);expect(edges).toHaveLength(1);expect(edges[0]!.kind).toBe("imports");expect(edges[0]!.target_domains).toEqual(["shared"]);
   expect(repo.getFileConnections("app/main.go").imports_from).toEqual(["shared/a.go","shared/b.go"]);
   expect((await boundary()).status).toBe("rejected");
-  const inspect=JSON.parse(handleGetSymbol(repo,config,{symbol:"Run",include_dependencies:true},root).content[0].text);expect(inspect.relationships[0].resolution.targets[0].files).toHaveLength(2);
-  const impact=JSON.parse(handleGetSymbolImpact(repo,config,{symbol:"A"},root).content[0].text);expect(impact.import_dependents).toHaveLength(1);expect(impact.inbound_callers_complete).toBe(false);
+  const inspect=JSON.parse(handleGetSymbol(repo,config,{symbol:"Run",include_dependencies:true, format: "json"},root).content[0].text);expect(inspect.relationships[0].resolution.targets[0].files).toHaveLength(2);
+  const impact=JSON.parse(handleGetSymbolImpact(repo,config,{symbol:"A", format: "json"},root).content[0].text);expect(impact.import_dependents).toHaveLength(1);expect(impact.inbound_callers_complete).toBe(false);
   const tracer=new CallGraphTracer(repo,root);tracer.initMaps();expect(tracer.resolveImportToFile("app/main.go","myapp/shared")).toBeUndefined();expect(tracer.resolveImportTargets("app/main.go","myapp/shared")).toHaveLength(2);
  });
  it("recomputes manifest-only changes and file moves/deletes without a resolution cache",async()=>{

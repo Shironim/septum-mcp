@@ -43,7 +43,7 @@ describe("Unified 4 MCP Tools Suite", () => {
         action: "register",
         domain: "orders",
         root: "src/orders",
-      });
+       format: "json"});
       expect(res.content[0].text).toContain('"status": "success"');
       expect(res.content[0].text).toContain('"domain": "orders"');
     });
@@ -52,7 +52,7 @@ describe("Unified 4 MCP Tools Suite", () => {
       const res = await handleMapTool(repo, config, {
         action: "catalog",
         domain: "orders",
-      });
+       format: "json"});
       expect(res.content[0].text).toBeDefined();
     });
   });
@@ -76,13 +76,13 @@ describe("Unified 4 MCP Tools Suite", () => {
       const locateRes = await handleSymbolTool(repo, config, {
         action: "locate",
         query: "calculateTotal",
-      });
+       format: "json"});
       expect(locateRes.content[0].text).toBeDefined();
 
       const impactRes = await handleSymbolTool(repo, config, {
         action: "impact",
         query: "calculateTotal",
-      });
+       format: "json"});
       expect(impactRes.content[0].text).toBeDefined();
     });
   });
@@ -100,7 +100,7 @@ describe("Unified 4 MCP Tools Suite", () => {
     it("should execute trace slice via handleSliceTool", async () => {
       const res = await handleSliceTool(repo, config, {
         query: "POST /api/orders",
-      });
+       format: "json"});
       expect(res.content[0].text).toBeDefined();
       const parsed = JSON.parse(res.content[0].text);
       expect(parsed.query).toBe("POST /api/orders");
@@ -121,7 +121,7 @@ describe("Unified 4 MCP Tools Suite", () => {
       const res = await handleBoundaryTool(evaluator, config, {
         file_path: "src/orders/service.ts",
         proposed_imports: [],
-      }, repo);
+       format: "json"}, repo);
       expect(res.content[0].text).toBeDefined();
     });
   });

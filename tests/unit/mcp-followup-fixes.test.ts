@@ -103,7 +103,9 @@ describe("MCP follow-up fixes", () => {
     fs.mkdirSync(join(root, "src/mcp/tools"), { recursive: true });
     fs.writeFileSync(join(root, "package.json"), '{"name":"demo"}');
     fs.writeFileSync(join(root, "src/mcp/server.ts"), `
-      import { ListToolsRequestSchema } from 'sdk';
+      import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+      import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+      const server = new Server({ name: 'demo', version: '1' });
       // name: 'demo_internal', tools: [
       const decoy = "tools: [ { name: 'demo_internal' } ]";
       server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [

@@ -92,9 +92,9 @@ class WebhookController
   });
 
   describe("Happy Path", () => {
-    it("resolves modular controller outside app/ via ImportResolver and expands apiResource", () => {
+    it("resolves modular controller outside app/ via ImportResolver and expands apiResource", async () => {
       const extractor = new LaravelSemanticExtractor(tempDir);
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
 
       // apiResource should generate 5 RESTful actions (index, store, show, update, destroy)
       const invoiceSlices = slices.filter((s) => s.route_uri.includes("/invoices"));
@@ -115,9 +115,9 @@ class WebhookController
   });
 
   describe("Edge Cases", () => {
-    it("resolves invokable controller mapped with ::class to __invoke", () => {
+    it("resolves invokable controller mapped with ::class to __invoke", async () => {
       const extractor = new LaravelSemanticExtractor(tempDir);
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
 
       const webhookSlice = slices.find((s) => s.route_uri === "/v1/webhook" && s.http_method === "POST");
       expect(webhookSlice).toBeDefined();
@@ -125,9 +125,9 @@ class WebhookController
       expect(webhookSlice?.controller_file).toBe("app/Http/Controllers/WebhookController.php");
     });
 
-    it("extracts closure route with Closure controllerClass and distinct URI", () => {
+    it("extracts closure route with Closure controllerClass and distinct URI", async () => {
       const extractor = new LaravelSemanticExtractor(tempDir);
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
 
       const healthSlice = slices.find((s) => s.route_uri === "/v1/health" && s.http_method === "GET");
       expect(healthSlice).toBeDefined();
@@ -137,7 +137,7 @@ class WebhookController
   });
 
   describe("Unhappy Path", () => {
-    it("handles route to missing controller gracefully without crashing", () => {
+    it("handles route to missing controller gracefully without crashing", async () => {
       fs.writeFileSync(
         path.join(tempDir, "routes/web.php"),
         `<?php
@@ -147,7 +147,7 @@ Route::get('/missing', [NonExistentController::class, 'someAction']);
       );
 
       const extractor = new LaravelSemanticExtractor(tempDir);
-      const slices = extractor.extractSlices(tempDir);
+      const slices = await extractor.extractSlices(tempDir);
 
       const missingSlice = slices.find((s) => s.route_uri === "/missing");
       expect(missingSlice).toBeDefined();

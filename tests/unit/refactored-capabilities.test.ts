@@ -10,11 +10,11 @@ import { TypeScriptExtractor } from "../../src/core/parser/extractors/typescript
 import { PHPExtractor } from "../../src/core/parser/extractors/php.ts";
 import { PythonExtractor } from "../../src/core/parser/extractors/python.ts";
 import { GoExtractor } from "../../src/core/parser/extractors/go.ts";
-import { handleGetDomainCatalog } from "../../src/mcp/tools/get-domain-catalog.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
-import { handleGetSymbolImpact } from "../../src/mcp/tools/get-symbol-impact.ts";
-import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
-import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
+import { handleGetDomainCatalog } from "../../src/mcp/tools/map.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
+import { handleGetSymbolImpact } from "../../src/mcp/tools/symbol.ts";
+import { handleCheckBoundary } from "../../src/mcp/tools/boundary.ts";
+import { handleTraceVerticalSlice } from "../../src/mcp/tools/slice.ts";
 import { GetDomainCatalogSchema, TraceVerticalSliceSchema } from "../../src/mcp/schemas.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
 import { SEPTUM_MAP_SKILL_TEMPLATE } from "../../src/cli/templates/skill.ts";
@@ -171,7 +171,7 @@ class InvoiceRepository {
         },
       ]);
 
-      const symRes = handleGetSymbol(repo, mockConfig, { symbol: "OrderRepository" });
+      const symRes = handleGetSymbol(repo, mockConfig, { symbol: "OrderRepository" , format: "json"});
       const symJson = JSON.parse(symRes.content[0].text);
 
       expect(symJson.sibling_methods).toBeDefined();
@@ -225,7 +225,7 @@ class InvoiceRepository {
         },
       ]);
 
-      const impactRes = handleGetSymbolImpact(repo, mockConfig, { symbol: "SymbolRepository" });
+      const impactRes = handleGetSymbolImpact(repo, mockConfig, { symbol: "SymbolRepository" , format: "json"});
       const impactBody = JSON.parse(impactRes.content[0].text);
 
       expect(impactBody.found_in_index).toBe(true);
@@ -305,7 +305,7 @@ class InvoiceRepository {
 
       // 1. Compact mode check
       const parsedCompact = GetDomainCatalogSchema.parse({ domain: "core", detail_level: "compact" });
-      const compactRes = handleGetDomainCatalog(repo, mockConfig, parsedCompact,catalogRoot);
+      const compactRes = handleGetDomainCatalog(repo, mockConfig, { ...parsedCompact, format: "json" as const },catalogRoot);
       const compactJson = JSON.parse(compactRes.content[0].text);
 
       expect(compactJson.schema).toBe("navigation/v1");
@@ -322,7 +322,7 @@ class InvoiceRepository {
         domain: "core",
         archetype_filter: "repository",
       });
-      const filteredRes = handleGetDomainCatalog(repo, mockConfig, parsedFilter,catalogRoot);
+      const filteredRes = handleGetDomainCatalog(repo, mockConfig, { ...parsedFilter, format: "json" as const },catalogRoot);
       const filteredJson = JSON.parse(filteredRes.content[0].text);
 
       expect(filteredJson.accounting.returned_files).toBe(1);
@@ -342,7 +342,7 @@ class InvoiceRepository {
       repo.setMeta("sync_state", "complete");
 
       const evaluator = new BoundaryEvaluator(repo);
-      const res = await handleCheckBoundary(evaluator, mockConfig, {}, repo);
+      const res = await handleCheckBoundary(evaluator, mockConfig, { format: "json" }, repo);
       const body = JSON.parse(res.content[0].text);
 
       expect(body.status).toBe("approved");
@@ -421,7 +421,7 @@ class InvoiceRepository {
       ]);
 
       const evaluator = new BoundaryEvaluator(repo);
-      const res = await handleCheckBoundary(evaluator, circConfig, {}, repo);
+      const res = await handleCheckBoundary(evaluator, circConfig, { format: "json" }, repo);
       const body = JSON.parse(res.content[0].text);
 
       expect(body.status).toBe("rejected");
@@ -451,7 +451,7 @@ class InvoiceRepository {
       const resMin = await handleTraceVerticalSlice(repo, mockConfig, {
         query: "GET /api/nonexistent",
         max_depth: 0,
-      });
+       format: "json"});
       const jsonMin = JSON.parse(resMin.content[0].text);
       expect(jsonMin.max_depth_applied).toBe(1);
 
@@ -459,7 +459,7 @@ class InvoiceRepository {
       const resMax = await handleTraceVerticalSlice(repo, mockConfig, {
         query: "GET /api/nonexistent",
         max_depth: 42,
-      });
+       format: "json"});
       const jsonMax = JSON.parse(resMax.content[0].text);
       expect(jsonMax.max_depth_applied).toBe(8);
 
@@ -467,7 +467,7 @@ class InvoiceRepository {
       const resMid = await handleTraceVerticalSlice(repo, mockConfig, {
         query: "GET /api/nonexistent",
         max_depth: 4,
-      });
+       format: "json"});
       const jsonMid = JSON.parse(resMid.content[0].text);
       expect(jsonMid.max_depth_applied).toBe(4);
     });
@@ -503,7 +503,7 @@ class InvoiceRepository {
       expect(guard).toBeDefined();
 
       const preMatcher = guard.PreToolUse[0].matcher;
-      const postMatcher = guard.PostToolUse[0].matcher;
+      expect((guard as Record<string, unknown>).PostToolUse).toBeUndefined();
 
       const toolsToMatch = [
         "write_to_file",
@@ -516,7 +516,6 @@ class InvoiceRepository {
 
       for (const tool of toolsToMatch) {
         expect(preMatcher).toContain(tool);
-        expect(postMatcher).toContain(tool);
       }
     });
   });

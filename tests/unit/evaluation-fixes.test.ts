@@ -6,12 +6,12 @@ import { ConfigLoader } from "../../src/core/config/loader.ts";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
-import { handleGetDomainCatalog } from "../../src/mcp/tools/get-domain-catalog.ts";
-import { handleGetSymbolImpact } from "../../src/mcp/tools/get-symbol-impact.ts";
-import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
+import { handleGetDomainCatalog } from "../../src/mcp/tools/map.ts";
+import { handleGetSymbolImpact } from "../../src/mcp/tools/symbol.ts";
+import { handleCheckBoundary } from "../../src/mcp/tools/boundary.ts";
 import { BoundaryEvaluator } from "../../src/core/boundary/evaluator.ts";
 import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
-import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
+import { handleTraceVerticalSlice } from "../../src/mcp/tools/slice.ts";
 
 async function withFixture(
   domains: Record<string, { root: string; allowed_dependencies: string[]; forbidden_dependencies: string[]; archetypes: Record<string, string> }>,
@@ -73,7 +73,7 @@ describe("Evaluation Fixes Regression Suite", () => {
         const res = await handleCheckBoundary(
           evaluator,
           config,
-          { file_path: "src/cli/serve.ts", proposed_imports: ["../mcp/server.ts"] },
+          { file_path: "src/cli/serve.ts", proposed_imports: ["../mcp/server.ts"] , format: "json"},
           repo,
           root
         );
@@ -101,7 +101,7 @@ describe("Evaluation Fixes Regression Suite", () => {
         await new IngestionPipeline(repo, root).run(config);
 
         const classImpact = JSON.parse(
-          handleGetSymbolImpact(repo, config, { symbol: "Engine" }, root).content[0]!.text
+          handleGetSymbolImpact(repo, config, { symbol: "Engine" , format: "json"}, root).content[0]!.text
         );
         expect(classImpact.call_sites.some((c: any) => c.kind === "instantiation")).toBe(true);
         expect(classImpact.call_sites.some((c: any) => c.kind === "heritage")).toBe(true);
@@ -109,7 +109,7 @@ describe("Evaluation Fixes Regression Suite", () => {
         expect(classImpact.import_dependents[0].resolution.config_revision).toBeUndefined();
 
         const methodImpact = JSON.parse(
-          handleGetSymbolImpact(repo, config, { symbol: "Engine::run" }, root).content[0]!.text
+          handleGetSymbolImpact(repo, config, { symbol: "Engine::run" , format: "json"}, root).content[0]!.text
         );
         expect(methodImpact.call_sites.some((c: any) => c.kind === "call" && c.caller === "boot")).toBe(true);
       }
@@ -128,7 +128,7 @@ describe("Evaluation Fixes Regression Suite", () => {
         await new IngestionPipeline(repo, root).run(config);
 
         const compact = JSON.parse(
-          handleGetDomainCatalog(repo, config, { domain: "app", detail_level: "compact" }, root).content[0]!.text
+          handleGetDomainCatalog(repo, config, { domain: "app", detail_level: "compact" , format: "json"}, root).content[0]!.text
         );
         expect(compact.dependencies.every((e: any) => !e.from.startsWith("src/app/") || !e.to.startsWith("src/app/"))).toBe(true);
         expect(compact.accounting.total_dependencies).toBe(2);
@@ -136,7 +136,7 @@ describe("Evaluation Fixes Regression Suite", () => {
         expect(compact.accounting.omitted_dependencies).toBe(1);
 
         const full = JSON.parse(
-          handleGetDomainCatalog(repo, config, { domain: "app", detail_level: "full" }, root).content[0]!.text
+          handleGetDomainCatalog(repo, config, { domain: "app", detail_level: "full" , format: "json"}, root).content[0]!.text
         );
         expect(full.dependencies.length).toBe(2);
       }
@@ -171,7 +171,7 @@ describe("Evaluation Fixes Regression Suite", () => {
           ]),
         });
 
-        const res = await handleTraceVerticalSlice(repo, config, { query: "MCP tool:test_entry", max_depth: 5 }, root);
+        const res = await handleTraceVerticalSlice(repo, config, { query: "MCP tool:test_entry", max_depth: 5 , format: "json"}, root);
         const json = JSON.parse(res.content[0]!.text);
         const symbols = json.chain.map((n: any) => n.symbol);
         expect(symbols).toContain("runService");

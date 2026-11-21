@@ -64,7 +64,7 @@ describe("backend symbol source slices", () => {
       file_path: "service.ts",
       include_source: true,
       source_line_limit: 2,
-    }, undefined, root);
+     format: "json"}, undefined, root);
     const payload = JSON.parse(result.content[0].text);
 
     expect(payload.source_slice.status).toBe("current");
@@ -83,7 +83,7 @@ describe("backend symbol source slices", () => {
       query: "updateOrder",
       file_path: "service.ts",
       include_source: true,
-    }, undefined, root);
+     format: "json"}, undefined, root);
     const payload = JSON.parse(result.content[0].text);
 
     expect(payload.source_slice.status).toBe("stale");
@@ -108,7 +108,7 @@ describe("backend symbol source slices", () => {
       action: "inspect",
       query: "updateOrder",
       include_source: true,
-    }, undefined, root);
+     format: "json"}, undefined, root);
     const payload = JSON.parse(result.content[0].text);
 
     expect(payload.source_slice.status).toBe("ambiguous");
@@ -135,7 +135,7 @@ describe("backend symbol source slices", () => {
       query: "updateOrder",
       file_path: "../outside.ts",
       include_source: true,
-    }, undefined, root);
+     format: "json"}, undefined, root);
     const payload = JSON.parse(result.content[0].text);
 
     expect(payload.source_slice.status).toBe("out_of_scope");
@@ -148,7 +148,7 @@ describe("backend symbol source slices", () => {
       action: "inspect",
       query: "missingOrder",
       include_source: true,
-    }, undefined, root);
+     format: "json"}, undefined, root);
     const payload = JSON.parse(result.content[0].text);
 
     expect(payload.found).toBe(false);

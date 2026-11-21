@@ -6,7 +6,7 @@ import {
   RegisterDomainSchema,
   normalizeRegisterDomainArgs,
 } from "../../src/mcp/schemas.ts";
-import { handleRegisterDomain } from "../../src/mcp/tools/register-domain.ts";
+import { handleRegisterDomain } from "../../src/mcp/tools/map.ts";
 
 describe("Domain Registration & Identifier Unification", () => {
   let db: SeptumDatabase;

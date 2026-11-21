@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
-import { handleTraceVerticalSlice } from "../../src/mcp/tools/trace-vertical-slice.ts";
-import { handleGetDomainCatalog } from "../../src/mcp/tools/get-domain-catalog.ts";
+import { handleTraceVerticalSlice } from "../../src/mcp/tools/slice.ts";
+import { handleGetDomainCatalog } from "../../src/mcp/tools/map.ts";
 import { handleSymbolTool } from "../../src/mcp/tools/symbol.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 import { SEMANTIC_FINGERPRINT } from "../../src/core/parser/semantic-revision.ts";
@@ -38,7 +38,7 @@ describe("Goldilocks Context Repairs Suite", () => {
     const pipeline = new IngestionPipeline(repo, tmpDir);
     await pipeline.run(config);
 
-    const result = await handleSymbolTool(repo, config, { action: "context", query: "runEntry", file_path: "src/entry.ts" }, undefined, tmpDir);
+    const result = await handleSymbolTool(repo, config, { action: "context", query: "runEntry", file_path: "src/entry.ts" , format: "json"}, undefined, tmpDir);
     const json = JSON.parse(result.content[0]!.text);
     expect(json.status).toBe("success");
     expect(json.budget_bytes).toBe(16 * 1024); // 16 KB default
@@ -86,7 +86,7 @@ describe("Goldilocks Context Repairs Suite", () => {
       ]),
     });
 
-    const result = await handleTraceVerticalSlice(repo, mockConfig, { query: "GET /ping" }, tmpDir);
+    const result = await handleTraceVerticalSlice(repo, mockConfig, { query: "GET /ping" , format: "json"}, tmpDir);
     expect(result.content[0].type).toBe("text");
     const json = JSON.parse(result.content[0].text);
     expect(json.status).toBe("success");

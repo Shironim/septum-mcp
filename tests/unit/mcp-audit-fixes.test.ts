@@ -5,9 +5,9 @@ import * as os from "node:os";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
-import { handleRegisterDomain } from "../../src/mcp/tools/register-domain.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
-import { handleGetSymbolImpact } from "../../src/mcp/tools/get-symbol-impact.ts";
+import { handleRegisterDomain } from "../../src/mcp/tools/map.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
+import { handleGetSymbolImpact } from "../../src/mcp/tools/symbol.ts";
 import { McpCliSemanticExtractor } from "../../src/core/parser/extractors/mcp-cli-semantic.ts";
 import { CallGraphTracer } from "../../src/core/resolver/call-graph-tracer.ts";
 
@@ -59,7 +59,7 @@ describe("MCP Audit Fixes Regression Suite (MCP-01 to MCP-16)", () => {
       const res = handleGetSymbol(
         repo,
         config,
-        { symbol: "OrderController::submit" },
+        { symbol: "OrderController::submit" , format: "json"},
         tempDir
       );
 

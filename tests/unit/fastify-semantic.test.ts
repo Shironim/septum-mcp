@@ -29,6 +29,9 @@ describe("TS-05 — Fastify Plugin Scoping Extractor", () => {
 
     // 1. Shorthand fixture
     fs.mkdirSync(path.join(shorthandDir, "src"), { recursive: true });
+    fs.mkdirSync(path.join(shorthandDir, "src/handlers"), { recursive: true });
+    fs.writeFileSync(path.join(shorthandDir, "src/handlers/users.ts"),
+      "export function healthHandler() {}\nexport function userHandler() {}\n");
     fs.writeFileSync(
       path.join(shorthandDir, "src/app.ts"),
       `

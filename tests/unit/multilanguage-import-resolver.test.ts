@@ -9,7 +9,7 @@ import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { IngestionPipeline } from "../../src/core/ingestion/pipeline.ts";
 import { BoundaryEvaluator } from "../../src/core/boundary/evaluator.ts";
 import { ModuleResolver } from "../../src/core/resolver/module-resolver.ts";
-import { handleCheckBoundary } from "../../src/mcp/tools/check-boundary.ts";
+import { handleCheckBoundary } from "../../src/mcp/tools/boundary.ts";
 import { auditStagedFiles } from "../../src/core/boundary/staged-auditor.ts";
 import { execFileSync } from "node:child_process";
 import { CallGraphTracer } from "../../src/core/resolver/call-graph-tracer.ts";
@@ -272,7 +272,7 @@ for (const language of ["rust", "java", "csharp"] as const) {
       const tracer = new CallGraphTracer(repo, root); tracer.initMaps();
       expect(tracer.resolveImportTargets(source, target).map(file => file.path)).toEqual(edge.resolution.targets.flatMap(target => target.files));
       const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(root, repo));
-      expect(JSON.parse((await handleCheckBoundary(evaluator, config, { scope: "all" }, repo, root)).content[0].text).status).toBe("rejected");
+      expect(JSON.parse((await handleCheckBoundary(evaluator, config, { scope: "all" , format: "json"}, repo, root)).content[0].text).status).toBe("rejected");
       const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
       git("init", "-q"); git("add", ".");
       const staged = await auditStagedFiles(evaluator, config, root, repo);
@@ -331,7 +331,7 @@ test("Ruby dependency statements reach workspace and staged boundary audits", as
     const repo = new SeptumRepository(db.raw); await new IngestionPipeline(repo, root).run(config);
     expect(repo.getImportRelationships(root)[0]!.target_domains).toEqual(["shared"]);
     const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(root, repo));
-    expect(JSON.parse((await handleCheckBoundary(evaluator, config, { scope: "all" }, repo, root)).content[0].text).status).toBe("rejected");
+    expect(JSON.parse((await handleCheckBoundary(evaluator, config, { scope: "all" , format: "json"}, repo, root)).content[0].text).status).toBe("rejected");
     const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
     git("init", "-q"); git("add", ".");
     const staged = await auditStagedFiles(evaluator, config, root, repo);

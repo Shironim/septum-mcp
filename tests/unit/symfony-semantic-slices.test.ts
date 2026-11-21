@@ -158,7 +158,7 @@ class HealthController
 
       const healthSlice = slices.find((s) => s.route_uri === "/health");
       expect(healthSlice).toBeDefined();
-      expect(healthSlice?.http_method).toBe("GET"); // defaults to GET when methods omitted
+      expect(healthSlice?.http_method).toBe("ANY");
       expect(healthSlice?.controller_class).toBe("App\\Controller\\HealthController");
       expect(healthSlice?.action_name).toBe("check");
     });

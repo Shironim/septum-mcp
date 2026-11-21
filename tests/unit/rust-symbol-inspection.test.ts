@@ -3,7 +3,7 @@ import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { ASTParserEngine } from "../../src/core/parser/tree-sitter.ts";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
 
 describe("Rust symbol inspection metadata", () => {
   let db: SeptumDatabase;
@@ -46,7 +46,7 @@ impl OrderXItem { pub fn foreign(&self) {} }
 
   async function inspect(query: string, includeDependencies = true) {
     const result = handleGetSymbol(repo, ConfigLoader.getDefaultConfig(), {
-      symbol: query, file_path: "src/lib.rs", include_dependencies: includeDependencies,
+      symbol: query, file_path: "src/lib.rs", include_dependencies: includeDependencies, format: "json",
     });
     return JSON.parse(result.content[0].text);
   }

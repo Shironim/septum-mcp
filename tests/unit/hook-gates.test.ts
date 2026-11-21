@@ -160,4 +160,22 @@ export class PaymentService {
     const domainCycles = violations.filter(v => v.rule === "circular_dependency" && v.message.includes("Circular domain"));
     expect(domainCycles).toHaveLength(0);
   });
+
+  it("evaluates proposed imports without a SQLite repository (Zero-SQLite fast path)", async () => {
+    const statelessEvaluator = new BoundaryEvaluator(undefined);
+    const proposedCode = `import { OrderProcessor } from "../../orders/processor";\n`;
+    const parsed = await astEngine.parseFile(
+      "src/domains/billing/services/PaymentService.ts",
+      proposedCode
+    );
+    const violations = statelessEvaluator.checkProposedChanges(
+      "src/domains/billing/services/PaymentService.ts",
+      parsed.dependencies.map((d) => d.target),
+      mockConfig,
+      parsed.dependencies.map((d) => d.statement)
+    );
+    expect(violations).toHaveLength(1);
+    expect(violations[0].rule).toBe("forbidden_dependency");
+    expect(violations[0].target_domain).toBe("orders");
+  });
 });

@@ -76,7 +76,7 @@ describe("refactoring preserves capabilities with bounded work", () => {
     put("src/a.ts", "export function entry() { return 1; }");
     await pipeline.run(config);
     for (const action of ["context", "inspect"] as const) {
-      const result = await handleSymbolTool(repo, config, { action, query: "entry", include_source: false }, undefined, root);
+      const result = await handleSymbolTool(repo, config, { action, query: "entry", include_source: false , format: "json"}, undefined, root);
       const payload = JSON.parse(result.content[0]!.text);
       expect(payload.symbol).toBe("entry");
       expect(payload.source_slice).toBeUndefined();

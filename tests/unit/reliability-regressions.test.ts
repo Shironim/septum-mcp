@@ -67,7 +67,7 @@ describe('Reliability regressions', () => {
   it('invalidates old NestJS routes when a controller is reindexed', async () => {
     const { root, repo } = project();
     writeFileSync(join(root, 'nest-cli.json'), '{}');
-    const source = (route: string) => `@Controller('orders')\nexport class OrdersController {\n @Get('${route}')\n list() {}\n}`;
+    const source = (route: string) => `import { Controller, Get } from '@nestjs/common';\n@Controller('orders')\nexport class OrdersController {\n @Get('${route}')\n list() {}\n}`;
     file(root, 'src/orders.controller.ts', source('old'));
     const config = SeptumConfigSchema.parse({ domains: { app: { root: 'src' } } });
     const pipeline = new IngestionPipeline(repo, root); await pipeline.run(config);

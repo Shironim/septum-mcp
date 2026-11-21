@@ -26,7 +26,7 @@ describe("declaration identity and source selection", () => {
   }
   async function tool(args: Record<string, unknown>) {
     return JSON.parse((await handleSymbolTool(repo, config, SymbolToolSchema.parse({
-      ...(args.action === "inspect" ? { include_source: true } : {}), ...args,
+      ...(args.action === "inspect" ? { include_source: true } : {}), format: "json", ...args,
     }), undefined, root)).content[0].text);
   }
   const java = "class Order {\n  public int save(int id) { return id; }\n  public String save(String id) { return id; }\n}";

@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
 import { SymbolToolSchema } from "../../src/mcp/schemas.ts";
-import { handleLocateSymbol } from "../../src/mcp/tools/locate-symbol.ts";
-import { handleGetSymbol } from "../../src/mcp/tools/get-symbol.ts";
+import { handleLocateSymbol } from "../../src/mcp/tools/symbol.ts";
+import { handleGetSymbol } from "../../src/mcp/tools/symbol.ts";
 import { BoundaryEvaluator } from "../../src/core/boundary/evaluator.ts";
-import { evaluateBoundary } from "../../src/mcp/tools/check-boundary.ts";
+import { evaluateBoundary } from "../../src/mcp/tools/boundary.ts";
 import type { ValidatedSeptumConfig } from "../../src/core/config/schema.ts";
 
 describe("Batch 3 regressions: locate limit, file_path-only locate, and compact include_source=false", () => {
@@ -46,14 +46,14 @@ describe("Batch 3 regressions: locate limit, file_path-only locate, and compact 
         ]);
       }
 
-      const limited = await handleLocateSymbol(repo, config, { query: "store", limit: 2 }, undefined, root);
+      const limited = await handleLocateSymbol(repo, config, { query: "store", limit: 2 , format: "json"}, undefined, root);
       const limitedPayload = JSON.parse(limited.content[0]!.text);
       expect(limitedPayload.status).toBe("ambiguous");
       expect(limitedPayload.candidates).toHaveLength(2);
       expect(limitedPayload.total_candidates).toBe(5);
       expect(limitedPayload.omitted_candidates).toBe(3);
 
-      const byFile = await handleLocateSymbol(repo, config, { file_path: "app/Controller1.php", limit: 1 }, undefined, root);
+      const byFile = await handleLocateSymbol(repo, config, { file_path: "app/Controller1.php", limit: 1 , format: "json"}, undefined, root);
       const byFilePayload = JSON.parse(byFile.content[0]!.text);
       expect(byFilePayload.status).toBe("success");
       expect(byFilePayload.candidates).toHaveLength(1);
@@ -90,7 +90,7 @@ describe("Batch 3 regressions: locate limit, file_path-only locate, and compact 
       }));
       repo.replaceFileDependencies(fileId, deps);
 
-      const res = await handleGetSymbol(repo, config, { symbol: "Run", file_path: "api/service.go", include_source: false, include_dependencies: true }, root);
+      const res = await handleGetSymbol(repo, config, { symbol: "Run", file_path: "api/service.go", include_source: false, include_dependencies: true , format: "json"}, root);
       const payload = JSON.parse(res.content[0]!.text);
       expect(payload.relationships.length).toBeLessThanOrEqual(20);
       expect(payload.relationships_omitted).toBe(5);
@@ -118,7 +118,7 @@ describe("Batch 3 regressions: locate limit, file_path-only locate, and compact 
     repo.setMeta("sync_state", "complete");
 
     const evaluator = new BoundaryEvaluator(repo);
-    const res = await evaluateBoundary(evaluator, config, { scope: "domain", domain: "http" }, repo, process.cwd());
+    const res = await evaluateBoundary(evaluator, config, { scope: "domain", domain: "http" , format: "json"}, repo, process.cwd());
     const payload = JSON.parse(res.content[0]!.text);
     expect(payload.status).toBe("unknown");
   });

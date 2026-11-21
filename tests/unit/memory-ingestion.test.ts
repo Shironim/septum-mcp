@@ -9,7 +9,7 @@ import { IngestionPipeline } from '../../src/core/ingestion/pipeline.ts';
 import { PARSER_FINGERPRINT } from '../../src/core/parser/language-capabilities.ts';
 import { BoundaryEvaluator } from '../../src/core/boundary/evaluator.ts';
 import { ModuleResolver } from '../../src/core/resolver/module-resolver.ts';
-import { handleCheckBoundary } from '../../src/mcp/tools/check-boundary.ts';
+import { handleCheckBoundary } from '../../src/mcp/tools/boundary.ts';
 
 describe('bounded ingestion and incomplete index safety', () => {
  let root:string, db:SeptumDatabase, repo:SeptumRepository, pipeline:IngestionPipeline;
@@ -22,13 +22,49 @@ describe('bounded ingestion and incomplete index safety', () => {
   expect(repo.getFileByPath('src/a.ts')).toBeNull();
   const skipped=JSON.parse(repo.getMeta('skipped_files')||'[]'); expect(skipped).toEqual([{path:'src/a.ts',reason:'file_too_large'}]);
   const evaluator=new BoundaryEvaluator(repo,new ModuleResolver(root,repo));
-  const result=await handleCheckBoundary(evaluator,config(),{file_path:'src/a.ts'},repo,root); expect(JSON.parse(result.content[0].text).status).toBe('unknown');
+  const result=await handleCheckBoundary(evaluator,config(),{file_path:'src/a.ts', format: "json"},repo,root); expect(JSON.parse(result.content[0].text).status).toBe('unknown');
   writeFileSync(file,'export function recovered() {}'); await pipeline.ingestFile(file,config());
   expect(repo.getFileByPath('src/a.ts')).not.toBeNull(); expect(JSON.parse(repo.getMeta('skipped_files')||'[]')).toEqual([]);
  });
+ it('publishes the same file facts through full sync and the watcher ingestion path', async () => {
+  const mirrorDb = new SeptumDatabase(':memory:');
+  const mirror = new SeptumRepository(mirrorDb.raw);
+  const mirrorPipeline = new IngestionPipeline(mirror, root);
+  const source = join(root, 'src/a.ts');
+  const snapshot = (repository: SeptumRepository) => ({
+   files: repository.getAllFiles().map(({ path, archetype, content_hash, line_count }) => ({ path, archetype, content_hash, line_count })),
+   symbols: repository.getAllSymbolsWithFiles().map(({ file_path, name, kind }) => ({ file_path, name, kind })),
+   dependencies: repository.getAllDependenciesWithDomains(),
+   skipped: JSON.parse(repository.getMeta('skipped_files') || '[]'),
+  });
+  try {
+   writeFileSync(join(root, 'src/b.ts'), 'export const b = 1;');
+   writeFileSync(source, 'export const old = 0;');
+   await pipeline.run(config());
+   await mirrorPipeline.run(config());
+
+   writeFileSync(source, 'import { b } from "./b";\nexport const updated = b;');
+   await pipeline.run(config());
+   await mirrorPipeline.ingestFile(source, config());
+   expect(snapshot(mirror)).toEqual(snapshot(repo));
+   expect(mirror.getMeta('slices_dirty')).toBe('1');
+
+   writeFileSync(source, '/*' + 'x'.repeat(2 * 1024 * 1024) + '*/');
+   await pipeline.run(config());
+   await mirrorPipeline.ingestFile(source, config());
+   expect(snapshot(mirror)).toEqual(snapshot(repo));
+
+   rmSync(source);
+   await pipeline.run(config());
+   mirrorPipeline.removeFile('src/a.ts');
+   expect(snapshot(mirror)).toEqual(snapshot(repo));
+  } finally {
+   mirrorDb.close();
+  }
+ });
  it('does not approve an index whose sync failed',async()=>{
   repo.setMeta('sync_state','error');
-  const result=await handleCheckBoundary(new BoundaryEvaluator(repo,new ModuleResolver(root,repo)),config(),{scope:'all'},repo,root);
+  const result=await handleCheckBoundary(new BoundaryEvaluator(repo,new ModuleResolver(root,repo)),config(),{scope:'all', format: "json"},repo,root);
   expect(JSON.parse(result.content[0].text).status).toBe('unknown');
  });
  it('rejects recovered syntax trees and restores a reliable index after repair',async()=>{
@@ -39,7 +75,7 @@ describe('bounded ingestion and incomplete index safety', () => {
   await expect(pipeline.run(config(),{verifyContent:true})).rejects.toThrow('parser is degraded');
   expect(repo.getMeta('sync_state')).toBe('error');
   const evaluator=new BoundaryEvaluator(repo,new ModuleResolver(root,repo));
-  const result=await handleCheckBoundary(evaluator,config(),{scope:'all'},repo,root);
+  const result=await handleCheckBoundary(evaluator,config(),{scope:'all', format: "json"},repo,root);
   expect(JSON.parse(result.content[0].text).status).toBe('unknown');
   writeFileSync(file,'export function repaired() {}');
   await pipeline.run(config(),{verifyContent:true});
@@ -87,10 +123,13 @@ describe('source read admission',()=>{
   const root=mkdtempSync(join(tmpdir(),'septum-repeat-race-'));mkdirSync(join(root,'src'));const db=new SeptumDatabase(':memory:'),repo=new SeptumRepository(db.raw);
   try{const file=join(root,'src/a.ts');writeFileSync(file,'export function first() {}');const c=ConfigLoader.getDefaultConfig();c.domains={src:{root:'src',allowed_dependencies:[],forbidden_dependencies:[],archetypes:{}}};const pipeline=new IngestionPipeline(repo,root);const engine=(pipeline as any).parserEngine,parse=engine.parseFile.bind(engine);let n=0;engine.parseFile=async(...args:any[])=>{const result=await parse(...args);writeFileSync(file,`export function changed${++n}() {}`);return result;};await expect(pipeline.run(c)).rejects.toThrow('Source changed during synchronization');expect(repo.getMeta('sync_state')).toBe('error');}finally{db.close();rmSync(root,{recursive:true,force:true});}
  });
- it('does not read oversized semantic files outside indexed domains',async()=>{
+ it('reports oversized registered handlers outside indexed domains',async()=>{
   const root=mkdtempSync(join(tmpdir(),'septum-semantic-limit-'));mkdirSync(join(root,'src/mcp/tools'),{recursive:true});mkdirSync(join(root,'other'));
   const db=new SeptumDatabase(':memory:'),repo=new SeptumRepository(db.raw);
-  try{writeFileSync(join(root,'package.json'),'{"name":"semantic-limit","dependencies":{"@modelcontextprotocol/sdk":"1"}}');writeFileSync(join(root,'src/mcp/tools/big.ts'),'/*'+'x'.repeat(2*1024*1024)+'*/\nexport function handler() {}');const c=ConfigLoader.getDefaultConfig();c.domains={other:{root:'other',allowed_dependencies:[],forbidden_dependencies:[],archetypes:{}}};const pipeline=new IngestionPipeline(repo,root);await expect(pipeline.run(c)).rejects.toThrow("Semantic extraction incomplete");expect(JSON.parse(repo.getMeta('skipped_files')||'[]').some((file:any)=>file.path==='src/mcp/tools/big.ts')).toBe(true);await expect(pipeline.run(c)).rejects.toThrow("Semantic extraction incomplete");expect(JSON.parse(repo.getMeta('skipped_files')||'[]').some((file:any)=>file.path==='src/mcp/tools/big.ts')).toBe(true);}finally{db.close();rmSync(root,{recursive:true,force:true});}
+  try{writeFileSync(join(root,'package.json'),'{"name":"semantic-limit","dependencies":{"@modelcontextprotocol/sdk":"1"}}');writeFileSync(join(root,'src/mcp/server.ts'),`import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { handler } from './tools/big';
+const server = new McpServer({ name: 'fixture', version: '1' });
+server.registerTool('big', {}, handler);`);writeFileSync(join(root,'src/mcp/tools/big.ts'),'/*'+'x'.repeat(2*1024*1024)+'*/\nexport function handler() {}');const c=ConfigLoader.getDefaultConfig();c.domains={other:{root:'other',allowed_dependencies:[],forbidden_dependencies:[],archetypes:{}}};const pipeline=new IngestionPipeline(repo,root);await expect(pipeline.run(c)).rejects.toThrow("Semantic extraction incomplete");expect(JSON.parse(repo.getMeta('skipped_files')||'[]').some((file:any)=>file.path==='src/mcp/tools/big.ts')).toBe(true);await expect(pipeline.run(c)).rejects.toThrow("Semantic extraction incomplete");expect(JSON.parse(repo.getMeta('skipped_files')||'[]').some((file:any)=>file.path==='src/mcp/tools/big.ts')).toBe(true);}finally{db.close();rmSync(root,{recursive:true,force:true});}
  });
  it('records an error when a later parse fails after committing the first batch',async()=>{
   const root=mkdtempSync(join(tmpdir(),'septum-batch-error-'));mkdirSync(join(root,'src'));const db=new SeptumDatabase(':memory:'),repo=new SeptumRepository(db.raw);
@@ -99,8 +138,29 @@ describe('source read admission',()=>{
 });
 
 describe('semantic cache invalidation after partial sync',()=>{
- it('discovers new semantic source files outside indexed domains',async()=>{
-  const root=mkdtempSync(join(tmpdir(),'septum-new-semantic-'));mkdirSync(join(root,'src/mcp/tools'),{recursive:true});mkdirSync(join(root,'other'));writeFileSync(join(root,'package.json'),'{"name":"mcp-fixture"}');const db=new SeptumDatabase(':memory:'),repo=new SeptumRepository(db.raw);try{const c=ConfigLoader.getDefaultConfig();c.domains={other:{root:'other',allowed_dependencies:[],forbidden_dependencies:[],archetypes:{}}};writeFileSync(join(root,'src/mcp/server.ts'),'export const TOOL_SCHEMAS = { mcp_fixture_a: {}, mcp_fixture_b: {} };');writeFileSync(join(root,'src/mcp/tools/a.ts'),'export function first() {}');const pipeline=new IngestionPipeline(repo,root);await pipeline.run(c);const before=repo.getAllVerticalSlices().length;writeFileSync(join(root,'src/mcp/tools/b.ts'),'export function second() {}');await pipeline.run(c,{verifyContent:true});expect(repo.getAllVerticalSlices().length).toBeGreaterThan(before);}finally{db.close();rmSync(root,{recursive:true,force:true});}
+ it('binds a newly created registered handler outside indexed domains', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'septum-new-semantic-'));
+  mkdirSync(join(root, 'src/mcp/tools'), { recursive: true });
+  mkdirSync(join(root, 'other'));
+  const db = new SeptumDatabase(':memory:');
+  const repo = new SeptumRepository(db.raw);
+  try {
+   const config = ConfigLoader.getDefaultConfig();
+   config.domains = { other: { root: 'other', allowed_dependencies: [], forbidden_dependencies: [], archetypes: {} } };
+   writeFileSync(join(root, 'src/mcp/server.ts'), `import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { second } from './tools/b';
+const server = new McpServer({ name: 'fixture', version: '1' });
+server.registerTool('registered_b', {}, second);`);
+   const pipeline = new IngestionPipeline(repo, root);
+   await pipeline.run(config);
+   expect(repo.getAllVerticalSlices().find(slice => slice.route_name === 'registered_b')?.controller_file).toBeNull();
+   writeFileSync(join(root, 'src/mcp/tools/b.ts'), 'export function second() {}');
+   await pipeline.run(config, { verifyContent: true });
+   expect(repo.getAllVerticalSlices().find(slice => slice.route_name === 'registered_b')?.controller_file).toBe('src/mcp/tools/b.ts');
+  } finally {
+   db.close();
+   rmSync(root, { recursive: true, force: true });
+  }
  });
  it('persists dirty slices when a committed batch is followed by cancellation',async()=>{
   const root=mkdtempSync(join(tmpdir(),'septum-dirty-batch-'));mkdirSync(join(root,'src'));const db=new SeptumDatabase(':memory:'),repo=new SeptumRepository(db.raw);try{const c=ConfigLoader.getDefaultConfig();c.domains={src:{root:'src',allowed_dependencies:[],forbidden_dependencies:[],archetypes:{}}};for(let i=0;i<51;i++)writeFileSync(join(root,`src/${String(i).padStart(2,'0')}Controller.ts`),`export function old${i}() {}`);const pipeline=new IngestionPipeline(repo,root);await pipeline.run(c);for(let i=0;i<50;i++)writeFileSync(join(root,`src/${String(i).padStart(2,'0')}Controller.ts`),`export function new${i}() {}`);const abort=new AbortController();const upsert=repo.upsertFile.bind(repo);let count=0;repo.upsertFile=((...args:any[])=>{const result=(upsert as any)(...args);if(++count===50)abort.abort();return result;}) as any;await expect(pipeline.run(c,{signal:abort.signal})).rejects.toThrow();expect(repo.getMeta('slices_dirty')).toBe('1');await pipeline.run(c,{verifyContent:true});expect(repo.getAllVerticalSlices().some(slice=>slice.action_name==='new0')).toBe(true);expect(repo.getMeta('sync_state')).toBe('complete');}finally{db.close();rmSync(root,{recursive:true,force:true});}

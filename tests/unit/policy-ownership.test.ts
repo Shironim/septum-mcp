@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { ConfigLoader } from "../../src/core/config/loader.ts";
 import { SeptumDatabase } from "../../src/core/database/client.ts";
 import { SeptumRepository } from "../../src/core/database/repository.ts";
-import { handleRegisterDomain } from "../../src/mcp/tools/register-domain.ts";
+import { handleRegisterDomain } from "../../src/mcp/tools/map.ts";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });

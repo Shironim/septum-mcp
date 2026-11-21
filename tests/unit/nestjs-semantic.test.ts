@@ -81,6 +81,7 @@ export class OrdersController {
     fs.mkdirSync(path.dirname(controllerPath), { recursive: true });
 
     const code = `
+import { Controller, Get, HttpCode, Header } from "@nestjs/common";
 @Controller()
 export class ItemsController {
   // @Post('/fake-comment')
