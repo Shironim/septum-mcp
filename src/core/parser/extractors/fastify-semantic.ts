@@ -1,71 +1,30 @@
-import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
-import { readOptionalSourceFile } from "../../resources/source-files.ts";
-import { parseWithTreeSitter } from "../wasm-loader.ts";
-import { ImportResolver } from "../../resolver/import-resolver.ts";
-import type Parser from "web-tree-sitter";
-import * as fs from "node:fs";
 import * as path from "node:path";
+import ts from "typescript";
+import type { ExecutionChainNode } from "../../../types/index.ts";
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
+import { probeSourcePath, readOptionalSourceFile } from "../../resources/source-files.ts";
+import { composeMountPrefixes } from "./route-prefixes.ts";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
+import { lineOf, literal, nameText, objectMember, TypeScriptBindings, visitRouteCalls, type Handler } from "./typescript-bindings.ts";
 
-const FASTIFY_VERBS = new Set([
-  "get",
-  "post",
-  "put",
-  "patch",
-  "delete",
-  "all",
-  "head",
-  "options",
-]);
-
-interface RawFastifyRoute {
-  file: string;
-  relPath: string;
-  scopeId: string;
-  httpMethods: string[];
-  rawPath: string;
-  hooks: Array<{ symbol: string; line: number }>;
-  handler: { symbol: string; line: number };
-  bodyDto?: string;
+const verbs = new Set(["get", "post", "put", "patch", "delete", "head", "options", "trace", "all"]);
+const instanceMethods = new Set([...verbs, "route", "register", "addSchema", "addHook", "withTypeProvider", "decorate"]);
+const hookNames = ["onRequest", "preParsing", "preValidation", "preHandler", "preSerialization", "onSend", "onResponse"];
+type Scope = ts.CallExpression | ts.FunctionLikeDeclaration;
+type Mount = { parent: Scope; child: ts.FunctionLikeDeclaration; prefix: string | undefined };
+type Schema = { id: string; call: ts.CallExpression };
+type Route = {
+  scope: Scope;
+  call: ts.CallExpression;
+  uri: string;
+  methods: string[];
+  handler?: Handler;
+  target?: ts.Expression | ts.MethodDeclaration;
+  hooks: ts.Expression[];
   schemaRef?: string;
-  routeLine: number;
-}
-
-interface RawFastifyRegister {
-  file: string;
-  relPath: string;
-  parentScopeId: string;
-  targetPluginSymbol?: string;
-  targetScopeId?: string;
-  prefix: string;
-  line: number;
-}
-
-interface KnownSchema {
-  id: string;
-  file: string;
-  line: number;
-}
-
-function cleanLiteral(node: Parser.SyntaxNode | null | undefined): string | undefined {
-  if (!node) return undefined;
-  if (node.type === "string" || node.type === "template_string") {
-    const raw = node.text.trim();
-    if (raw.includes("${")) return undefined;
-    return raw.replace(/^['"`]|['"`]$/g, "");
-  }
-  return undefined;
-}
-
-function normalizeRouteUri(prefix: string, rawPath: string): string {
-  const p = (prefix ?? "").trim().replace(/\/+$/, "");
-  let r = (rawPath ?? "").trim();
-  if (!r.startsWith("/")) r = "/" + r;
-  if (r === "/" && p.length > 0) return p;
-  if (r === "/" && p.length === 0) return "/";
-  const joined = `${p}${r}`;
-  return joined.startsWith("/") ? joined : `/${joined}`;
-}
+  bodyType?: string;
+  rootSlash?: string;
+};
 
 export class FastifySemanticExtractor implements SemanticSliceExtractor {
   public readonly id = "fastify";
@@ -73,687 +32,225 @@ export class FastifySemanticExtractor implements SemanticSliceExtractor {
 
   public canHandle(projectRoot: string, framework?: string): boolean {
     if (framework === "fastify") return true;
-
-    const pkgPath = path.join(projectRoot, "package.json");
-    if (fs.existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readOptionalSourceFile(pkgPath, "utf-8"));
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps["fastify"]) return true;
-      } catch {}
-    }
-
-    return false;
+    const manifestPath = path.join(projectRoot, "package.json");
+    if (probeSourcePath(manifestPath) !== "file") return false;
+    try {
+      const manifest = JSON.parse(readOptionalSourceFile(manifestPath, "utf-8"));
+      return !!(manifest.dependencies?.fastify || manifest.devDependencies?.fastify);
+    } catch { return false; }
   }
 
   public async extractSlices(
     projectRoot: string,
     domainId?: number,
-    signal?: AbortSignal, inventory?: SourceInventory
+    signal?: AbortSignal,
+    inventory?: SourceInventory,
   ): Promise<VerticalSliceCandidate[]> {
-    const slices: VerticalSliceCandidate[] = [];
-    const sourceFiles = listSourceFiles(projectRoot, /\.(?:[cm]?[jt]sx?)$/, inventory).filter(file => !file.endsWith('.d.ts'));
-    const resolver = new ImportResolver(projectRoot);
+    const root = path.resolve(projectRoot);
+    const files = listSourceFiles(root, /\.[cm]?[jt]sx?$/, inventory).filter(file => !/\.d\.[cm]?ts$/.test(file));
+    const bindings = new TypeScriptBindings(root, new Set(files), signal);
+    const roots = new Map<Scope, string>();
+    const mounts: Mount[] = [];
+    const parents = new Map<Scope, Set<Scope>>();
+    const plugins: ts.FunctionLikeDeclaration[] = [];
+    const seenPlugins = new Set<Scope>();
+    const schemas = new Map<Scope, Map<string, Schema | null>>();
+    const routes: Route[] = [];
+    const relative = (node: ts.Node) => path.relative(root, node.getSourceFile().fileName).replace(/\\/g, "/");
+    const optionsOf = (expression?: ts.Expression) => {
+      const node = bindings.value(expression);
+      return node && ts.isObjectLiteralExpression(node) ? node : undefined;
+    };
+    const option = (object: ts.ObjectLiteralExpression | undefined, key: string) => {
+      const value = object && objectMember(object, key);
+      return value && !ts.isMethodDeclaration(value) ? value : undefined;
+    };
+    const hasUnknownFields = (opts: ts.ObjectLiteralExpression) => opts.properties.some(property =>
+      ts.isSpreadAssignment(property) || property.name && ts.isComputedPropertyName(property.name),
+    );
 
-    const allRoutes: RawFastifyRoute[] = [];
-    const allRegisters: RawFastifyRegister[] = [];
-    const knownSchemas = new Map<string, KnownSchema>();
-    const fileImports = new Map<string, Map<string, string>>(); // relPath -> (importedIdent -> targetRelPath)
-    const fileScopes = new Map<string, Set<string>>(); // relPath -> Set of scopeIds defined in file
+    const resolveScope = (
+      expression: ts.Expression,
+      plugin?: ts.FunctionLikeDeclaration,
+    ): Scope | undefined => {
+      let value = bindings.value(expression);
+      const inspected = new Set<ts.Node>();
+      while (value && !inspected.has(value)) {
+        inspected.add(value);
+        if (ts.isIdentifier(value) && plugin?.parameters[0] && bindings.declaration(value) === plugin.parameters[0]) {
+          return plugin;
+        }
+        if (!ts.isCallExpression(value) || value.questionDotToken) return undefined;
+        const imported = bindings.packageBinding(value.expression);
+        if (imported?.module === "fastify" && ["default", "fastify", "Fastify", "*"].includes(imported.name)) {
+          roots.set(value, "");
+          return value;
+        }
+        if (!ts.isPropertyAccessExpression(value.expression) || value.expression.questionDotToken ||
+            !instanceMethods.has(value.expression.name.text)) return undefined;
+        value = bindings.value(value.expression.expression);
+      }
+      return undefined;
+    };
 
-    for (const file of sourceFiles) {
-      if (signal?.aborted) throw new Error("semantic_extraction_cancelled");
-      const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
-      const content = readOptionalSourceFile(file, "utf-8");
-      if (
-        !content ||
-        (!content.includes("fastify") &&
-          !content.includes("Fastify") &&
-          !content.includes(".register") &&
-          !content.includes(".route") &&
-          !content.includes(".get") &&
-          !content.includes(".post") &&
-          !content.includes(".addSchema"))
-      ) {
-        continue;
+    const readCall = (call: ts.CallExpression, plugin?: ts.FunctionLikeDeclaration) => {
+      signal?.throwIfAborted();
+      const callee = call.expression;
+      if (call.questionDotToken || !ts.isPropertyAccessExpression(callee) || callee.questionDotToken) return;
+      const method = callee.name.text;
+      if (!instanceMethods.has(method)) return;
+      const scope = resolveScope(callee.expression, plugin);
+      if (!scope) return;
+
+      if (method === "addSchema") {
+        const id = literal(option(optionsOf(call.arguments[0]), "$id"))?.replace(/#$/, "");
+        if (!id) return;
+        const entries = schemas.get(scope) ?? new Map<string, Schema | null>();
+        entries.set(id, entries.has(id) ? null : { id, call });
+        schemas.set(scope, entries);
+        return;
       }
 
-      const fileData = await parseWithTreeSitter(
-        "typescript",
-        content,
-        (rootNode) => this.extractFileAst(file, relPath, rootNode, resolver)
+      if (method === "register") {
+        let expression = bindings.value(call.arguments[0]);
+        let ignorePrefix = false;
+        let unresolvedEncapsulation = false;
+        if (expression && ts.isCallExpression(expression) &&
+            bindings.packageBinding(expression.expression)?.module === "fastify-plugin") {
+          const wrapperOptions = optionsOf(expression.arguments[1]);
+          const encapsulate = option(wrapperOptions, "encapsulate");
+          unresolvedEncapsulation = Boolean(encapsulate && encapsulate.kind !== ts.SyntaxKind.TrueKeyword &&
+            encapsulate.kind !== ts.SyntaxKind.FalseKeyword || expression.arguments[1] && !wrapperOptions ||
+            wrapperOptions && !encapsulate && hasUnknownFields(wrapperOptions));
+          ignorePrefix = encapsulate?.kind !== ts.SyntaxKind.TrueKeyword;
+          expression = expression.arguments[0];
+        }
+        const target = bindings.handler(expression);
+        if (!target?.node.body || target.node === scope) return;
+        const opts = optionsOf(call.arguments[1]);
+        const prefixArg = option(opts, "prefix");
+        const prefix = unresolvedEncapsulation ? undefined : ignorePrefix || !call.arguments[1] ? "" :
+          prefixArg ? literal(prefixArg)?.replace(/\/+$/, "") : opts && !hasUnknownFields(opts) ? "" : undefined;
+        mounts.push({ parent: scope, child: target.node, prefix });
+        const sources = parents.get(target.node) ?? new Set<Scope>();
+        sources.add(scope);
+        parents.set(target.node, sources);
+        if (!seenPlugins.has(target.node)) {
+          plugins.push(target.node);
+          seenPlugins.add(target.node);
+        }
+        return;
+      }
+
+      if (method !== "route" && !verbs.has(method)) return;
+      const opts = optionsOf(call.arguments[method === "route" ? 0 : 1]);
+      const target = method !== "route" && call.arguments.length >= 3 ? call.arguments[2] :
+        (opts && objectMember(opts, "handler")) ?? (method !== "route" && !opts ? call.arguments[1] : undefined);
+      const uri = method === "route" ? literal(option(opts, "url") ?? option(opts, "path")) : literal(call.arguments[0]);
+      const methodValue = option(opts, "method");
+      const strings = method === "route"
+        ? (methodValue && ts.isArrayLiteralExpression(methodValue) ? methodValue.elements.map(literal) : [literal(methodValue)])
+        : [method === "all" ? "ANY" : method.toUpperCase()];
+      if (uri === undefined || !target || !strings.length ||
+          !strings.every((value): value is string => value !== undefined && /^[a-z]+$/i.test(value))) return;
+      const hookExpressions = hookNames.flatMap(name => {
+        const hint = option(opts, name);
+        return !hint ? [] : ts.isArrayLiteralExpression(hint) ? [...hint.elements] : [hint];
+      });
+      const handler = ts.isMethodDeclaration(target) && target.body
+        ? { node: target, name: nameText(target.name) ?? "handler" }
+        : ts.isMethodDeclaration(target) ? undefined : bindings.handler(target);
+      const schema = optionsOf(option(opts, "schema"));
+      const body = optionsOf(option(schema, "body"));
+      const schemaRef = literal(option(body ?? schema, "$ref"));
+      const type = call.typeArguments?.[0];
+      const dto = type && ts.isTypeLiteralNode(type) && type.members.find(member =>
+        ts.isPropertySignature(member) && nameText(member.name) === "Body",
       );
+      const bodyType = dto && ts.isPropertySignature(dto) ? dto.type?.getText() : undefined;
+      routes.push({
+        scope, call, uri, methods: [...new Set(strings.map(value => value.toUpperCase()))],
+        handler, target, hooks: hookExpressions, schemaRef, bodyType, rootSlash: literal(option(opts, "prefixTrailingSlash")),
+      });
+    };
 
-      if (fileData) {
-        allRoutes.push(...fileData.routes);
-        allRegisters.push(...fileData.registers);
-        for (const [id, s] of fileData.schemas.entries()) {
-          knownSchemas.set(id, s);
-          // also normalize by stripping trailing '#'
-          if (id.endsWith("#")) {
-            knownSchemas.set(id.slice(0, -1), s);
-          }
-        }
-        if (fileData.resolvedImports.size > 0) {
-          fileImports.set(relPath, fileData.resolvedImports);
-        }
-        if (fileData.definedScopes.size > 0) {
-          fileScopes.set(relPath, fileData.definedScopes);
-        }
-      }
+    for (const file of files) {
+      signal?.throwIfAborted();
+      const unit = bindings.load(file);
+      if (unit) visitRouteCalls(unit.source, readCall);
+    }
+    for (let index = 0; index < plugins.length; index++) {
+      signal?.throwIfAborted();
+      const plugin = plugins[index]!;
+      if (plugin.body) visitRouteCalls(plugin.body, call => readCall(call, plugin));
     }
 
-    // Resolve Scope Prefix DAG
-    const scopePrefixes = this.resolveScopePrefixes(allRegisters, fileImports, fileScopes);
+    const prefixes = composeMountPrefixes(roots, mounts, signal);
+    const schemaAt = (scope: Scope, id: string, seen = new Set<Scope>()): Schema | undefined => {
+      if (seen.has(scope) || seen.size >= 64) return undefined;
+      const local = schemas.get(scope)?.get(id);
+      if (local !== undefined) return local ?? undefined;
+      const matches = new Set([...parents.get(scope) ?? []].map(parent => schemaAt(parent, id, new Set([...seen, scope]))));
+      return matches.size === 1 ? [...matches][0] : undefined;
+    };
 
-    // Build Vertical Slices
-    for (const route of allRoutes) {
-      const prefixes = scopePrefixes.get(route.scopeId) || [""];
+    const slices: VerticalSliceCandidate[] = [];
+    for (const route of routes) {
+      signal?.throwIfAborted();
+      const routeFile = relative(route.call);
+      const routeLine = lineOf(route.call);
+      const actionName = route.handler ? (route.handler.name === "callback" ? "closure" : route.handler.name) :
+        route.target?.getText() ?? "handler";
+      const controllerFile = route.handler ? relative(route.handler.node) : null;
+      const controllerLine = route.handler ? lineOf(route.handler.node) : 0;
+      const controller = path.basename(controllerFile ?? routeFile).replace(/\.[^.]+$/, "");
+      const evidence: ExecutionChainNode[] = [];
+      if (route.bodyType) {
+        evidence.push({
+          stage: "validation", symbol: route.bodyType, file: routeFile, line: routeLine, description: "Fastify Body DTO",
+        });
+      }
+      if (route.schemaRef) {
+        const known = schemaAt(route.scope, route.schemaRef.replace(/#$/, ""));
+        evidence.push(known ? {
+          stage: "validation", symbol: known.id, file: relative(known.call), line: lineOf(known.call),
+          description: "Resolved Fastify Schema: " + known.id,
+        } : {
+          stage: "validation", symbol: "unresolved:$ref", file: routeFile, line: routeLine,
+          description: "Unresolved schema reference: " + route.schemaRef,
+        });
+      }
+      for (const hook of route.hooks) {
+        evidence.push({
+          stage: "middleware", symbol: hook.getText(), file: relative(hook), line: lineOf(hook), description: "Fastify Hook Argument",
+        });
+      }
+      if (controllerFile) {
+        const reference = route.target && (ts.isIdentifier(route.target) || ts.isPropertyAccessExpression(route.target))
+          ? route.target.getText() : actionName;
+        evidence.push({
+          stage: "controller", symbol: reference, file: controllerFile, line: controllerLine, description: "Fastify Action Handler",
+        });
+      }
 
-      for (const prefix of prefixes) {
-        for (const httpMethod of route.httpMethods) {
-          const fullUri = normalizeRouteUri(prefix, route.rawPath);
-          const actionSymbol = route.handler.symbol;
-          const rootIdent = actionSymbol.includes(".") ? actionSymbol.split(".")[0] : actionSymbol;
-          const resolvedControllerFile = fileImports.get(route.relPath)?.get(rootIdent) || route.relPath;
-          const fileBase = path.basename(route.relPath).replace(/\.[^.]+$/, "");
-          const controllerClass = actionSymbol.includes(".")
-            ? actionSymbol.split(".")[0]
-            : fileBase.charAt(0).toUpperCase() + fileBase.slice(1);
-          const actionName = actionSymbol.includes(".") ? actionSymbol.split(".").pop()! : actionSymbol;
-
-          const chain: Array<{ stage: string; symbol: string; file?: string; line?: number; description?: string }> = [
-            {
-              stage: "ingress",
-              symbol: `${httpMethod} ${fullUri}`,
-              file: route.relPath,
-              line: route.routeLine,
-              description: `Fastify Route: ${httpMethod} ${fullUri}`,
-            },
-          ];
-
-          // Schema / DTO stage
-          if (route.bodyDto) {
-            chain.push({
-              stage: "validation",
-              symbol: route.bodyDto,
-              file: route.relPath,
-              line: route.routeLine,
-              description: `Fastify Body DTO: ${route.bodyDto}`,
-            });
-          }
-
-          if (route.schemaRef) {
-            const rawRef = route.schemaRef;
-            const strippedRef = rawRef.endsWith("#") ? rawRef.slice(0, -1) : rawRef;
-            const known = knownSchemas.get(rawRef) || knownSchemas.get(strippedRef);
-
-            if (known) {
-              chain.push({
-                stage: "validation",
-                symbol: known.id,
-                file: known.file,
-                line: known.line,
-                description: `Resolved Fastify Schema: ${known.id}`,
-              });
-            } else {
-              // Unresolved $ref: do not hallucinate models
-              chain.push({
-                stage: "validation",
-                symbol: "unresolved:$ref",
-                file: route.relPath,
-                line: route.routeLine,
-                description: `Unresolved schema reference: ${rawRef}`,
-              });
-            }
-          }
-
-          // Hooks / Middleware
-          for (const hook of route.hooks) {
-            chain.push({
-              stage: "middleware",
-              symbol: hook.symbol,
-              file: route.relPath,
-              line: hook.line,
-              description: `Fastify Hook: ${hook.symbol}`,
-            });
-          }
-
-          // Controller Action
-          chain.push({
-            stage: "controller",
-            symbol: actionSymbol,
-            file: resolvedControllerFile,
-            line: route.handler.line,
-            description: `Fastify Action Handler`,
-          });
-
+      for (const prefix of prefixes.get(route.scope) ?? []) {
+        const uri = route.uri === "/" && prefix && route.rootSlash !== "slash" ? prefix :
+          prefix + "/" + route.uri.replace(/^\/+/, "");
+        for (const method of route.methods) {
+          const chain: ExecutionChainNode[] = [{
+            stage: "ingress", symbol: method + " " + uri, file: routeFile, line: routeLine, description: "Fastify Route Registration",
+          }, ...evidence];
           slices.push({
             domain_id: domainId ?? null,
-            feature_key: `fastify.${controllerClass.toLowerCase()}.${actionName}`,
-            http_method: httpMethod,
-            route_uri: fullUri,
-            route_name: `${controllerClass}.${actionName}`,
-            controller_class: controllerClass,
-            action_name: actionName,
-            controller_file: resolvedControllerFile,
-            controller_line: route.handler.line,
-            architecture_style: "mvc",
-            entry_kind: "http_route",
+            feature_key: `fastify.${controller.toLowerCase()}.${actionName}`,
+            http_method: method, route_uri: uri, route_name: `${controller}.${actionName}`,
+            controller_class: controller, action_name: actionName, controller_file: controllerFile,
+            controller_line: controllerLine, architecture_style: "mvc", entry_kind: "http_route",
             execution_chain_json: JSON.stringify(chain),
           });
         }
       }
     }
-
     return slices;
   }
-
-  private extractFileAst(
-    _filePath: string,
-    relPath: string,
-    rootNode: Parser.SyntaxNode,
-    resolver: ImportResolver
-  ): {
-    routes: RawFastifyRoute[];
-    registers: RawFastifyRegister[];
-    schemas: Map<string, KnownSchema>;
-    resolvedImports: Map<string, string>;
-    definedScopes: Set<string>;
-  } {
-    const routes: RawFastifyRoute[] = [];
-    const registers: RawFastifyRegister[] = [];
-    const schemas = new Map<string, KnownSchema>();
-    const resolvedImports = new Map<string, string>();
-    const definedScopes = new Set<string>();
-
-    definedScopes.add(`${relPath}#root`);
-
-    // 1. Collect static imports
-    for (const child of rootNode.namedChildren) {
-      if (child.type === "import_statement") {
-        const sourceNode =
-          child.childForFieldName("source") ??
-          child.namedChildren.find((c) => c.type === "string");
-        const specifier = cleanLiteral(sourceNode);
-        if (!specifier) continue;
-
-        const res = resolver.resolve(specifier, relPath);
-        const targetFile = res.status === "resolved" && res.targets[0]?.files[0] ? res.targets[0].files[0] : undefined;
-        if (!targetFile) continue;
-
-        const importClause = child.namedChildren.find((c) => c.type === "import_clause");
-        if (importClause) {
-          for (const ic of importClause.namedChildren) {
-            if (ic.type === "identifier") {
-              resolvedImports.set(ic.text.trim(), targetFile);
-            } else if (ic.type === "namespace_import") {
-              const identNode = ic.namedChildren.find((n) => n.type === "identifier");
-              if (identNode) resolvedImports.set(identNode.text.trim(), targetFile);
-            } else if (ic.type === "named_imports") {
-              for (const spec of ic.namedChildren) {
-                if (spec.type === "import_specifier") {
-                  const alias = spec.childForFieldName("alias");
-                  const name = spec.childForFieldName("name") ?? spec.namedChildren[0];
-                  const ident = alias ? alias.text.trim() : name ? name.text.trim() : "";
-                  if (ident) resolvedImports.set(ident, targetFile);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // 2. Discover named functions / scopes in file
-    const registerScope = (node: Parser.SyntaxNode): void => {
-      if (node.type === "function_declaration") {
-        const nameNode = node.childForFieldName("name");
-        if (nameNode) {
-          definedScopes.add(`${relPath}#${nameNode.text.trim()}`);
-        }
-      } else if (node.type === "variable_declarator") {
-        const nameNode = node.childForFieldName("name");
-        const initNode = node.childForFieldName("value");
-        if (nameNode && initNode && (initNode.type === "arrow_function" || initNode.type === "function_expression" || initNode.type === "call_expression")) {
-          definedScopes.add(`${relPath}#${nameNode.text.trim()}`);
-        }
-      } else if (node.type === "export_statement") {
-        for (const child of node.namedChildren) {
-          if (child.type === "function_declaration" || child.type === "arrow_function" || child.type === "function_expression" || child.type === "function") {
-            definedScopes.add(`${relPath}#default`);
-          }
-        }
-      }
-      for (const child of node.namedChildren) {
-        registerScope(child);
-      }
-    };
-    registerScope(rootNode);
-
-    // 3. Walk call expressions
-    const walk = (node: Parser.SyntaxNode): void => {
-      if (node.type === "call_expression") {
-        const fnNode = node.childForFieldName("function");
-        if (fnNode && fnNode.type === "member_expression") {
-          const propNode = fnNode.childForFieldName("property");
-          const argsNode = node.childForFieldName("arguments");
-
-          if (propNode && argsNode) {
-            const methodName = propNode.text.trim();
-            const args = argsNode.namedChildren;
-            const currentScopeId = this.findEnclosingScope(node, relPath);
-
-            // A. app.addSchema({ $id: "userSchema", ... })
-            if (methodName === "addSchema" && args.length >= 1) {
-              const schemaId = this.extractSchemaId(args[0]);
-              if (schemaId) {
-                schemas.set(schemaId, {
-                  id: schemaId,
-                  file: relPath,
-                  line: node.startPosition.row + 1,
-                });
-              }
-            }
-
-            // B. app.register(plugin, { prefix: "/api" })
-            else if (methodName === "register" && args.length >= 1) {
-              const pluginArg = this.unwrapPluginNode(args[0]);
-              let prefix = "";
-              if (args.length >= 2 && args[1].type === "object") {
-                prefix = this.extractObjectPropertyString(args[1], "prefix") ?? "";
-              }
-
-              if (pluginArg) {
-                if (pluginArg.type === "identifier") {
-                  registers.push({
-                    file: relPath,
-                    relPath,
-                    parentScopeId: currentScopeId,
-                    targetPluginSymbol: pluginArg.text.trim(),
-                    prefix,
-                    line: node.startPosition.row + 1,
-                  });
-                } else if (pluginArg.type === "arrow_function" || pluginArg.type === "function_expression") {
-                  const inlineScopeId = `${relPath}#inline_${pluginArg.startPosition.row + 1}_${pluginArg.startPosition.column}`;
-                  definedScopes.add(inlineScopeId);
-                  registers.push({
-                    file: relPath,
-                    relPath,
-                    parentScopeId: currentScopeId,
-                    targetScopeId: inlineScopeId,
-                    prefix,
-                    line: node.startPosition.row + 1,
-                  });
-                }
-              }
-            }
-
-            // C. fastify.route({ method: 'GET', url: '/path', handler: ... })
-            else if (methodName === "route" && args.length >= 1 && args[0].type === "object") {
-              const routeObj = args[0];
-              const rawMethods = this.extractRouteMethods(routeObj);
-              const rawPath = this.extractObjectPropertyString(routeObj, "url") ?? this.extractObjectPropertyString(routeObj, "path");
-
-              if (rawPath !== undefined && rawMethods.length > 0) {
-                const handler = this.extractHandlerFromRoute(routeObj, args[1]);
-                const hooks = this.extractHooksFromOptions(routeObj);
-                const { schemaRef, bodyDto } = this.extractSchemaFromRoute(node, routeObj);
-
-                routes.push({
-                  file: relPath,
-                  relPath,
-                  scopeId: currentScopeId,
-                  httpMethods: rawMethods,
-                  rawPath,
-                  hooks,
-                  handler,
-                  bodyDto,
-                  schemaRef,
-                  routeLine: node.startPosition.row + 1,
-                });
-              }
-            }
-
-            // D. Shorthand methods: fastify.get('/path', [opts], handler)
-            else if (FASTIFY_VERBS.has(methodName.toLowerCase())) {
-              const httpMethod = methodName.toUpperCase();
-              if (args.length >= 2) {
-                const rawPath = cleanLiteral(args[0]);
-                if (rawPath !== undefined) {
-                  let handlerNode = args[args.length - 1];
-                  let optsNode: Parser.SyntaxNode | undefined;
-                  const hooks: Array<{ symbol: string; line: number }> = [];
-
-                  if (args.length === 2) {
-                    if (args[1].type === "object") {
-                      optsNode = args[1];
-                      const innerHandler = this.findObjectPropertyNode(args[1], "handler");
-                      if (innerHandler) handlerNode = innerHandler;
-                    }
-                  } else {
-                    optsNode = args[1];
-                  }
-
-                  if (optsNode) {
-                    hooks.push(...this.extractHooksFromOptions(optsNode));
-                  }
-
-                  const handler = this.extractSingleHandler(handlerNode);
-                  const { schemaRef, bodyDto } = this.extractSchemaFromRoute(node, optsNode);
-
-                  routes.push({
-                    file: relPath,
-                    relPath,
-                    scopeId: currentScopeId,
-                    httpMethods: [httpMethod],
-                    rawPath,
-                    hooks,
-                    handler,
-                    bodyDto,
-                    schemaRef,
-                    routeLine: node.startPosition.row + 1,
-                  });
-                }
-              }
-            }
-          }
-        }
-      }
-
-      for (const child of node.namedChildren) {
-        walk(child);
-      }
-    };
-
-    walk(rootNode);
-
-    return { routes, registers, schemas, resolvedImports, definedScopes };
-  }
-
-  private unwrapPluginNode(node: Parser.SyntaxNode): Parser.SyntaxNode {
-    // Unwraps fp(...) or fastifyPlugin(...) wrapper
-    if (node.type === "call_expression") {
-      const fn = node.childForFieldName("function");
-      if (fn && (fn.text.trim() === "fp" || fn.text.trim() === "fastifyPlugin")) {
-        const args = node.childForFieldName("arguments");
-        if (args && args.namedChildren.length > 0) {
-          return args.namedChildren[0];
-        }
-      }
-    }
-    return node;
-  }
-
-  private findEnclosingScope(node: Parser.SyntaxNode, relPath: string): string {
-    let curr: Parser.SyntaxNode | null = node.parent;
-    while (curr) {
-      if (curr.type === "function_declaration") {
-        if (curr.parent?.type === "export_statement") return `${relPath}#default`;
-        const name = curr.childForFieldName("name");
-        if (name) return `${relPath}#${name.text.trim()}`;
-      } else if (curr.type === "variable_declarator") {
-        const name = curr.childForFieldName("name");
-        if (name) return `${relPath}#${name.text.trim()}`;
-      } else if (curr.type === "arrow_function" || curr.type === "function_expression" || curr.type === "function") {
-        if (curr.parent?.type === "export_statement") return `${relPath}#default`;
-        if (curr.parent?.type === "arguments") {
-          const call = curr.parent.parent;
-          if (call && call.type === "call_expression") {
-            const callFn = call.childForFieldName("function");
-            if (callFn?.type === "member_expression" && callFn.childForFieldName("property")?.text.trim() === "register") {
-              return `${relPath}#inline_${curr.startPosition.row + 1}_${curr.startPosition.column}`;
-            }
-          }
-        }
-      }
-      curr = curr.parent;
-    }
-    return `${relPath}#root`;
-  }
-
-  private extractSchemaId(node: Parser.SyntaxNode): string | undefined {
-    if (node.type === "object") {
-      return this.extractObjectPropertyString(node, "$id");
-    }
-    return undefined;
-  }
-
-  private extractRouteMethods(routeObj: Parser.SyntaxNode): string[] {
-    const prop = this.findObjectPropertyNode(routeObj, "method");
-    if (!prop) return ["GET"];
-
-    if (prop.type === "string") {
-      const val = cleanLiteral(prop);
-      return val ? [val.toUpperCase()] : ["GET"];
-    }
-
-    if (prop.type === "array") {
-      const methods: string[] = [];
-      for (const el of prop.namedChildren) {
-        const val = cleanLiteral(el);
-        if (val) methods.push(val.toUpperCase());
-      }
-      return methods.length > 0 ? methods : ["GET"];
-    }
-
-    return ["GET"];
-  }
-
-  private extractHandlerFromRoute(
-    routeObj: Parser.SyntaxNode,
-    secondaryArg?: Parser.SyntaxNode
-  ): { symbol: string; line: number } {
-    const handlerNode = this.findObjectPropertyNode(routeObj, "handler") ?? secondaryArg;
-    if (handlerNode) {
-      return this.extractSingleHandler(handlerNode);
-    }
-    return { symbol: "closure", line: routeObj.startPosition.row + 1 };
-  }
-
-  private extractSingleHandler(node: Parser.SyntaxNode): { symbol: string; line: number } {
-    const line = node.startPosition.row + 1;
-    if (node.type === "identifier" || node.type === "member_expression") {
-      return { symbol: node.text.trim(), line };
-    }
-    if (node.type === "arrow_function" || node.type === "function_expression" || node.type === "function") {
-      const nameNode = node.childForFieldName("name");
-      const name = nameNode ? nameNode.text.trim() : "closure";
-      return { symbol: name, line };
-    }
-    return { symbol: "closure", line };
-  }
-
-  private extractHooksFromOptions(optsNode: Parser.SyntaxNode): Array<{ symbol: string; line: number }> {
-    const hooks: Array<{ symbol: string; line: number }> = [];
-    if (optsNode.type !== "object") return hooks;
-
-    for (const hookName of ["preHandler", "onRequest", "preValidation", "preSerialization"]) {
-      const hookProp = this.findObjectPropertyNode(optsNode, hookName);
-      if (hookProp) {
-        if (hookProp.type === "array") {
-          for (const el of hookProp.namedChildren) {
-            hooks.push(this.extractSingleHandler(el));
-          }
-        } else {
-          hooks.push(this.extractSingleHandler(hookProp));
-        }
-      }
-    }
-
-    return hooks;
-  }
-
-  private extractSchemaFromRoute(
-    callNode: Parser.SyntaxNode,
-    optsNode?: Parser.SyntaxNode
-  ): { schemaRef?: string; bodyDto?: string } {
-    let schemaRef: string | undefined;
-    let bodyDto: string | undefined;
-
-    // 1. Check TypeScript type arguments: fastify.post<{ Body: CreateUserDto }>(...)
-    const typeArgs = callNode.childForFieldName("type_arguments");
-    if (typeArgs) {
-      for (const child of typeArgs.namedChildren) {
-        if (child.type === "type_literal" || child.type === "object_type") {
-          for (const prop of child.namedChildren) {
-            if (prop.type === "property_signature") {
-              const nameNode = prop.childForFieldName("name");
-              const typeNode = prop.childForFieldName("type");
-              if (nameNode && nameNode.text.trim().toLowerCase() === "body" && typeNode) {
-                // typeNode is type_annotation -> type_identifier
-                const ident = typeNode.namedChildren.find((c) => c.type === "type_identifier") ?? typeNode;
-                const dtoName = ident.text.trim().replace(/^:\s*/, "");
-                if (dtoName) bodyDto = dtoName;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // 2. Check options.schema.body.$ref
-    if (optsNode && optsNode.type === "object") {
-      const schemaNode = this.findObjectPropertyNode(optsNode, "schema");
-      if (schemaNode && schemaNode.type === "object") {
-        const bodyProp = this.findObjectPropertyNode(schemaNode, "body");
-        if (bodyProp && bodyProp.type === "object") {
-          schemaRef = this.extractObjectPropertyString(bodyProp, "$ref");
-        } else {
-          const directRef = this.extractObjectPropertyString(schemaNode, "$ref");
-          if (directRef) schemaRef = directRef;
-        }
-      }
-    }
-
-    return { schemaRef, bodyDto };
-  }
-
-  private findObjectPropertyNode(objNode: Parser.SyntaxNode, key: string): Parser.SyntaxNode | undefined {
-    if (objNode.type !== "object") return undefined;
-    for (const child of objNode.namedChildren) {
-      if (child.type === "pair") {
-        const keyNode = child.childForFieldName("key");
-        if (keyNode) {
-          const k = cleanLiteral(keyNode) ?? keyNode.text.trim();
-          if (k === key) {
-            return child.childForFieldName("value") ?? undefined;
-          }
-        }
-      }
-    }
-    return undefined;
-  }
-
-  private extractObjectPropertyString(objNode: Parser.SyntaxNode, key: string): string | undefined {
-    const valNode = this.findObjectPropertyNode(objNode, key);
-    return cleanLiteral(valNode);
-  }
-
-  private resolveScopePrefixes(
-    registers: RawFastifyRegister[],
-    fileImports: Map<string, Map<string, string>>,
-    fileScopes: Map<string, Set<string>>
-  ): Map<string, string[]> {
-    // Map: scopeId -> Set of prefix strings
-    const prefixes = new Map<string, Set<string>>();
-
-    const getPrefixes = (key: string): Set<string> => {
-      let set = prefixes.get(key);
-      if (!set) {
-        set = new Set<string>();
-        prefixes.set(key, set);
-      }
-      return set;
-    };
-
-    // 1. Identify all parent scopes that register children or top-level roots
-    const childScopes = new Set<string>();
-
-    for (const reg of registers) {
-      let targetScopeId = reg.targetScopeId;
-      if (!targetScopeId && reg.targetPluginSymbol) {
-        const importedFile = fileImports.get(reg.relPath)?.get(reg.targetPluginSymbol);
-        if (importedFile) {
-          targetScopeId = `${importedFile}#${reg.targetPluginSymbol}`;
-          // If imported target does not have exact symbol scope, alias to default or first scope in file
-          const targets = fileScopes.get(importedFile);
-          if (targets && !targets.has(targetScopeId)) {
-            if (targets.has(`${importedFile}#default`)) {
-              targetScopeId = `${importedFile}#default`;
-            } else {
-              targetScopeId = Array.from(targets)[0];
-            }
-          }
-        } else {
-          // Local symbol in same file
-          targetScopeId = `${reg.relPath}#${reg.targetPluginSymbol}`;
-        }
-      }
-
-      if (targetScopeId) {
-        childScopes.add(targetScopeId);
-      }
-    }
-
-    // 2. Root scopes: any scope with no incoming registers, or any #root scope
-    for (const scopes of fileScopes.values()) {
-      for (const sc of scopes) {
-        if (!childScopes.has(sc) || sc.endsWith("#root")) {
-          getPrefixes(sc).add("");
-        }
-      }
-    }
-
-    // 3. Propagate prefixes along registers
-    let changed = true;
-    let iterations = 0;
-
-    while (changed && iterations < 15) {
-      changed = false;
-      iterations++;
-
-      for (const reg of registers) {
-        let targetScopeId = reg.targetScopeId;
-        if (!targetScopeId && reg.targetPluginSymbol) {
-          const importedFile = fileImports.get(reg.relPath)?.get(reg.targetPluginSymbol);
-          if (importedFile) {
-            targetScopeId = `${importedFile}#${reg.targetPluginSymbol}`;
-            const targets = fileScopes.get(importedFile);
-            if (targets && !targets.has(targetScopeId)) {
-              if (targets.has(`${importedFile}#default`)) {
-                targetScopeId = `${importedFile}#default`;
-              } else if (targets.size > 0) {
-                targetScopeId = Array.from(targets)[0];
-              }
-            }
-          } else {
-            targetScopeId = `${reg.relPath}#${reg.targetPluginSymbol}`;
-          }
-        }
-
-        if (!targetScopeId) continue;
-
-        const parentPrefixes = getPrefixes(reg.parentScopeId);
-        if (parentPrefixes.size === 0) continue;
-        const basePrefixes = Array.from(parentPrefixes);
-        const targetSet = getPrefixes(targetScopeId);
-
-        for (const baseP of basePrefixes) {
-          const combined = normalizeRouteUri(baseP, reg.prefix);
-          if (!targetSet.has(combined)) {
-            targetSet.add(combined);
-            changed = true;
-          }
-        }
-      }
-    }
-
-    const result = new Map<string, string[]>();
-    for (const [k, set] of prefixes.entries()) {
-      result.set(k, Array.from(set));
-    }
-    return result;
-  }
 }
-

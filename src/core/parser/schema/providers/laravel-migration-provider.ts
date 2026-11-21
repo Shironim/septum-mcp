@@ -2,6 +2,7 @@ import { blankCommentsAndStrings } from "../../boundary-tracker.ts";
 import { readOptionalSourceFile } from "../../../resources/source-files.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { warnIfUnexpectedParserError } from "../../extractors/manifest-helpers.ts";
 import type {
   SchemaFieldSummary,
   SchemaMetadata,
@@ -78,7 +79,9 @@ export class LaravelMigrationSchemaProvider implements StackSchemaProvider {
             if (/protected\s+\$table\s*=/.test(mask.slice(tableMatch.index, tableMatch.index + tableMatch[0].length))) return tableMatch[1]!;
           }
           if (/protected\s+\$table\s*=/.test(mask)) return "";
-        } catch {}
+        } catch (err: unknown) {
+          warnIfUnexpectedParserError(`Failed to read entity file ${fullEntityPath}`, err);
+        }
       }
     }
 

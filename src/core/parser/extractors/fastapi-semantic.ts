@@ -1,21 +1,28 @@
+import { composeMountPrefixes } from "./route-prefixes.ts";
 import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import { readPythonStaticString as cleanLiteral } from "../static-string.ts";
 import type Parser from "web-tree-sitter";
+import {
+  pythonCallArgument, pythonCallUsesUnpacking, pythonLiteralMethods, resolvePythonRouterTarget,
+  visitPythonRouterModule, type PythonImport, type PythonRouterTarget,
+} from "./python-route-ast.ts";
 import { parseSourceWithTreeSitter } from "../wasm-loader.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { anyFileContains } from "./manifest-helpers.ts";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
 
 interface ExtractedRoute {
   file: string;
   relPath: string;
   routerVar: string;
+  routerKey: string;
+  name?: string;
   httpMethod: string;
   rawPath: string;
   actionName: string;
-  params: string;
   lineIndex: number;
   actionLine: number;
   validationSchema?: string;
@@ -28,22 +35,28 @@ interface ExtractedRoute {
 
 interface ExtractedInclusion {
   file: string;
-  relPath: string;
-  parentVar: string;
-  targetExpr: string;
+  parentKey: string;
+  target: PythonRouterTarget;
   prefix: string | undefined;
-  line: number;
 }
 
-interface ImportBinding {
-  module: string;
-  symbol?: string;
-}
+type Router = { prefix: string | undefined; isApp: boolean; guards: string[]; dependencies: string[] };
+type Node = Parser.SyntaxNode;
 
+const verbs = /^(get|post|put|patch|delete|options|head|trace)$/;
+
+function routeMethods(call: Node, method: string): string[] {
+  if (verbs.test(method)) return [method.toUpperCase()];
+  const methods = pythonCallArgument(call, "methods");
+  if (!methods || methods.type === "none") return ["GET"];
+  const literal = pythonLiteralMethods(methods);
+  return literal?.length === 0 ? ["GET"] : literal ?? [];
+}
 
 function normalizeRouteUri(prefix: string, rawPath: string): string {
   const p = (prefix ?? "").trim().replace(/\/+$/, "");
   let r = (rawPath ?? "").trim();
+  if (!r) return p || "/";
   if (!r.startsWith("/")) r = "/" + r;
   if (r === "/" && p.length > 0) return p + "/";
   if (r === "/" && p.length === 0) return "/";
@@ -86,31 +99,15 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
   public canHandle(projectRoot: string, framework?: string): boolean {
     if (framework === "fastapi") return true;
 
-    // Check configuration manifests
-    for (const manifest of ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"]) {
-      const fullPath = path.join(projectRoot, manifest);
-      if (fs.existsSync(fullPath)) {
-        try {
-          const content = fs.readFileSync(fullPath, "utf-8").toLowerCase();
-          if (content.includes("fastapi")) return true;
-        } catch {}
-      }
+    if (anyFileContains(projectRoot, ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"], ["fastapi"], true)) {
+      return true;
     }
 
-    // Check entrypoint files
-    for (const entry of ["main.py", "app.py", "api.py", "src/main.py", "app/main.py"]) {
-      const fullPath = path.join(projectRoot, entry);
-      if (fs.existsSync(fullPath)) {
-        try {
-          const content = fs.readFileSync(fullPath, "utf-8");
-          if (content.includes("from fastapi") || content.includes("import fastapi")) {
-            return true;
-          }
-        } catch {}
-      }
-    }
-
-    return false;
+    return anyFileContains(
+      projectRoot,
+      ["main.py", "app.py", "api.py", "src/main.py", "app/main.py"],
+      ["from fastapi", "import fastapi"]
+    );
   }
 
   public async extractSlices(projectRoot: string, domainId?: number, signal?: AbortSignal, inventory?: SourceInventory): Promise<VerticalSliceCandidate[]> {
@@ -120,22 +117,17 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
 
     const allRoutes: ExtractedRoute[] = [];
     const allInclusions: ExtractedInclusion[] = [];
-    const localRouters = new Map<
-      string,
-      { prefix: string | undefined; isApp: boolean; guards?: string[]; dependencies?: string[] }
-    >();
-    const fileImports = new Map<string, Map<string, ImportBinding>>();
+    const localRouters = new Map<string, Router>();
+    const fileRouters = new Map<string, Map<string, string>>();
+    const fileImports = new Map<string, Map<string, PythonImport>>();
 
     for (const file of pyFiles) {
       signal?.throwIfAborted();
       const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
       const content = readOptionalSourceFile(file, "utf-8");
-      if (!content || (!content.includes("@") && !content.includes("include_router") && !content.includes("APIRouter") && !content.includes("FastAPI"))) {
+      if (!content || (!content.includes("@") && !content.includes("include_router") && !content.includes("APIRouter") && !content.includes("FastAPI") && !content.includes("add_api_route"))) {
         continue;
       }
-
-      const importsInFile = new Map<string, ImportBinding>();
-      fileImports.set(relPath, importsInFile);
 
       const parsed = await parseSourceWithTreeSitter("python", content, (root) => {
         const walk = (node: Parser.SyntaxNode, visit: (node: Parser.SyntaxNode) => void) => {
@@ -143,239 +135,162 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
           for (const child of node.namedChildren) walk(child, visit);
         };
 
-        // 1. Collect import statements
-        walk(root, (node) => {
-          if (node.type === "import_statement") {
-            for (const child of node.namedChildren) {
-              if (child.type === "dotted_name") {
-                const mod = child.text.trim();
-                const alias = mod.split(".").pop() || mod;
-                importsInFile.set(alias, { module: mod });
-              } else if (child.type === "aliased_import") {
-                const orig = child.childForFieldName("name")?.text?.trim();
-                const alias = child.childForFieldName("alias")?.text?.trim();
-                if (orig && alias) {
-                  importsInFile.set(alias, { module: orig });
-                }
-              }
-            }
-          } else if (node.type === "import_from_statement") {
-            const moduleName = node.childForFieldName("module_name")?.text?.trim() || "";
-            for (const child of node.namedChildren) {
-              if (child === node.childForFieldName("module_name")) continue;
-              if (child.type === "dotted_name") {
-                const sym = child.text.trim();
-                importsInFile.set(sym, { module: moduleName || sym, symbol: sym });
-              } else if (child.type === "aliased_import") {
-                const orig = child.childForFieldName("name")?.text?.trim();
-                const alias = child.childForFieldName("alias")?.text?.trim();
-                if (orig && alias) {
-                  importsInFile.set(alias, { module: moduleName || orig, symbol: orig });
-                }
-              }
-            }
-          }
-        });
-
-        // 2. Collect router & app definitions
-        walk(root, (node) => {
-          if (node.type !== "assignment" || node.parent?.parent?.type !== "module") return;
-          const leftName = node.childForFieldName("left")?.text ?? "";
-          const call = node.childForFieldName("right");
-          if (call?.type !== "call") return;
-          const fnText = call.childForFieldName("function")?.text ?? "";
-          const isRouter = /APIRouter$/.test(fnText);
-          const isApp = /FastAPI$/.test(fnText);
-          if (!isRouter && !isApp) return;
-
+        const readRoute = (call: Node, method: string, receiver: string, routerKey: string, fn: Node, line: number) => {
+          if (pythonCallUsesUnpacking(call)) return;
+          const rawPath = cleanLiteral(pythonCallArgument(call, "path", 0));
+          const methods = routeMethods(call, method);
+          const actionName = fn.childForFieldName("name")?.text;
+          if (rawPath === undefined || !methods.length || !actionName) return;
+          const name = cleanLiteral(pythonCallArgument(call, "name"));
           const args = call.childForFieldName("arguments")?.namedChildren ?? [];
-          const keyword = args.find(
-            (child) => child.type === "keyword_argument" && child.childForFieldName("name")?.text === "prefix"
-          );
-          const prefix = keyword ? cleanLiteral(keyword.childForFieldName("value")) : "";
+          const paramsText = fn.childForFieldName("parameters")?.text ?? "";
 
-          // Router-level dependencies: router = APIRouter(dependencies=[Depends(...)])
-          const depsKw = args.find(
-            (child) => child.type === "keyword_argument" && child.childForFieldName("name")?.text === "dependencies"
-          );
-          const routerGuards: string[] = [];
-          const routerDeps: string[] = [];
-          if (depsKw) {
-            const extracted: Array<{ symbol: string; isGuard: boolean }> = [];
-            extractDependsFromNode(depsKw.childForFieldName("value"), extracted);
-            for (const item of extracted) {
-              if (item.isGuard) routerGuards.push(item.symbol);
-              else routerDeps.push(item.symbol);
+          // Extract Pydantic validation schema from typed parameters
+          let validationSchema: string | undefined;
+          const paramsNode = fn.childForFieldName("parameters");
+          if (paramsNode) {
+            for (const param of paramsNode.namedChildren) {
+              if (param.type === "typed_parameter" || param.type === "typed_default_parameter") {
+                const typeNode = param.childForFieldName("type");
+                if (typeNode) {
+                  const detected = extractSchemaType(typeNode.text);
+                  if (detected && !validationSchema) {
+                    validationSchema = detected;
+                  }
+                }
+              }
             }
           }
 
-          localRouters.set(`${relPath}#${leftName}`, {
-            prefix: prefix?.replace(/\/+$/, ""),
-            isApp,
-            guards: routerGuards,
-            dependencies: routerDeps,
-          });
-        });
+          // Fallback schema regex
+          if (!validationSchema) {
+            const schemaMatch = paramsText.match(
+              /[a-zA-Z0-9_]+\s*:\s*([A-Z][a-zA-Z0-9_]*(?:Schema|In|Request|Create|Update|DTO|Body))/
+            );
+            if (schemaMatch) validationSchema = schemaMatch[1];
+          }
 
-        // 3. Collect include_router calls
-        walk(root, (node) => {
-          if (node.type !== "call") return;
-          const fn = node.childForFieldName("function");
-          if (fn?.type !== "attribute" || fn.childForFieldName("attribute")?.text !== "include_router") return;
-          const parentVar = fn.childForFieldName("object")?.text ?? "";
-          const args = node.childForFieldName("arguments")?.namedChildren ?? [];
-          const firstArg = args[0];
-          if (!firstArg || firstArg.type === "keyword_argument") return;
+          // Extract guards and dependencies from Depends(...)
+          let guardSymbol: string | undefined;
+          const inboundDeps: string[] = [];
+          if (paramsNode) {
+            for (const param of paramsNode.namedChildren) {
+              let valNode: Parser.SyntaxNode | null = null;
+              if (param.type === "typed_default_parameter" || param.type === "default_parameter") {
+                valNode = param.childForFieldName("value");
+              }
+              if (valNode?.type === "call" && /Depends$/.test(valNode.childForFieldName("function")?.text ?? "")) {
+                const depArg = valNode.childForFieldName("arguments")?.namedChildren[0];
+                const sym = depArg?.text?.trim();
+                if (sym) {
+                  if (/auth|user|token|permission|guard|role|credential/i.test(sym)) {
+                    guardSymbol = sym;
+                  } else {
+                    inboundDeps.push(sym);
+                  }
+                }
+              }
+            }
+          }
 
-          const targetExpr = firstArg.text.trim();
-          const prefixKw = args.find(
-            (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "prefix"
+          // Fallback guard regex
+          if (!guardSymbol) {
+            const guardMatch = paramsText.match(
+              /Depends\s*\(\s*([a-zA-Z0-9_]*(?:auth|user|token|permission|guard)[a-zA-Z0-9_]*)\s*\)/i
+            );
+            if (guardMatch) guardSymbol = guardMatch[1];
+          }
+
+          // Extract dependencies from decorator: @router.get("/", dependencies=[Depends(...)])
+          const decDepsKw = args.find(
+            (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "dependencies"
           );
-          const incPrefix = prefixKw ? cleanLiteral(prefixKw.childForFieldName("value")) : "";
-          allInclusions.push({
+          if (decDepsKw) {
+            const decExtracted: Array<{ symbol: string; isGuard: boolean }> = [];
+            extractDependsFromNode(decDepsKw.childForFieldName("value"), decExtracted);
+            for (const item of decExtracted) {
+              if (item.isGuard && !guardSymbol) guardSymbol = item.symbol;
+              else inboundDeps.push(item.symbol);
+            }
+          }
+
+          // Extract response_model
+          const rmKw = args.find(
+            (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "response_model"
+          );
+          const responseModel = rmKw?.childForFieldName("value")?.text?.trim();
+
+          const route: Omit<ExtractedRoute, "httpMethod"> = {
             file,
             relPath,
-            parentVar,
-            targetExpr,
-            prefix: incPrefix?.replace(/\/+$/, ""),
-            line: node.startPosition.row + 1,
-          });
-        });
+            routerVar: receiver,
+            routerKey,
+            name,
+            rawPath,
+            actionName,
+            lineIndex: line,
+            actionLine: fn.startPosition.row + 1,
+            validationSchema,
+            guardSymbol,
+            dependencies: inboundDeps,
+            responseModel,
+          };
 
-        // 4. Collect route handler definitions
-        walk(root, (node) => {
-          if (node.type !== "decorated_definition" || node.parent?.type !== "module") return;
-          const fn = node.childForFieldName("definition");
-          if (fn?.type !== "function_definition") return;
-
-          for (const decorator of node.namedChildren.filter((child) => child.type === "decorator")) {
-            const call = decorator.namedChildren[0];
-            const attr = call?.childForFieldName("function");
-            if (call?.type !== "call" || attr?.type !== "attribute") continue;
-            const method = attr.childForFieldName("attribute")?.text ?? "";
-            if (!/^(get|post|put|patch|delete|options|head)$/.test(method)) continue;
-
-            const args = call.childForFieldName("arguments")?.namedChildren ?? [];
-            const rawPath = cleanLiteral(args[0]);
-            if (rawPath === undefined) continue;
-
-            const routerVar = attr.childForFieldName("object")?.text ?? "";
-            const actionName = fn.childForFieldName("name")?.text ?? "";
-            const paramsText = fn.childForFieldName("parameters")?.text ?? "";
-
-            // Extract Pydantic validation schema from typed parameters
-            let validationSchema: string | undefined;
-            const paramsNode = fn.childForFieldName("parameters");
-            if (paramsNode) {
-              for (const param of paramsNode.namedChildren) {
-                if (param.type === "typed_parameter" || param.type === "typed_default_parameter") {
-                  const typeNode = param.childForFieldName("type");
-                  if (typeNode) {
-                    const detected = extractSchemaType(typeNode.text);
-                    if (detected && !validationSchema) {
-                      validationSchema = detected;
-                    }
-                  }
+          const body = fn.childForFieldName("body");
+          if (body) {
+            walk(body, (child) => {
+              if (child.type !== "call") return;
+              const called = child.childForFieldName("function")?.text ?? "";
+              const service = called.match(/^([a-zA-Z0-9_]+_service|[A-Z][a-zA-Z0-9_]*Service)\.([a-zA-Z0-9_]+)$/);
+              if (service && !route.service) {
+                route.service = { symbol: `${service[1]}::${service[2]}`, line: child.startPosition.row + 1 };
+              }
+              if (/^(db\.(add|query)|session\.query)$/.test(called)) {
+                const argument = child.childForFieldName("arguments")?.namedChildren[0];
+                if (argument?.type === "identifier" && /^[A-Z]/.test(argument.text)) {
+                  route.model = argument.text;
                 }
               }
-            }
-
-            // Fallback schema regex
-            if (!validationSchema) {
-              const schemaMatch = paramsText.match(
-                /[a-zA-Z0-9_]+\s*:\s*([A-Z][a-zA-Z0-9_]*(?:Schema|In|Request|Create|Update|DTO|Body))/
-              );
-              if (schemaMatch) validationSchema = schemaMatch[1];
-            }
-
-            // Extract guards and dependencies from Depends(...)
-            let guardSymbol: string | undefined;
-            const inboundDeps: string[] = [];
-            if (paramsNode) {
-              for (const param of paramsNode.namedChildren) {
-                let valNode: Parser.SyntaxNode | null = null;
-                if (param.type === "typed_default_parameter" || param.type === "default_parameter") {
-                  valNode = param.childForFieldName("value");
-                }
-                if (valNode?.type === "call" && /Depends$/.test(valNode.childForFieldName("function")?.text ?? "")) {
-                  const depArg = valNode.childForFieldName("arguments")?.namedChildren[0];
-                  const sym = depArg?.text?.trim();
-                  if (sym) {
-                    if (/auth|user|token|permission|guard|role|credential/i.test(sym)) {
-                      guardSymbol = sym;
-                    } else {
-                      inboundDeps.push(sym);
-                    }
-                  }
-                }
-              }
-            }
-
-            // Fallback guard regex
-            if (!guardSymbol) {
-              const guardMatch = paramsText.match(
-                /Depends\s*\(\s*([a-zA-Z0-9_]*(?:auth|user|token|permission|guard)[a-zA-Z0-9_]*)\s*\)/i
-              );
-              if (guardMatch) guardSymbol = guardMatch[1];
-            }
-
-            // Extract dependencies from decorator: @router.get("/", dependencies=[Depends(...)])
-            const decDepsKw = args.find(
-              (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "dependencies"
-            );
-            if (decDepsKw) {
-              const decExtracted: Array<{ symbol: string; isGuard: boolean }> = [];
-              extractDependsFromNode(decDepsKw.childForFieldName("value"), decExtracted);
-              for (const item of decExtracted) {
-                if (item.isGuard && !guardSymbol) guardSymbol = item.symbol;
-                else inboundDeps.push(item.symbol);
-              }
-            }
-
-            // Extract response_model
-            const rmKw = args.find(
-              (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "response_model"
-            );
-            const responseModel = rmKw?.childForFieldName("value")?.text?.trim();
-
-            const route: ExtractedRoute = {
-              file,
-              relPath,
-              routerVar,
-              httpMethod: method.toUpperCase(),
-              rawPath,
-              actionName,
-              params: paramsText,
-              lineIndex: decorator.startPosition.row + 1,
-              actionLine: fn.startPosition.row + 1,
-              validationSchema,
-              guardSymbol,
-              dependencies: inboundDeps,
-              responseModel,
-            };
-
-            const body = fn.childForFieldName("body");
-            if (body) {
-              walk(body, (child) => {
-                if (child.type !== "call") return;
-                const called = child.childForFieldName("function")?.text ?? "";
-                const service = called.match(/^([a-zA-Z0-9_]+_service|[A-Z][a-zA-Z0-9_]*Service)\.([a-zA-Z0-9_]+)$/);
-                if (service && !route.service) {
-                  route.service = { symbol: `${service[1]}::${service[2]}`, line: child.startPosition.row + 1 };
-                }
-                if (/^(db\.(add|query)|session\.query)$/.test(called)) {
-                  const argument = child.childForFieldName("arguments")?.namedChildren[0];
-                  if (argument?.type === "identifier" && /^[A-Z]/.test(argument.text)) {
-                    route.model = argument.text;
-                  }
-                }
-              });
-            }
-
-            allRoutes.push(route);
+            });
           }
-        });
 
+          for (const httpMethod of methods) allRoutes.push({ ...route, httpMethod });
+        };
+
+        const module = visitPythonRouterModule(root, relPath, {
+          constructorCall(key, _name, constructor, call) {
+            if (!/^(?:fastapi(?:\.routing|\.applications)?\.)?(?:APIRouter|FastAPI)$/.test(constructor)) return false;
+            const isApp = constructor.endsWith("FastAPI");
+            const prefixArg = isApp ? undefined : pythonCallArgument(call, "prefix");
+            const prefix = !isApp && pythonCallUsesUnpacking(call) ? undefined : prefixArg ? cleanLiteral(prefixArg) : "";
+            const dependencies: Array<{ symbol: string; isGuard: boolean }> = [];
+            extractDependsFromNode(pythonCallArgument(call, "dependencies"), dependencies);
+            localRouters.set(key, {
+              prefix: prefix?.replace(/\/+$/, ""),
+              isApp,
+              guards: dependencies.filter(item => item.isGuard).map(item => item.symbol),
+              dependencies: dependencies.filter(item => !item.isGuard).map(item => item.symbol),
+            });
+            return true;
+          },
+          routerCall({ call, key, receiver, method, line }, targets) {
+            if (method === "add_api_route") {
+              const handler = targets.function(pythonCallArgument(call, "endpoint", 1)?.text ?? "");
+              if (handler) readRoute(call, method, receiver, key, handler, line);
+            } else if (method === "include_router") {
+              const target = targets.router(pythonCallArgument(call, "router", 0)?.text ?? "");
+              if (!target) return;
+              const pref = pythonCallArgument(call, "prefix");
+              const prefix = pythonCallUsesUnpacking(call) ? undefined : pref ? cleanLiteral(pref) : "";
+              allInclusions.push({ file, parentKey: key, target, prefix: prefix?.replace(/\/+$/, "") });
+            }
+          },
+          decorator({ call, key, receiver, method, line }, handler) {
+            if (method === "api_route" || verbs.test(method)) readRoute(call, method, receiver, key, handler, line);
+          },
+        }, signal);
+        fileRouters.set(relPath, module.routers);
+        fileImports.set(relPath, module.imports);
         return { symbols: [], dependencies: [] };
       });
 
@@ -384,115 +299,17 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
       }
     }
 
-    // 5. Build Inclusion Graph and Resolve Cross-File Router Targets
-    // Adjacency: parentKey -> Array<{ childKey: string; prefix: string | undefined }>
-    const routerChildren = new Map<string, Array<{ childKey: string; prefix: string | undefined }>>();
-    const incomingInclusions = new Map<string, Array<{ parentKey: string; prefix: string | undefined }>>();
+    const roots = new Map([...localRouters].map(([key, router]) => [key, router.prefix]));
+    const mounts = allInclusions.flatMap(({ file, parentKey, target, prefix }) => {
+      const child = resolvePythonRouterTarget(target, file, resolver, fileRouters);
+      const router = child ? localRouters.get(child) : undefined;
+      if (!child || !router || router.isApp) return [];
+      return [{ parent: parentKey, child, prefix: prefix === undefined || router.prefix === undefined ? undefined : prefix + router.prefix }];
+    });
+    const prefixesByRouter = composeMountPrefixes(roots, mounts, signal);
 
-    for (const inc of allInclusions) {
-      const parentKey = `${inc.relPath}#${inc.parentVar}`;
-      const importsInFile = fileImports.get(inc.relPath) ?? new Map<string, ImportBinding>();
-
-      let targetKey: string | undefined;
-
-      if (inc.targetExpr.includes(".")) {
-        const [objName, propName] = inc.targetExpr.split(".");
-        const binding = importsInFile.get(objName);
-        if (binding) {
-          // Try resolving submodule target first: e.g. from app.routers import orders -> orders.router
-          const subTarget = binding.module ? `${binding.module}.${binding.symbol || objName}` : objName;
-          let res = resolver.resolve(subTarget, inc.file);
-          if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-            targetKey = `${res.targets[0].files[0]}#${propName}`;
-          } else if (binding.module) {
-            res = resolver.resolve(binding.module, inc.file);
-            if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-              targetKey = `${res.targets[0].files[0]}#${propName}`;
-            }
-          }
-        }
-      } else {
-        const binding = importsInFile.get(inc.targetExpr);
-        if (binding) {
-          // Try resolving submoduleTarget first (binding.module + "." + binding.symbol)
-          const subTarget = binding.module && binding.symbol ? `${binding.module}.${binding.symbol}` : (binding.module || binding.symbol!);
-          let res = resolver.resolve(subTarget, inc.file);
-          if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-            targetKey = `${res.targets[0].files[0]}#router`;
-          } else if (binding.module) {
-            res = resolver.resolve(binding.module, inc.file);
-            if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-              targetKey = `${res.targets[0].files[0]}#${binding.symbol || "router"}`;
-            }
-          }
-        } else {
-          // Local router inside same file
-          const candidate = `${inc.relPath}#${inc.targetExpr}`;
-          if (localRouters.has(candidate)) {
-            targetKey = candidate;
-          }
-        }
-      }
-
-      if (targetKey) {
-        if (!routerChildren.has(parentKey)) routerChildren.set(parentKey, []);
-        routerChildren.get(parentKey)!.push({ childKey: targetKey, prefix: inc.prefix });
-
-        if (!incomingInclusions.has(targetKey)) incomingInclusions.set(targetKey, []);
-        incomingInclusions.get(targetKey)!.push({ parentKey, prefix: inc.prefix });
-      }
-    }
-
-    // 6. Compute Effective Prefixes for Each Router
-    // A router is a root if it has no incoming inclusions or is an explicit FastAPI app
-    const effectivePrefixesByRouter = new Map<string, string[]>();
-
-    const allRouterKeys = new Set<string>([
-      ...localRouters.keys(),
-      ...allRoutes.map((r) => `${r.relPath}#${r.routerVar}`),
-    ]);
-
-    // Find root routers
-    for (const routerKey of allRouterKeys) {
-      const incoming = incomingInclusions.get(routerKey);
-      if (!incoming || incoming.length === 0) {
-        const local = localRouters.get(routerKey);
-        effectivePrefixesByRouter.set(routerKey, local && local.prefix === undefined ? [] : [local?.prefix ?? ""]);
-      }
-    }
-
-    // Propagate prefixes along inclusion edges
-    const queue = Array.from(effectivePrefixesByRouter.keys());
-    const visitedEdges = new Set<string>();
-
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      const currentPrefixes = effectivePrefixesByRouter.get(current) ?? [""];
-      const children = routerChildren.get(current) ?? [];
-
-      for (const child of children) {
-        const edgeKey = `${current}->${child.childKey}:${child.prefix}`;
-        if (visitedEdges.has(edgeKey)) continue;
-        visitedEdges.add(edgeKey);
-
-        const childMeta = localRouters.get(child.childKey);
-        const childLocal = childMeta?.prefix ?? "";
-        const nextPrefixes = child.prefix === undefined || childMeta && childMeta.prefix === undefined ? [] : currentPrefixes.map((p) => {
-          const combined = `${p ? (p.startsWith("/") ? p : `/${p}`) : ""}${child.prefix ? (child.prefix.startsWith("/") ? child.prefix : `/${child.prefix}`) : ""}${childLocal ? (childLocal.startsWith("/") ? childLocal : `/${childLocal}`) : ""}`;
-          return combined.replace(/\/+/g, "/").replace(/\/+$/, "");
-        });
-
-        const existing = effectivePrefixesByRouter.get(child.childKey) ?? [];
-        const merged = Array.from(new Set([...existing, ...nextPrefixes]));
-        effectivePrefixesByRouter.set(child.childKey, merged);
-        queue.push(child.childKey);
-      }
-    }
-
-    // 7. Generate Vertical Slices
     for (const route of allRoutes) {
-      const routerKey = `${route.relPath}#${route.routerVar}`;
-      const prefixes = effectivePrefixesByRouter.get(routerKey) ?? [];
+      const prefixes = prefixesByRouter.get(route.routerKey) ?? [];
 
       for (const prefix of prefixes) {
         const fullUri = normalizeRouteUri(prefix, route.rawPath);
@@ -507,7 +324,7 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
           },
         ];
 
-        const routerMeta = localRouters.get(routerKey);
+        const routerMeta = localRouters.get(route.routerKey);
         const effectiveGuards = Array.from(new Set([
           ...(route.guardSymbol ? [route.guardSymbol] : []),
           ...(routerMeta?.guards ?? []),
@@ -684,7 +501,7 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
           feature_key: null,
           http_method: route.httpMethod,
           route_uri: fullUri,
-          route_name: `${route.routerVar}.${route.actionName}`,
+          route_name: route.name ?? `${route.routerVar}.${route.actionName}`,
           controller_class: path.basename(route.file, ".py"),
           action_name: route.actionName,
           controller_file: route.relPath,

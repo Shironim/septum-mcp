@@ -1,4 +1,4 @@
-import { readOptionalSourceFile } from "../../resources/source-files.ts";
+import { probeSourcePath, readOptionalSourceFile } from "../../resources/source-files.ts";
 import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -6,24 +6,21 @@ import { ImportResolver } from "../../resolver/import-resolver.ts";
 import type { ExecutionChainNode, VerticalSliceRecord } from "../../../types/index.ts";
 import { BehavioralAnalyzer, type MethodBehavioralSummary } from "../behavioral-analyzer.ts";
 import { blankCommentsAndStrings } from "../boundary-tracker.ts";
+import { parseWithTreeSitter } from "../wasm-loader.ts";
+import { readLaravelActions, readLaravelRoutes, type LaravelAction, type ParsedRoute } from "./laravel-routing.ts";
 import { SchemaProviderRegistry } from "../schema/schema-provider-registry.ts";
 import type {
   SemanticSliceExtractor,
   VerticalSliceCandidate,
 } from "./semantic-extractor.interface.ts";
 
-export interface ParsedRoute {
-  httpMethod: string;
-  uri: string;
-  routeName?: string;
-  controllerClass: string;
-  actionName: string;
-  file?: string;
-}
+export type { ParsedRoute } from "./laravel-routing.ts";
 
 export type LaravelSemanticExtractionResult = VerticalSliceCandidate[] & {
   slices: VerticalSliceCandidate[];
 };
+
+type ControllerDeclarations = { classes: Map<string, Map<string, LaravelAction>>; source: string };
 
 export class LaravelSemanticExtractor implements SemanticSliceExtractor {
   public readonly id = "laravel";
@@ -41,14 +38,14 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
   }
 
   /**
-   * Scan route files and extract complete vertical slices.
+   * Scan route files and build bounded vertical slices.
    */
-  public extractSlices(
+  public async extractSlices(
     projectRootOrDomainId?: string | number,
     maybeDomainId?: number,
     signal?: AbortSignal,
     inventory?: SourceInventory
-  ): LaravelSemanticExtractionResult {
+  ): Promise<LaravelSemanticExtractionResult> {
     // The registry reuses one adapter across workspaces. Keep helpers bound to
     // this invocation's root without mutating the shared adapter instance.
     if (typeof projectRootOrDomainId === "string" && (inventory || path.resolve(projectRootOrDomainId) !== path.resolve(this.projectRoot))) {
@@ -75,7 +72,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
       signal?.throwIfAborted();
       const content = readOptionalSourceFile(routeFile, "utf-8");
       const relativeRouteFile = path.relative(root, routeFile).replace(/\\/g, "/");
-      const routesFromFile = this.parseRoutesContent(content);
+      const routesFromFile = await this.parseRoutesContent(content, signal);
       for (const r of routesFromFile) {
         r.file = relativeRouteFile;
       }
@@ -84,8 +81,12 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
 
     const slices: Array<Omit<VerticalSliceRecord, "id" | "created_at">> = [];
 
+    const resolver = new ImportResolver(root);
+    const declarations = new Map<string, ControllerDeclarations>();
     for (const route of parsedRoutes) {
-      const controllerInfo = this.resolveController(route.controllerClass, route.actionName, route.file);
+      signal?.throwIfAborted();
+      const controllerInfo = await this.resolveController(route, resolver, declarations);
+      signal?.throwIfAborted();
 
       let formRequestInfo: {
         className: string;
@@ -112,9 +113,9 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
       }> = [];
 
       let behavioralInfo: MethodBehavioralSummary | null = null;
-      if (controllerInfo.filePath && fs.existsSync(controllerInfo.filePath)) {
-        const controllerCode = readOptionalSourceFile(controllerInfo.filePath, "utf-8");
-        const actionBody = this.extractActionBody(controllerCode, route.actionName);
+      if (controllerInfo.action) {
+        const controllerCode = controllerInfo.action.source;
+        const actionBody = controllerInfo.action.body;
         behavioralInfo = BehavioralAnalyzer.analyzeMethod(actionBody);
 
         // 1. Detect FormRequest in method signature
@@ -149,7 +150,9 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
         actionServices = this.detectActionAndServiceInvocations(
           controllerCode,
           route.actionName,
-          actionBody
+          actionBody,
+          controllerInfo.constructorSource,
+          controllerInfo.fileSource
         );
       }
 
@@ -158,7 +161,9 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
           stage: "ingress",
           symbol: `${route.httpMethod.toUpperCase()} ${route.uri.startsWith("/") ? route.uri : `/${route.uri}`}`,
           file: route.file,
+          line: route.line,
           description: `HTTP Route: ${route.routeName || route.uri}`,
+          relationship: { kind: "declares", derivation: "source", reason: "Laravel facade call" },
         },
       ];
 
@@ -185,7 +190,10 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
         symbol: `${route.controllerClass}::${route.actionName}`,
         file: controllerInfo.filePath ? path.relative(this.projectRoot, controllerInfo.filePath) : undefined,
         line: controllerInfo.line,
-        description: `Controller Action`,
+        description: controllerInfo.action || route.handlerLine ? "Controller Action" : "Declared Route Target",
+        ...(controllerInfo.action || route.handlerLine ? {
+          relationship: { kind: "route_binding", derivation: "source", reason: "Laravel route target" } as const,
+        } : {}),
         guards: behavioralInfo && behavioralInfo.guards.length > 0 ? behavioralInfo.guards : undefined,
         mutations: behavioralInfo && behavioralInfo.mutations.length > 0 ? behavioralInfo.mutations : undefined,
         transactions: behavioralInfo?.hasTransaction,
@@ -294,326 +302,62 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     return Object.assign(slices, { slices });
   }
 
-  /**
-   * Parse Laravel Route declarations.
-   */
-  public parseRoutesContent(content: string): ParsedRoute[] {
-    const routes: ParsedRoute[] = [];
-    const executable = blankCommentsAndStrings(content, { hashComments: true });
-
-    // 1. Process Route::resource
-    const resourceRegex = /Route::resource\s*\(\s*['"]([^'"]+)['"]\s*,\s*([\\A-Za-z0-9_]+)::class\s*\)/gi;
-    let resMatch;
-    while ((resMatch = resourceRegex.exec(content)) !== null) {
-      if (executable.slice(resMatch.index, resMatch.index + "Route::resource".length).toLowerCase() !== "route::resource") continue;
-      const baseUri = resMatch[1].replace(/^\//, "");
-      const controllerClass = resMatch[2];
-      const resourceActions = [
-        { method: "GET", sub: "", action: "index" },
-        { method: "GET", sub: "/create", action: "create" },
-        { method: "POST", sub: "", action: "store" },
-        { method: "GET", sub: "/{id}", action: "show" },
-        { method: "GET", sub: "/{id}/edit", action: "edit" },
-        { method: "PUT", sub: "/{id}", action: "update" },
-        { method: "DELETE", sub: "/{id}", action: "destroy" },
-      ];
-
-      for (const res of resourceActions) {
-        routes.push({
-          httpMethod: res.method,
-          uri: `/${baseUri}${res.sub}`,
-          routeName: `${baseUri}.${res.action}`,
-          controllerClass,
-          actionName: res.action,
-        });
-      }
-    }
-
-    // 1b. Process Route::apiResource
-    const apiResourceRegex = /Route::apiResource\s*\(\s*['"]([^'"]+)['"]\s*,\s*([\\A-Za-z0-9_]+)::class\s*\)/gi;
-    let apiResMatch;
-    while ((apiResMatch = apiResourceRegex.exec(content)) !== null) {
-      if (executable.slice(apiResMatch.index, apiResMatch.index + "Route::apiResource".length).toLowerCase() !== "route::apiresource") continue;
-      const baseUri = apiResMatch[1].replace(/^\//, "");
-      const controllerClass = apiResMatch[2];
-      const apiResourceActions = [
-        { method: "GET", sub: "", action: "index" },
-        { method: "POST", sub: "", action: "store" },
-        { method: "GET", sub: "/{id}", action: "show" },
-        { method: "PUT", sub: "/{id}", action: "update" },
-        { method: "DELETE", sub: "/{id}", action: "destroy" },
-      ];
-
-      for (const res of apiResourceActions) {
-        routes.push({
-          httpMethod: res.method,
-          uri: `/${baseUri}${res.sub}`,
-          routeName: `${baseUri}.${res.action}`,
-          controllerClass,
-          actionName: res.action,
-        });
-      }
-    }
-
-    // 2. Parse routes with group context tracking (prefix, controller, name prefix)
-    const lines = content.split(/\r?\n/);
-    const cleanLines = blankCommentsAndStrings(content, { hashComments: true }).split(/\r?\n/);
-    interface GroupContext {
-      prefix: string;
-      controller: string;
-      namePrefix: string;
-      braceDepth: number;
-    }
-
-    const groupStack: GroupContext[] = [];
-    let currentBraceDepth = 0;
-    let statementBuffer = "";
-    let inStatement = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const cleanLine = cleanLines[i] ?? "";
-      const cleanTrimmed = cleanLine.trim();
-      const trimmed = line.trim();
-
-      if (!cleanTrimmed) continue;
-
-      // Check group opens: Route::...group(
-      if (cleanTrimmed.includes("Route::") && cleanTrimmed.includes("group(") && cleanTrimmed.includes("function")) {
-        const prefixMatch = /prefix\s*\(\s*['"]([^'"]+)['"]\s*\)/.exec(trimmed);
-        const controllerMatch = /controller\s*\(\s*([\\A-Za-z0-9_]+)::class\s*\)/.exec(trimmed);
-        const nameMatch = /name\s*\(\s*['"]([^'"]+)['"]\s*\)/.exec(trimmed);
-
-        const currentCtx = groupStack[groupStack.length - 1];
-        const newPrefix = [currentCtx?.prefix, prefixMatch ? prefixMatch[1] : ""]
-          .filter(Boolean)
-          .join("/");
-        const newController = controllerMatch ? controllerMatch[1] : (currentCtx?.controller || "");
-        const newNamePrefix = [currentCtx?.namePrefix, nameMatch ? nameMatch[1] : ""]
-          .filter(Boolean)
-          .join("");
-
-        groupStack.push({
-          prefix: newPrefix,
-          controller: newController,
-          namePrefix: newNamePrefix,
-          braceDepth: currentBraceDepth,
-        });
-      }
-
-      // Track brace depth on string/comment-stripped line so '/orders/{id}' never corrupts braceDepth
-      for (const char of cleanLine) {
-        if (char === "{") currentBraceDepth++;
-        if (char === "}") {
-          currentBraceDepth--;
-          if (groupStack.length > 0) {
-            const top = groupStack[groupStack.length - 1];
-            if (currentBraceDepth <= top.braceDepth) {
-              groupStack.pop();
-            }
-          }
-        }
-      }
-
-      // Route statement accumulation across lines
-      if (!inStatement && cleanTrimmed.startsWith("Route::") && !cleanTrimmed.includes("Route::resource") && !cleanTrimmed.includes("Route::group") && !(cleanTrimmed.includes("group(") && cleanTrimmed.includes("function"))) {
-        statementBuffer = trimmed;
-        inStatement = true;
-      } else if (inStatement) {
-        statementBuffer += " " + trimmed;
-      }
-
-      if (inStatement && cleanLine.includes(";")) {
-        inStatement = false;
-        const stmt = statementBuffer;
-        statementBuffer = "";
-
-        const currentCtx = groupStack[groupStack.length - 1];
-        const parsed = this.parseSingleRouteStatement(stmt, currentCtx);
-        if (parsed) {
-          routes.push(parsed);
-        }
-      }
-    }
-
+  public async parseRoutesContent(content: string, signal?: AbortSignal): Promise<ParsedRoute[]> {
+    if (!content.trim()) return [];
+    // Direct parser callers also supply PHP snippets without the opening tag.
+    const source = /^\s*<\?php\b/i.test(content) ? content : "<?php " + content;
+    const routes = await parseWithTreeSitter("php", source, root => readLaravelRoutes(root, signal));
+    signal?.throwIfAborted();
+    if (!routes) throw new Error("Laravel route AST extraction failed.");
     return routes;
   }
 
-  private parseSingleRouteStatement(
-    stmt: string,
-    ctx?: { prefix: string; controller: string; namePrefix: string }
-  ): ParsedRoute | null {
-    const methodMatch = /Route::(get|post|put|patch|delete|any|options)\s*\(\s*['"]([^'"]+)['"]([\s\S]*)/i.exec(stmt);
-    if (!methodMatch) {
-      const viewMatch = /Route::view\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/i.exec(stmt);
-      if (viewMatch) {
-        const rawUri = viewMatch[1];
-        const viewTarget = viewMatch[2];
-        const nameMatch = /->name\s*\(\s*['"]([^'"]+)['"]\s*\)/i.exec(stmt);
-        const fullUri = ctx?.prefix ? `/${ctx.prefix.replace(/^\/|\/$/g, "")}/${rawUri.replace(/^\//, "")}` : rawUri;
-        return {
-          httpMethod: "GET",
-          uri: fullUri.startsWith("/") ? fullUri : `/${fullUri}`,
-          routeName: (ctx?.namePrefix || "") + (nameMatch ? nameMatch[1] : ""),
-          controllerClass: "View",
-          actionName: viewTarget,
-        };
+  private async resolveController(
+    route: ParsedRoute,
+    resolver: ImportResolver,
+    declarations: Map<string, ControllerDeclarations>,
+  ): Promise<{ filePath?: string; line: number; action?: LaravelAction; constructorSource?: string; fileSource?: string }> {
+    if (route.handlerLine && route.file) {
+      return { filePath: path.join(this.projectRoot, route.file), line: route.handlerLine };
+    }
+    if (["Closure", "View"].includes(route.controllerClass) || route.controllerTarget === "") return { line: 0 };
+
+    const target = route.controllerTarget;
+    const shortName = (target ?? route.controllerClass).split("\\").at(-1)!;
+    let candidates: string[] = [];
+    if (target) {
+      const source = route.file ?? "routes/web.php";
+      const resolution = resolver.resolve(target, source);
+      if (resolution.status === "resolved") {
+        candidates = resolution.targets.flatMap(item => item.files).map(file => path.resolve(this.projectRoot, file));
+      } else if (resolution.reason === "php_namespace_not_mapped" && target.startsWith("App\\Http\\Controllers\\") &&
+          probeSourcePath(path.join(this.projectRoot, "composer.json")) === "missing") {
+        candidates = [path.join(this.projectRoot, "app", target.slice(4).replace(/\\/g, "/") + ".php")];
       }
-      return null;
+    } else {
+      candidates = ["", "Api", "Admin"].map(directory =>
+        path.join(this.projectRoot, "app/Http/Controllers", directory, shortName + ".php"));
     }
-
-    const httpMethod = methodMatch[1].toUpperCase();
-    let uri = methodMatch[2];
-    const rest = methodMatch[3];
-
-    if (ctx?.prefix) {
-      const cleanPrefix = ctx.prefix.replace(/^\/|\/$/g, "");
-      const cleanUri = uri.replace(/^\//, "");
-      uri = cleanUri ? `/${cleanPrefix}/${cleanUri}` : `/${cleanPrefix}`;
+    const matches = [...new Set(candidates)].filter(file => probeSourcePath(file) === "file");
+    if (matches.length !== 1) return { line: 0 };
+    const filePath = matches[0]!;
+    let declaration = declarations.get(filePath);
+    if (!declaration) {
+      const source = readOptionalSourceFile(filePath, "utf-8");
+      const classes = await parseWithTreeSitter("php", source, readLaravelActions);
+      if (!classes) throw new Error("Laravel controller AST extraction failed for " + path.relative(this.projectRoot, filePath));
+      declaration = { classes, source };
+      declarations.set(filePath, declaration);
     }
-    if (!uri.startsWith("/")) uri = `/${uri}`;
-
-    const nameMatch = /->name\s*\(\s*['"]([^'"]+)['"]\s*\)/i.exec(stmt);
-    const rawRouteName = nameMatch ? nameMatch[1] : undefined;
-    const fullRouteName = rawRouteName
-      ? (ctx?.namePrefix || "") + rawRouteName
-      : undefined;
-
-    // [Controller::class, 'action']
-    const arrayMatch = /\[\s*([\\A-Za-z0-9_]+)::class\s*,\s*['"]([A-Za-z0-9_]+)['"]\s*\]/.exec(rest);
-    if (arrayMatch) {
-      return {
-        httpMethod,
-        uri,
-        routeName: fullRouteName,
-        controllerClass: arrayMatch[1],
-        actionName: arrayMatch[2],
-      };
-    }
-
-    // 'Controller@action'
-    const stringActionMatch = /['"]([\\A-Za-z0-9_]+)@([A-Za-z0-9_]+)['"]/.exec(rest);
-    if (stringActionMatch) {
-      return {
-        httpMethod,
-        uri,
-        routeName: fullRouteName,
-        controllerClass: stringActionMatch[1],
-        actionName: stringActionMatch[2],
-      };
-    }
-
-    // Action inside controller group
-    if (ctx?.controller) {
-      const singleActionMatch = /,\s*['"]([A-Za-z0-9_]+)['"]/.exec(rest);
-      if (singleActionMatch) {
-        return {
-          httpMethod,
-          uri,
-          routeName: fullRouteName,
-          controllerClass: ctx.controller,
-          actionName: singleActionMatch[1],
-        };
-      }
-    }
-
-    // Invokable controller
-    const invokableMatch = /,\s*([\\A-Za-z0-9_]+)::class/.exec(rest);
-    if (invokableMatch) {
-      return {
-        httpMethod,
-        uri,
-        routeName: fullRouteName,
-        controllerClass: invokableMatch[1],
-        actionName: "__invoke",
-      };
-    }
-
-    // Closure
-    if (rest.includes("function")) {
-      return {
-        httpMethod,
-        uri,
-        routeName: fullRouteName,
-        controllerClass: "Closure",
-        actionName: "handle",
-      };
-    }
-
-    return null;
-  }
-
-  private resolveController(
-    controllerClass: string,
-    actionName: string,
-    routeFilePath?: string
-  ): { filePath?: string; line: number } {
-    let resolvedFilePath: string | undefined;
-
-    // 1. Try ImportResolver via PSR-4 if routeFilePath or full namespace provided
-    const resolver = new ImportResolver(this.projectRoot);
-    const sourceRef = routeFilePath
-      ? path.resolve(this.projectRoot, routeFilePath)
-      : path.join(this.projectRoot, "routes/web.php");
-
-    if (controllerClass.includes("\\")) {
-      const res = resolver.resolve(controllerClass, sourceRef);
-      if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-        resolvedFilePath = path.resolve(this.projectRoot, res.targets[0].files[0]);
-      }
-      if (!resolvedFilePath) return { line: 0 };
-    } else if (routeFilePath && fs.existsSync(sourceRef)) {
-      const routeContent = readOptionalSourceFile(sourceRef, "utf-8");
-      const executable = blankCommentsAndStrings(routeContent, { hashComments: true });
-      const bindings = [...executable.matchAll(/\buse\s+([\\A-Za-z0-9_]+)(?:\s+as\s+([A-Za-z0-9_]+))?\s*;/gi)]
-        .filter(match => (match[2] || match[1]!.split("\\").pop())?.toLowerCase() === controllerClass.toLowerCase());
-      if (bindings.length > 1) return { line: 0 };
-      if (bindings.length === 1) {
-        const fqn = bindings[0]![1]!;
-        const res = resolver.resolve(fqn, sourceRef);
-        if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-          resolvedFilePath = path.resolve(this.projectRoot, res.targets[0].files[0]);
-        }
-        // Existing source-only fixtures may omit composer.json. A conventional
-        // App namespace maps to its exact conventional path, never the alias.
-        if (!resolvedFilePath && !fs.existsSync(path.join(this.projectRoot, "composer.json")) && fqn.startsWith("App\\Http\\Controllers\\")) {
-          const conventional = path.join(this.projectRoot, "app", fqn.slice(4).replace(/\\/g, "/") + ".php");
-          if (fs.existsSync(conventional)) resolvedFilePath = conventional;
-        }
-        if (!resolvedFilePath) return { line: 0 };
-      }
-    }
-
-    // 2. Fallback heuristics if not found via PSR-4
-    if (!resolvedFilePath) {
-      const simpleName = controllerClass.split(/\\|\//).pop() || controllerClass;
-      const candidates = [
-        path.join(this.projectRoot, `app/Http/Controllers/${simpleName}.php`),
-        path.join(this.projectRoot, `app/Http/Controllers/Api/${simpleName}.php`),
-        path.join(this.projectRoot, `app/Http/Controllers/Admin/${simpleName}.php`),
-      ];
-
-      for (const c of candidates) {
-        if (fs.existsSync(c)) {
-          resolvedFilePath = c;
-          break;
-        }
-      }
-    }
-
-    if (resolvedFilePath && fs.existsSync(resolvedFilePath)) {
-      const lines = blankCommentsAndStrings(readOptionalSourceFile(resolvedFilePath, "utf-8"), { hashComments: true }).split("\n");
-      let targetLine = 1;
-      for (let i = 0; i < lines.length; i++) {
-        if (new RegExp(`function\\s+${actionName}\\s*\\(`, "i").test(lines[i])) {
-          targetLine = i + 1;
-          break;
-        }
-      }
-      return { filePath: resolvedFilePath, line: targetLine };
-    }
-
-    return { line: 0 };
+    const { classes, source: fileSource } = declaration;
+    const targetKey = target?.toLowerCase();
+    const names = [...classes.keys()].filter(name => name.split("\\").at(-1) === shortName.toLowerCase());
+    const selected = targetKey
+      ? classes.get(targetKey)
+      : names.length === 1 ? classes.get(names[0]!) : undefined;
+    const action = selected?.get(route.actionName.toLowerCase());
+    if (!action) return { line: 0 };
+    return { filePath, line: action.line, action, constructorSource: selected?.get("__construct")?.source, fileSource };
   }
 
   private extractActionBody(controllerCode: string, actionName: string): string {
@@ -730,7 +474,9 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
   private detectActionAndServiceInvocations(
     controllerCode: string,
     actionName: string,
-    actionBody: string
+    actionBody: string,
+    constructorSource?: string,
+    fileSource: string = controllerCode
   ): Array<{
     className: string;
     filePath?: string;
@@ -767,7 +513,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     }
 
     // 2. Check constructor injection
-    const ctorMatch = controllerCode.match(/function\s+__construct\s*\(([^)]*)\)/i);
+    const ctorMatch = constructorSource?.match(/function\s+__construct\s*\(([^)]*)\)/i);
     if (ctorMatch && ctorMatch[1]) {
       const params = ctorMatch[1].split(",");
       for (const param of params) {
@@ -816,7 +562,7 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
 
     // 4. Also scan 'use' imports in controller for App\Actions\... or App\Services\...
     const usePattern = /use\s+App\\(Actions|Services)\\(?:[a-zA-Z0-9_\\]+\\)?([A-Z][a-zA-Z0-9_]*);/g;
-    while ((match = usePattern.exec(controllerCode)) !== null) {
+    while ((match = usePattern.exec(fileSource)) !== null) {
       const folder = match[1];
       const cls = match[2];
       if (actionBody.includes(cls) && !detected.has(cls)) {

@@ -1,12 +1,29 @@
 import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
-import { readOptionalSourceFile } from "../../resources/source-files.ts";
+import { probeSourcePath, readOptionalSourceFile } from "../../resources/source-files.ts";
+import type Parser from "web-tree-sitter";
+import { parseWithTreeSitter } from "../wasm-loader.ts";
+import { blankCommentsAndStrings } from "../boundary-tracker.ts";
+import { goImports, goKey, goRouteUris, GoRouting, type GoRoute, type GoType } from "./go-routing.ts";
+import type { ExecutionChainNode } from "../../../types/index.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { warnIfUnexpectedParserError } from "./manifest-helpers.ts";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
+
+type GoDeclaration = {
+  owner: string;
+  relPath: string;
+  line: number;
+  receiver?: string;
+  receiverVar?: string;
+  body: string;
+  params: string;
+};
+type GoStruct = { relPath: string; line: number; fields: Map<string, GoType> };
 
 export class GoSemanticExtractor implements SemanticSliceExtractor {
   public readonly id = "golang";
-  public readonly name = "Go HTTP Semantic Slice Extractor (Gin, Echo, Chi)";
+  public readonly name = "Go HTTP Semantic Slice Extractor (net/http, Gin, Echo, Chi, Fiber)";
 
   public canHandle(projectRoot: string, framework?: string): boolean {
     if (
@@ -40,595 +57,214 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
         ) {
           return true;
         }
-      } catch {}
+      } catch (err: unknown) {
+        warnIfUnexpectedParserError(`Failed to inspect Go file ${file}`, err);
+      }
     }
 
     return false;
   }
 
-  public extractSlices(projectRoot: string, domainId?: number, signal?: AbortSignal, inventory?: SourceInventory): VerticalSliceCandidate[] {
+  public async extractSlices(
+    projectRoot: string,
+    domainId?: number,
+    signal?: AbortSignal,
+    inventory?: SourceInventory,
+  ): Promise<VerticalSliceCandidate[]> {
     const slices: VerticalSliceCandidate[] = [];
-    const goFiles = listSourceFiles(projectRoot, /\.go$/, inventory).filter(file => !file.endsWith('_test.go'));
-
-    interface HandlerInfo {
-      name: string;
-      receiver?: string;
-      file: string;
-      relPath: string;
-      line: number;
-      boundDto?: string;
-      serviceCall?: string;
-      repoCall?: string;
-      receiverVar?: string;
-      body: string;
+    const files = listSourceFiles(projectRoot, /\.go$/, inventory).filter(file => !file.endsWith("_test.go"));
+    const visitedDirectories = new Set<string>();
+    const manifestFiles = new Set<string>();
+    for (const file of files) {
+      for (let directory = path.dirname(file); !visitedDirectories.has(directory); directory = path.dirname(directory)) {
+        visitedDirectories.add(directory);
+        const manifest = path.join(directory, "go.mod");
+        if (probeSourcePath(manifest) === "file") manifestFiles.add(manifest);
+        if (directory === path.resolve(projectRoot)) break;
+      }
     }
-
-    interface GoStructInfo {
-      name: string;
-      file: string;
-      relPath: string;
-      line: number;
-      fields: Map<string, string>;
-    }
-
-    interface GoMethodInfo {
-      receiver?: string;
-      name: string;
-      file: string;
-      relPath: string;
-      line: number;
-      body: string;
-      params?: string;
-      receiverVar?: string;
-    }
-
-    // 1. Catalog all handler functions & methods across .go files
-    const handlers = new Map<string, HandlerInfo>();
-    const goStructs = new Map<string, GoStructInfo>();
-    const goMethods = new Map<string, GoMethodInfo>();
-    const constructors = new Map<string, string>();
-    const rootGoMod = path.join(projectRoot, "go.mod");
-    const discoveredGoMods = fs.existsSync(rootGoMod) ? [rootGoMod] : listSourceFiles(projectRoot, /(?:^|[\\/])go\.mod$/, inventory);
-    const goModPath = discoveredGoMods[0];
-    const moduleRoot = goModPath ? path.dirname(goModPath) : projectRoot;
-    const moduleName = goModPath && fs.existsSync(goModPath)
-      ? readOptionalSourceFile(goModPath, "utf-8").match(/^module\s+(\S+)/m)?.[1]
-      : undefined;
-
-    for (const file of goFiles) {
+    const modules = [...manifestFiles]
+      .flatMap(file => {
+        const module = readOptionalSourceFile(file, "utf-8").match(/^module\s+(\S+)/m)?.[1];
+        return module ? [{ module, directory: path.dirname(file) }] : [];
+      })
+      .sort((a, b) => b.module.length - a.module.length);
+    const routing = new GoRouting(target => {
+      const match = modules.find(({ module }) => target === module || target.startsWith(module + "/"));
+      return match && path.join(match.directory, target.slice(match.module.length));
+    });
+    const handlers = new Map<string, GoDeclaration>();
+    const structs = new Map<string, GoStruct>();
+    const parse = async <T>(file: string, visitor: (root: Parser.SyntaxNode) => T): Promise<T | undefined> => {
+      signal?.throwIfAborted();
       const content = readOptionalSourceFile(file, "utf-8");
-      if (!content) continue;
+      if (!content) return undefined;
+      let reason: string | undefined;
+      const result = await parseWithTreeSitter("go", content, visitor, diagnostic => { reason = diagnostic.message; });
+      signal?.throwIfAborted();
+      if (result === null) throw new Error(`Could not extract Go AST from '${path.relative(projectRoot, file)}': ${reason}`);
+      return result;
+    };
+    const relative = (file: string) => path.relative(projectRoot, file).replace(/\\/g, "/");
 
-      const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
-
-      // Match Go functions and methods:
-      // func (h *OrderHandler) CreateOrder(c *gin.Context)
-      // func (h OrderHandler) CreateOrder(c echo.Context) error
-      // func CreateOrder(w http.ResponseWriter, r *http.Request)
-      const funcRegex =
-        /func\s*(?:\(\s*[a-zA-Z0-9_]+\s+\*?(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)\s*\)\s*)?([a-zA-Z0-9_]+)\s*\(([\s\S]*?)\)(?:[^{]*)\{/g;
-      let fMatch: RegExpExecArray | null;
-
-      while ((fMatch = funcRegex.exec(content)) !== null) {
-        const receiver = fMatch[1];
-        const fnName = fMatch[2];
-        const params = fMatch[3];
-
-        // Only catalog HTTP handlers (takes *gin.Context, echo.Context, http.ResponseWriter, *fiber.Ctx)
-        const isHttpHandler =
-          params.includes("gin.Context") ||
-          params.includes("echo.Context") ||
-          params.includes("http.ResponseWriter") ||
-          params.includes("fiber.Ctx") ||
-          params.includes("*http.Request");
-
-        if (!isHttpHandler) continue;
-
-        const fnLine = content.slice(0, fMatch.index).split("\n").length;
-        const bodyStart = fMatch.index + fMatch[0].length;
-        const bodyEnd = this.findGoBraceBlockEnd(content, bodyStart - 1);
-        const fnBody = content.slice(bodyStart, bodyEnd);
-
-        // Detect DTO binding: ShouldBindJSON(&req), c.Bind(&req), Decode(&req), c.BodyParser(&req)
-        let boundDto: string | undefined;
-        const bindMatch = fnBody.match(/(?:ShouldBind(?:JSON|Query|URI|XML|YAML|Header)?|Bind(?:JSON)?|Decode|(?:Body|Params|Query)Parser)\s*\(\s*&([a-zA-Z0-9_]+)\s*\)/);
-        if (bindMatch) {
-          const varName = bindMatch[1];
-          // Look for explicit type declaration:
-          // var req CreateOrderRequest
-          // var req models.CreateOrderRequest
-          // req := CreateOrderRequest{}
-          // req := &CreateOrderRequest{}
-          // req := new(CreateOrderRequest)
-          const typeRegex = new RegExp(
-            `(?:var\\s+${varName}\\s+(?:[a-zA-Z0-9_]+\\.)?([A-Z][a-zA-Z0-9_]+)|` +
-            `${varName}\\s*:=\\s*&?(?:[a-zA-Z0-9_]+\\.)?([A-Z][a-zA-Z0-9_]+)\\s*\\{|` +
-            `${varName}\\s*:=\\s*new\\s*\\((?:[a-zA-Z0-9_]+\\.)?([A-Z][a-zA-Z0-9_]+)\\))`
-          );
-          const typeMatch = fnBody.match(typeRegex);
-          if (typeMatch) {
-            boundDto = typeMatch[1] || typeMatch[2] || typeMatch[3];
+    for (const file of files) {
+      const owner = path.dirname(file);
+      const relPath = relative(file);
+      await parse(file, root => {
+        const imports = goImports(root);
+        for (const node of root.namedChildren) {
+          if (node.hasError) continue;
+          if (node.type === "type_declaration") {
+            for (const spec of node.namedChildren) {
+              const name = spec.childForFieldName("name")?.text;
+              const type = spec.childForFieldName("type");
+              if (!name || !type || !["struct_type", "interface_type"].includes(type.type)) continue;
+              const key = goKey(owner, name);
+              const fields = new Map<string, GoType>();
+              for (const field of type.descendantsOfType("field_declaration")) {
+                const fieldType = routing.readType(field.childForFieldName("type"), imports, owner);
+                if (!fieldType) continue;
+                for (const id of field.childrenForFieldName("name")) fields.set(id.text, fieldType);
+              }
+              structs.set(key, { relPath, line: spec.startPosition.row + 1, fields });
+              routing.fields.set(key, fields);
+            }
           }
-          // Note: If no type matched, do NOT synthesize a fake name (strict evidence invariant)
+          if (!["function_declaration", "method_declaration"].includes(node.type)) continue;
+          const name = node.childForFieldName("name")?.text;
+          const receiver = node.childForFieldName("receiver")?.namedChild(0);
+          const type = routing.readType(receiver?.childForFieldName("type") ?? null, imports, owner);
+          const body = node.childForFieldName("body");
+          if (!name || !body || (receiver && !type)) continue;
+          const key = goKey(owner, type ? `${type.name}.${name}` : name);
+          const duplicate = routing.functions.has(key);
+          routing.registerFunction(key, node, imports, owner);
+          if (duplicate) {
+            handlers.delete(key);
+            continue;
+          }
+          handlers.set(key, {
+            owner, relPath, line: node.startPosition.row + 1, receiver: type?.name,
+            receiverVar: receiver?.childForFieldName("name")?.text,
+            params: node.childForFieldName("parameters")?.text ?? "",
+            body: blankCommentsAndStrings(body.text),
+          });
         }
-
-        // Detect service calls: h.orderService.Process(...) or s.service.Create(...)
-        let serviceCall: string | undefined;
-        const sMatch = fnBody.match(/([a-zA-Z0-9_]+(?:Service|Usecase|UC))\s*\.\s*([A-Z][a-zA-Z0-9_]+)/i);
-        if (sMatch) {
-          serviceCall = `${sMatch[1]}::${sMatch[2]}`;
-        }
-
-        // Detect repo/db calls: h.repo.Save(...) or db.Create(&order)
-        let repoCall: string | undefined;
-        const rMatch = fnBody.match(/(?:([a-zA-Z0-9_]+(?:Repo|Repository))\s*\.\s*([A-Z][a-zA-Z0-9_]+)\s*\(|db\s*\.\s*(?:Create|Save|Find|First|Update|Delete)\s*\(\s*&?([A-Z][a-zA-Z0-9_]+)\s*\))/i);
-        if (rMatch) {
-          repoCall = rMatch[1] ? `${rMatch[1]}::${rMatch[2]}` : `DB::${rMatch[3]}`;
-        }
-
-        const info: HandlerInfo = {
-          name: fnName,
-          receiver,
-          file,
-          relPath,
-          line: fnLine,
-          boundDto,
-          serviceCall,
-          repoCall,
-          receiverVar: fMatch[0].match(/^func\s*\(\s*(\w+)/)?.[1],
-          body: fnBody,
-        };
-
-        if (receiver) {
-          handlers.set(`${receiver}.${fnName}`, info);
-        } else {
-          handlers.set(fnName, info);
-        }
-      }
-
-      // Catalog struct definitions
-      const structRegex = /type\s+([A-Z][a-zA-Z0-9_]+)\s+(?:struct|interface)\s*\{/g;
-      let sDeclMatch: RegExpExecArray | null;
-      while ((sDeclMatch = structRegex.exec(content)) !== null) {
-        const sName = sDeclMatch[1];
-        const sLine = content.slice(0, sDeclMatch.index).split("\n").length;
-        const sBodyStart = sDeclMatch.index + sDeclMatch[0].length;
-        const sBodyEnd = this.findGoBraceBlockEnd(content, sBodyStart - 1);
-        const sBody = content.slice(sBodyStart, sBodyEnd);
-
-        const fields = new Map<string, string>();
-        const fieldRegex = /^\s*([a-zA-Z0-9_]+)\s+\*?(?:[a-zA-Z0-9_]+\.)?([A-Z][a-zA-Z0-9_]+)/gm;
-        let fldMatch: RegExpExecArray | null;
-        while ((fldMatch = fieldRegex.exec(sBody)) !== null) {
-          fields.set(fldMatch[1], fldMatch[2]);
-        }
-
-        goStructs.set(sName, { name: sName, file, relPath, line: sLine, fields });
-      }
-
-      // Catalog all methods & functions for call resolution
-      const allFuncRegex =
-        /func\s*(?:\(\s*[a-zA-Z0-9_]+\s+\*?(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)\s*\)\s*)?([A-Z][a-zA-Z0-9_]+)\s*\(([\s\S]*?)\)(?:[^{]*)\{/g;
-      let afMatch: RegExpExecArray | null;
-      while ((afMatch = allFuncRegex.exec(content)) !== null) {
-        const rcv = afMatch[1];
-        const fn = afMatch[2];
-        const fLine = content.slice(0, afMatch.index).split("\n").length;
-        const bStart = afMatch.index + afMatch[0].length;
-        const bEnd = this.findGoBraceBlockEnd(content, bStart - 1);
-        const bText = content.slice(bStart, bEnd);
-        const params = afMatch[3];
-        const returnType = afMatch[0].match(/\)\s+\*?([A-Z][a-zA-Z0-9_]*)\s*\{$/)?.[1];
-        if (!rcv && returnType) {
-          constructors.set(`${path.dirname(file)}:${fn}`, returnType);
-        }
-        if (rcv) {
-          goMethods.set(`${rcv}.${fn}`, { receiver: rcv, name: fn, file, relPath, line: fLine, body: bText, params,
-            receiverVar: afMatch[0].match(/^func\s*\(\s*(\w+)/)?.[1] });
-        } else {
-          goMethods.set(fn, { name: fn, file, relPath, line: fLine, body: bText, params });
-        }
-      }
+        return true;
+      });
     }
 
-    // Resolve calls through declared fields, regardless of the field's local name.
-    for (const handler of handlers.values()) {
-      if (!handler.receiver || !handler.receiverVar) continue;
-      const fields = goStructs.get(handler.receiver)?.fields;
-      const calls = /\b([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\s*\.\s*([A-Z][a-zA-Z0-9_]*)\s*\(/g;
-      for (const call of handler.body.matchAll(calls)) {
-        const fieldType = fields?.get(call[2]);
-        if (call[1] === handler.receiverVar && fieldType && /(?:Service|Usecase|UC)$/i.test(fieldType)) {
-          handler.serviceCall = `${call[2]}::${call[3]}`;
-          break;
-        }
+    const routes: Array<{ file: string; route: GoRoute }> = [];
+    for (const file of files) {
+      const found = await parse(file, root => routing.collect(root, goImports(root), path.dirname(file), signal));
+      for (const route of found ?? []) routes.push({ file, route });
+    }
+    for (const { file, route } of routes) {
+      const handler = route.handler.key ? handlers.get(route.handler.key) : undefined;
+      for (const uri of goRouteUris(route)) {
+        this.pushSlice(slices, relative(file), uri, route, handler, structs, handlers, domainId);
       }
     }
-
-    // Collect Chi r.Route("/prefix", func(sub chi.Router) { helper(sub, ...) }) delegations across package files
-    const delegatedRoutePrefixes = new Map<string, string>();
-    for (const file of goFiles) {
-      const content = readOptionalSourceFile(file, "utf-8");
-      if (!content) continue;
-      const chiBlockRegex = /([a-zA-Z0-9_]+)\.Route\s*\(\s*["']([^"']*)["']\s*,\s*func\s*\(\s*([a-zA-Z0-9_]+)\s+chi\.Router\s*\)\s*\{/g;
-      let cbMatch: RegExpExecArray | null;
-      while ((cbMatch = chiBlockRegex.exec(content)) !== null) {
-        const prefixRaw = cbMatch[2].replace(/\/+$/, "");
-        const prefix = prefixRaw ? (prefixRaw.startsWith("/") ? prefixRaw : `/${prefixRaw}`) : "";
-        const subRouter = cbMatch[3];
-        const blockStart = cbMatch.index + cbMatch[0].length;
-        const blockEnd = this.findGoBraceBlockEnd(content, blockStart - 1);
-        const blockBody = content.slice(blockStart, blockEnd);
-        const callRegex = new RegExp(`\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(\\s*${subRouter}\\b`, "g");
-        for (const call of blockBody.matchAll(callRegex)) {
-          delegatedRoutePrefixes.set(`${path.dirname(file)}:${call[1]}`, prefix);
-        }
-      }
-    }
-
-    // 2. Extract route registrations per file with lexical block scoping
-    for (const file of goFiles) {
-      const content = readOptionalSourceFile(file, "utf-8");
-      if (!content) continue;
-
-      const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
-      const importedPackages = new Map<string, string>();
-      for (const spec of content.matchAll(/^\s*(?:import\s+)?(?:(\w+)\s+)?"([^"\n]+)"/gm)) {
-        if (moduleName && spec[2].startsWith(`${moduleName}/`)) {
-          importedPackages.set(spec[1] || path.basename(spec[2]), path.join(moduleRoot, spec[2].slice(moduleName.length + 1)));
-        }
-      }
-
-      // Find router/setup functions and methods to scope groups and variable types
-      const setupFuncRegex =
-        /func\s*(?:\(\s*([a-zA-Z0-9_]+)\s+\*?(?:[a-zA-Z0-9_]+\.)?([A-Z][a-zA-Z0-9_]+)\s*\)\s*)?([a-zA-Z0-9_]+)\s*\(([\s\S]*?)\)(?:[^{]*)\{/g;
-      let funcMatch: RegExpExecArray | null;
-
-      while ((funcMatch = setupFuncRegex.exec(content)) !== null) {
-        const receiverVar = funcMatch[1];
-        const receiverType = funcMatch[2];
-        const funcName = funcMatch[3];
-        const funcParams = funcMatch[4];
-        const funcStart = funcMatch.index;
-        const bodyStart = funcStart + funcMatch[0].length;
-        const bodyEnd = this.findGoBraceBlockEnd(content, bodyStart - 1);
-        const funcBody = content.slice(bodyStart, bodyEnd);
-        const funcOffset = content.slice(0, bodyStart).split("\n").length - 1;
-
-        // Scoped variable -> receiver type mapping (e.g. h -> OrderHandler, s -> Server)
-        const scopedVarReceivers = new Map<string, string>();
-        if (receiverVar && receiverType) {
-          scopedVarReceivers.set(receiverVar, receiverType);
-        }
-
-        // Map parameter variables: (h *http.OrderHandler, u *UserHandler)
-        const paramRegex = /([a-zA-Z0-9_]+)\s+\*?(?:[a-zA-Z0-9_]+\.)?([A-Z][a-zA-Z0-9_]+)/g;
-        let pMatch: RegExpExecArray | null;
-        while ((pMatch = paramRegex.exec(funcParams)) !== null) {
-          scopedVarReceivers.set(pMatch[1], pMatch[2]);
-        }
-
-        // Map local variable instantiations: h := &OrderHandler{} or var h OrderHandler
-        const localInstRegex = /(?:([a-zA-Z0-9_]+)\s*:=\s*(?:&|new\s*\()?(?:[a-zA-Z0-9_]+\.)?([A-Z][a-zA-Z0-9_]+)|var\s+([a-zA-Z0-9_]+)\s+(?:[a-zA-Z0-9_]+\.)?([A-Z][a-zA-Z0-9_]+))/g;
-        let lMatch: RegExpExecArray | null;
-        while ((lMatch = localInstRegex.exec(funcBody)) !== null) {
-          const varName = lMatch[1] || lMatch[3];
-          const typeName = lMatch[2] || lMatch[4];
-          if (varName && typeName) {
-            scopedVarReceivers.set(varName, typeName);
-          }
-        }
-
-        // A factory call is typed by its declared return, never by the function name.
-        for (const call of funcBody.matchAll(/\b(\w+)\s*:=\s*(?:(\w+)\.)?([A-Z]\w*)\s*\(/g)) {
-          const directory = call[2] ? importedPackages.get(call[2]) : path.dirname(file);
-          const typeName = directory && constructors.get(`${directory}:${call[3]}`);
-          scopedVarReceivers.delete(call[1]);
-          if (typeName) scopedVarReceivers.set(call[1], typeName);
-        }
-
-        // Scoped router groups: groupVar -> accumulatedPrefix
-        const scopedGroupPrefixes = new Map<string, string>();
-        const delegatedPrefix = delegatedRoutePrefixes.get(`${path.dirname(file)}:${funcName}`);
-        if (delegatedPrefix) {
-          const chiParamMatch = funcParams.match(/\b([a-zA-Z0-9_]+)\s+chi\.Router\b/);
-          if (chiParamMatch) {
-            scopedGroupPrefixes.set(chiParamMatch[1], delegatedPrefix);
-          }
-        }
-
-        // Gin / Echo groups: v1 := r.Group("/api/v1")
-        const groupRegex = /([a-zA-Z0-9_]+)\s*:=\s*([a-zA-Z0-9_]+)\.Group\s*\(\s*["']([^"']*)["']/g;
-        let gMatch: RegExpExecArray | null;
-        while ((gMatch = groupRegex.exec(funcBody)) !== null) {
-          const newGroup = gMatch[1];
-          const parentGroup = gMatch[2];
-          const subPrefix = gMatch[3].replace(/\/+$/, "");
-
-          const parentPrefix = scopedGroupPrefixes.get(parentGroup) || "";
-          const cleanSub = subPrefix.startsWith("/") ? subPrefix : `/${subPrefix}`;
-          scopedGroupPrefixes.set(newGroup, `${parentPrefix}${cleanSub}`);
-        }
-
-        // Chi subrouter Route: r.Route("/articles", func(r chi.Router) { ... })
-        const chiRouteRegex = /([a-zA-Z0-9_]+)\.Route\s*\(\s*["']([^"']*)["']\s*,\s*func\s*\(\s*([a-zA-Z0-9_]+)\s+chi\.Router\s*\)/g;
-        let cMatch: RegExpExecArray | null;
-        while ((cMatch = chiRouteRegex.exec(funcBody)) !== null) {
-          const parentRouter = cMatch[1];
-          const subPrefix = cMatch[2].replace(/\/+$/, "");
-          const subRouter = cMatch[3];
-
-          const parentPrefix = scopedGroupPrefixes.get(parentRouter) || "";
-          const cleanSub = subPrefix.startsWith("/") ? subPrefix : `/${subPrefix}`;
-          scopedGroupPrefixes.set(subRouter, `${parentPrefix}${cleanSub}`);
-        }
-
-        // 3. Extract route registrations within this function scope
-        // Method 1: Gin / Echo / Chi HTTP method calls: r.GET("/ping", pingHandler), v1.POST("/orders", h.CreateOrder), r.With(mw).Get("/x", h.Get)
-        const routeRegex =
-          /([a-zA-Z0-9_]+)(?:\s*\.\s*With\s*\([^)]*\))*\s*\.\s*(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|Get|Post|Put|Patch|Delete|Options|Head)\s*\(\s*["']([^"']*)["']\s*,\s*(?:[a-zA-Z0-9_.]+\s*,\s*)*(?:func\s*\([^)]*\)|([a-zA-Z0-9_.]+))/g;
-        let rMatch: RegExpExecArray | null;
-
-        while ((rMatch = routeRegex.exec(funcBody)) !== null) {
-          const routerVar = rMatch[1];
-          const httpMethod = rMatch[2].toUpperCase();
-          const rawUri = rMatch[3];
-          const handlerTarget = (rMatch[4] && rMatch[4] !== "func") ? rMatch[4] : "closure";
-          const routeLine = funcOffset + funcBody.slice(0, rMatch.index).split("\n").length;
-
-          const groupPrefix = scopedGroupPrefixes.get(routerVar) || "";
-          const cleanSub = rawUri ? (rawUri.startsWith("/") ? rawUri : `/${rawUri}`) : "";
-          const fullUri = `${groupPrefix}${cleanSub}` || "/";
-
-          this.pushSlice(
-            slices,
-            projectRoot,
-            relPath,
-            routeLine,
-            httpMethod,
-            fullUri,
-            handlerTarget,
-            handlers,
-            scopedVarReceivers,
-            goStructs,
-            goMethods,
-            domainId
-          );
-        }
-
-        // Method 2: Standard net/http HandleFunc and Handle:
-        // http.HandleFunc("/ping", pingHandler)
-        // mux.HandleFunc("GET /users", h.GetUsers)
-        // mux.HandleFunc("POST /users", h.CreateUser)
-        // mux.Handle("/orders", h)
-        const netHttpRegex =
-          /(?:([a-zA-Z0-9_]+|http)\.)?(?:HandleFunc|Handle)\s*\(\s*["']([^"']*)["']\s*,\s*(?:func\s*\([^)]*\)|([a-zA-Z0-9_.]+))/g;
-        let nhMatch: RegExpExecArray | null;
-
-        while ((nhMatch = netHttpRegex.exec(funcBody)) !== null) {
-          const pattern = nhMatch[2].trim();
-          const handlerTarget = (nhMatch[3] && nhMatch[3] !== "func") ? nhMatch[3] : "closure";
-          const routeLine = funcOffset + funcBody.slice(0, nhMatch.index).split("\n").length;
-
-          // Parse Go 1.22+ pattern with optional method: "GET /path" or just "/path"
-          const patternMatch = pattern.match(/^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(.*)$/);
-          let httpMethod = "ANY";
-          let rawUri = pattern;
-
-          if (patternMatch) {
-            httpMethod = patternMatch[1];
-            rawUri = patternMatch[2].trim();
-          }
-
-          const cleanUri = rawUri.startsWith("/") ? rawUri : `/${rawUri}`;
-
-          this.pushSlice(
-            slices,
-            projectRoot,
-            relPath,
-            routeLine,
-            httpMethod,
-            cleanUri,
-            handlerTarget,
-            handlers,
-            scopedVarReceivers,
-            goStructs,
-            goMethods,
-            domainId
-          );
-        }
-      }
-    }
-
     return slices;
   }
 
   private pushSlice(
     slices: VerticalSliceCandidate[],
-    projectRoot: string,
     relPath: string,
-    routeLine: number,
-    httpMethod: string,
     fullUri: string,
-    handlerTarget: string,
-    handlers: Map<string, any>,
-    scopedVarReceivers: Map<string, string>,
-    goStructs: Map<string, any>,
-    goMethods: Map<string, any>,
-    domainId?: number
+    route: GoRoute,
+    handler: GoDeclaration | undefined,
+    structs: Map<string, GoStruct>,
+    declarations: Map<string, GoDeclaration>,
+    domainId?: number,
   ): void {
-    let handlerInfo: any = undefined;
-    let controllerClass = path.basename(relPath, ".go");
-    let actionName = handlerTarget;
+    const { line: routeLine, method: httpMethod } = route;
+    const actionName = route.handler.name;
+    const controllerClass = handler?.receiver ?? route.handler.receiver ?? path.basename(handler?.relPath ?? relPath, ".go");
+    const controllerFile = handler?.relPath ?? relPath;
+    const controllerLine = handler?.line ?? route.handler.line ?? routeLine;
 
-    if (handlerTarget.includes(".")) {
-      const parts = handlerTarget.split(".");
-      const varName = parts[0];
-      const memberName = parts[1];
-      actionName = memberName;
+    const handlerStruct = handler?.receiver ? structs.get(goKey(handler.owner, handler.receiver)) : undefined;
+    const body = handler?.body ?? "";
+    const boundVar = body.match(/(?:ShouldBind(?:JSON|Query|URI|XML|YAML|Header)?|Bind(?:JSON)?|Decode|(?:Body|Params|Query)Parser)\s*\(\s*&(\w+)\s*\)/)?.[1];
+    const dto = boundVar && new RegExp(
+      `(?:var\\s+${boundVar}\\s+(?:\\w+\\.)?([A-Z]\\w*)|` +
+      `\\b${boundVar}\\s*:=\\s*&?(?:\\w+\\.)?([A-Z]\\w*)\\s*\\{|` +
+      `\\b${boundVar}\\s*:=\\s*new\\s*\\((?:\\w+\\.)?([A-Z]\\w*)\\))`
+    ).exec(body);
+    const boundType = dto && (dto[1] ?? dto[2] ?? dto[3]);
+    const serviceCall = handler && this.findFieldCall(handler, handlerStruct, /(?:Service|Usecase|UC)$/i);
+    const repositoryCall = handler && this.findFieldCall(handler, handlerStruct, /(?:Repo|Repository)$/i);
 
-      // Look up variable receiver type
-      const receiverType = scopedVarReceivers.get(varName);
-      if (receiverType) {
-        controllerClass = receiverType;
-        handlerInfo = handlers.get(`${receiverType}.${memberName}`);
-      } else {
-        handlerInfo = handlers.get(handlerTarget);
-        if (handlerInfo?.receiver) {
-          controllerClass = handlerInfo.receiver;
-        }
-      }
-    } else {
-      handlerInfo = handlers.get(handlerTarget);
-      if (handlerInfo?.receiver) {
-        controllerClass = handlerInfo.receiver;
-      }
-    }
-
-    const controllerFile = handlerInfo?.relPath || relPath;
-    const controllerLine = handlerInfo?.line || routeLine;
-
-    const chain: Array<{ stage: string; symbol: string; file?: string; line?: number; description?: string }> = [
+    const registration = { file: relPath, line: routeLine };
+    const chain: ExecutionChainNode[] = [
       {
         stage: "ingress",
         symbol: `${httpMethod} ${fullUri}`,
         file: relPath,
         line: routeLine,
         description: `Go Route: ${httpMethod} ${fullUri}`,
+        relationship: { kind: "declares", derivation: "source", source: registration, reason: "Go router call" },
       },
     ];
 
-    if (handlerInfo?.boundDto) {
+    if (boundType) {
+      chain.push({ stage: "validation", symbol: boundType, description: `Request DTO Binding: ${boundType}` });
+    }
+
+    if (handler || route.handler.line !== undefined) {
       chain.push({
-        stage: "validation",
-        symbol: handlerInfo.boundDto,
-        description: `Request DTO Binding: ${handlerInfo.boundDto}`,
+        stage: "controller",
+        symbol: `${controllerClass}::${actionName}`,
+        file: controllerFile,
+        line: controllerLine,
+        description: `Go Route Handler: ${actionName}`,
+        relationship: { kind: "route_binding", derivation: "source", source: registration, reason: "Go registration argument" },
       });
     }
 
-    chain.push({
-      stage: "controller",
-      symbol: `${controllerClass}::${actionName}`,
-      file: controllerFile,
-      line: controllerLine,
-      description: `Go Route Handler: ${actionName}`,
-    });
-
-    let serviceFile: string | undefined;
-    let serviceLine: number | undefined;
-    let repoCall = handlerInfo?.repoCall;
-    let repoFile: string | undefined;
-    let repoLine: number | undefined;
-    let entityName: string | undefined;
-    let entityFile: string | undefined;
-    let entityLine: number | undefined;
-
-    let targetMethod: any = undefined;
-    let targetStruct: any = undefined;
-
-    if (handlerInfo?.serviceCall) {
-      const parts = handlerInfo.serviceCall.split("::");
-      const callVar = parts[0];
-      const callMethod = parts[1];
-
-      const handlerStruct = goStructs.get(controllerClass);
-      const svcType = handlerStruct?.fields.get(callVar) || callVar;
-      targetMethod = goMethods.get(`${svcType}.${callMethod}`) || goMethods.get(`${callVar}.${callMethod}`);
-      targetStruct = goStructs.get(svcType);
-
-      serviceFile = targetMethod?.relPath || targetStruct?.relPath;
-      serviceLine = targetMethod?.line || targetStruct?.line;
-
-      // Scan service body for repo or DB persistence
-      if (targetMethod?.body) {
-        const rMatch = targetMethod.body.match(
-          /(?:(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]*(?:repo|repository))\s*\.\s*([A-Z][a-zA-Z0-9_]+)\s*\(|db\s*\.\s*(?:Create|Save|Find|First|Update|Delete)\s*\(\s*&?([A-Z][a-zA-Z0-9_]+)\s*\))/i
-        );
-        if (rMatch && !repoCall) {
-          repoCall = rMatch[1] ? `${rMatch[1]}::${rMatch[2]}` : `DB::${rMatch[3]}`;
-        }
-        for (const call of targetMethod.body.matchAll(/\b(\w+)\.(\w+)\s*\.\s*([A-Z]\w*)\s*\(/g)) {
-          const fieldType = targetStruct?.fields.get(call[2]);
-          if (call[1] === targetMethod.receiverVar && fieldType && /(?:Repo|Repository)$/i.test(fieldType)) {
-            repoCall = `${call[2]}::${call[3]}`;
-            break;
-          }
-        }
-      }
-    }
-
-    if (repoCall) {
-      const rParts = repoCall.split("::");
-      const rVar = rParts[0];
-      const rMethod = rParts[1];
-
-      let rType = rVar;
-      const handlerStruct = goStructs.get(controllerClass);
-      if (handlerStruct?.fields?.has(rVar)) {
-        rType = handlerStruct.fields.get(rVar)!;
-      } else if (targetStruct?.fields?.has(rVar)) {
-        rType = targetStruct.fields.get(rVar)!;
-      }
-      rType = rType.replace(/^\*?(?:[a-zA-Z0-9_]+\.)?/, "");
-
-      const rMethodInfo = goMethods.get(`${rType}.${rMethod}`) || goMethods.get(`${rVar}.${rMethod}`);
-      const rStructInfo = goStructs.get(rType);
-      repoFile = rMethodInfo?.relPath || rStructInfo?.relPath;
-      repoLine = rMethodInfo?.line || rStructInfo?.line;
-
-      if (rVar === "DB" && rMethod) {
-        entityName = rMethod;
-      } else if (rMethodInfo?.body) {
-        const entMatch = rMethodInfo.body.match(/&?([A-Z][a-zA-Z0-9_]+)\s*\{/);
-        if (entMatch) entityName = entMatch[1];
-      }
-      if (!entityName && rMethodInfo?.params) {
-        const pMatch = rMethodInfo.params.match(/\*?(?:[a-zA-Z0-9_]+\.)?([A-Z][a-zA-Z0-9_]+)\b/);
-        if (pMatch && goStructs.has(pMatch[1])) entityName = pMatch[1];
-      }
-      if (!entityName && targetMethod?.params) {
-        const pMatch = targetMethod.params.match(/\*?(?:[a-zA-Z0-9_]+\.)?([A-Z][a-zA-Z0-9_]+)\b/);
-        if (pMatch && goStructs.has(pMatch[1])) entityName = pMatch[1];
-      }
-    }
-
-    if (!entityName && handlerInfo?.boundDto) {
-      const candidate = handlerInfo.boundDto.replace(/(?:Request|Req|DTO|Dto)$/, "");
-      if (candidate && goStructs.has(candidate)) {
-        entityName = candidate;
-      }
-    }
-
-    if (entityName && goStructs.has(entityName)) {
-      const entInfo = goStructs.get(entityName)!;
-      entityFile = entInfo.relPath;
-      entityLine = entInfo.line;
-    }
-
-    if (handlerInfo?.serviceCall) {
+    const service = serviceCall && declarations.get(goKey(serviceCall.type.owner, `${serviceCall.type.name}.${serviceCall.method}`));
+    if (serviceCall) {
       chain.push({
-        stage: "service",
-        symbol: handlerInfo.serviceCall,
-        ...(serviceFile ? { file: serviceFile, line: serviceLine } : {}),
-        description: serviceFile ? "Go Service / Business Logic" : `Service / Business Logic`,
+        stage: "service", symbol: `${serviceCall.field}::${serviceCall.method}`,
+        ...(service ? { file: service.relPath, line: service.line } : {}),
+        description: "Go Service / Business Logic",
       });
     }
 
-    if (repoCall) {
+    const serviceStruct = service?.receiver ? structs.get(goKey(service.owner, service.receiver)) : undefined;
+    const persistence = repositoryCall ?? (service && this.findFieldCall(service, serviceStruct, /(?:Repo|Repository)$/i));
+    const databaseCall = persistence ? undefined : [body, service?.body ?? ""]
+      .map(text => text.match(/\bdb\s*\.\s*(?:Create|Save|Find|First|Update|Delete)\s*\(\s*&?([A-Z]\w*)\s*\)/)?.[1])
+      .find(Boolean);
+    const repository = persistence && declarations.get(goKey(persistence.type.owner, `${persistence.type.name}.${persistence.method}`));
+    const repoStruct = persistence && structs.get(goKey(persistence.type.owner, persistence.type.name));
+    if (persistence) {
+      const location = repository ?? repoStruct;
       chain.push({
-        stage: "repository",
-        symbol: repoCall,
-        ...(repoFile ? { file: repoFile, line: repoLine } : {}),
-        description: repoFile ? "Go Repository / Persistence Layer" : `Persistence / Database Operation`,
+        stage: "repository", symbol: `${persistence.field}::${persistence.method}`,
+        ...(location ? { file: location.relPath, line: location.line } : {}),
+        description: "Go Repository / Persistence Layer",
+      });
+    } else if (databaseCall) {
+      chain.push({
+        stage: "repository", symbol: "DB::" + databaseCall, description: "Persistence / Database Operation",
+        relationship: { kind: "calls", derivation: "inferred", reason: "Go database call pattern" },
       });
     }
 
-    if (entityName) {
+    const entity = databaseCall ?? (repository?.body.match(/&?([A-Z]\w*)\s*\{/) ?? repository?.params.match(/(?:^|[\s*])(?:\w+\.)?([A-Z]\w*)\b/))?.[1]
+      ?? boundType?.replace(/(?:Request|Req|DTO|Dto)$/, "");
+    const entityOwners = [repository?.owner, handler?.owner];
+    const entityLocations = entity
+      ? [...new Set([...structs].filter(([key]) => key.endsWith("\0" + entity)).map(([, location]) => location))]
+      : [];
+    const entityLocation = entity && (entityOwners.map(owner => owner && structs.get(goKey(owner, entity))).find(Boolean) ||
+      (entityLocations.length === 1 ? entityLocations[0] : undefined));
+    if (entity && entityLocation) {
       chain.push({
-        stage: "entity",
-        symbol: entityName,
-        ...(entityFile ? { file: entityFile, line: entityLine } : {}),
-        description: entityFile ? "Go Database / Domain Entity" : `Domain Entity`,
+        stage: "entity", symbol: entity, file: entityLocation.relPath, line: entityLocation.line,
+        description: "Go Database / Domain Entity",
       });
     }
 
@@ -648,23 +284,17 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
     });
   }
 
-  private findGoBraceBlockEnd(content: string, startIndex: number): number {
-    let depth = 0;
-    let started = false;
-
-    for (let i = startIndex; i < content.length; i++) {
-      const char = content[i];
-      if (char === "{") {
-        depth++;
-        started = true;
-      } else if (char === "}") {
-        depth--;
-        if (started && depth === 0) {
-          return i;
-        }
+  private findFieldCall(
+    declaration: GoDeclaration,
+    struct: GoStruct | undefined,
+    suffix: RegExp,
+  ): { field: string; method: string; type: GoType } | undefined {
+    for (const call of declaration.body.matchAll(/\b(\w+)\.(\w+)\s*\.\s*([A-Z]\w*)\s*\(/g)) {
+      const type = struct?.fields.get(call[2]!);
+      if (call[1] === declaration.receiverVar && type && suffix.test(type.name)) {
+        return { field: call[2]!, method: call[3]!, type };
       }
     }
-
-    return content.length;
+    return undefined;
   }
 }

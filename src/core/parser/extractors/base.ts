@@ -22,9 +22,9 @@ export function detectArchetype(filePath: string, archetypesMap: Record<string, 
   }
   if (lower.includes("controller") || /(?:^|\/)handlers?\/|handler\.(?:go|ts|js|py|php)$/i.test(lower)) return "controller";
   if (lower.endsWith("views.py") || (lower.includes("views/") && lower.endsWith(".py"))) return "controller";
-  if (/(?:^|\/)(?:console\/)?commands?\//i.test(lower)) return "action";
+  if (/(?:^|\/)(?:console\/)?commands?\//i.test(lower) || /(?:^|\/)(?:tools?|use[-_]?cases?)\//i.test(lower)) return "action";
   if (/(?:^|\/)models?\/|entities|entity/.test(lower) || /model\.(?:php|ts|js|py|go)$/i.test(lower)) return "model";
-  if (lower.includes("service")) return "service";
+  if (lower.includes("service") || /(?:^|\/)(?:adapters?|gateways?|providers?)\//i.test(lower)) return "service";
   if (lower.includes("repository") || lower.includes("repo")) return "repository";
   if (/(?:^|\/)actions?\/|action\.(?:php|ts|js|py|go)$/i.test(lower)) return "action";
   if (lower.includes("job") || lower.includes("queue")) return "job";
@@ -36,6 +36,13 @@ export function detectArchetype(filePath: string, archetypesMap: Record<string, 
   if (lower.includes(".blade.php") || lower.includes("views/") || lower.includes("templates/")) return "view";
   if (lower.includes("route") || lower.includes("router")) return "route";
   if (lower.includes("util") || lower.includes("helper")) return "util";
+  // Non-MVC structural archetypes (libraries, CLIs, compilers, MCP servers, engines)
+  if (/(?:^|\/)(?:parsers?|extractors?)\//i.test(lower) || /(?:parser|extractor|lexer|tokenizer)\.(?:ts|js|py|go|php|rs|rb|java|cs)$/i.test(lower)) return "parser";
+  if (/(?:^|\/)resolvers?\//i.test(lower) || /(?:resolver|tracer|locator)\.(?:ts|js|py|go|php|rs|rb|java|cs)$/i.test(lower)) return "resolver";
+  if (/(?:^|\/)(?:pipelines?|ingestion|workflows?)\//i.test(lower) || /(?:pipeline|ingestor|indexer)\.(?:ts|js|py|go|php|rs|rb|java|cs)$/i.test(lower)) return "pipeline";
+  if (/(?:^|\/)config\//i.test(lower) || /(?:config|settings|loader)\.(?:ts|js|py|go|php|rs|rb|java|cs)$/i.test(lower)) return "config";
+  if (/(?:server|watcher|daemon|manager|runtime|client)\.(?:ts|js|py|go|php|rs|rb|java|cs)$/i.test(lower)) return "server";
+  if (/(?:^|\/)(?:boundary|retrieval|discovery|telemetry)\//i.test(lower) || /(?:evaluator|auditor|detector|orchestrator)\.(?:ts|js|py|go|php|rs|rb|java|cs)$/i.test(lower)) return "service";
 
   return "unknown";
 }

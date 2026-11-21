@@ -1,27 +1,171 @@
-import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
-import { readOptionalSourceFile } from "../../resources/source-files.ts";
-import { parseWithTreeSitter } from "../wasm-loader.ts";
-import { ImportResolver } from "../../resolver/import-resolver.ts";
-import type Parser from "web-tree-sitter";
-import * as fs from "node:fs";
 import * as path from "node:path";
+import ts from "typescript";
+import type { ExecutionChainNode } from "../../../types/index.ts";
+import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
+import { probeSourcePath, readOptionalSourceFile } from "../../resources/source-files.ts";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
+import { lineOf, literal, nameText, nodes, objectMember, TypeScriptBindings } from "./typescript-bindings.ts";
 
-const NEST_HTTP_METHODS: Record<string, string> = {
-  Get: "GET",
-  Post: "POST",
-  Put: "PUT",
-  Patch: "PATCH",
-  Delete: "DELETE",
-  All: "ALL",
-  Head: "HEAD",
-  Options: "OPTIONS",
-};
+const methodDecorators = new Map([
+  ["Get", "GET"], ["Post", "POST"], ["Put", "PUT"], ["Patch", "PATCH"], ["Delete", "DELETE"],
+  ["All", "ANY"], ["Head", "HEAD"], ["Options", "OPTIONS"], ["Search", "SEARCH"], ["Propfind", "PROPFIND"],
+  ["Proppatch", "PROPPATCH"], ["Mkcol", "MKCOL"], ["Copy", "COPY"], ["Move", "MOVE"], ["Lock", "LOCK"], ["Unlock", "UNLOCK"],
+]);
 
-interface ParsedDecorator {
-  name: string;
-  args: string[];
-  startLine: number;
+type Decorator = { name: string; site: ts.Decorator; args: readonly ts.Expression[] };
+type FileOf = (node: ts.Node) => string;
+
+function decorators(node: ts.Node, bindings: TypeScriptBindings, owner = "@nestjs/common"): Decorator[] {
+  if (!ts.canHaveDecorators(node)) return [];
+  return (ts.getDecorators(node) ?? []).flatMap(site => {
+    const call = site.expression;
+    if (!ts.isCallExpression(call)) return [];
+    const binding = bindings.packageBinding(call.expression);
+    if (binding?.module !== owner && !binding?.module.startsWith(owner + "/")) return [];
+    return [{ name: binding.name, site, args: call.arguments }];
+  });
+}
+
+function paths(value?: ts.Expression, emptyArrayMeansRoot = false): string[] | undefined {
+  if (!value) return [""];
+  const values = ts.isArrayLiteralExpression(value) ? value.elements.map(literal) : [literal(value)];
+  if (!values.every((item): item is string => item !== undefined)) return undefined;
+  return !values.length && emptyArrayMeansRoot ? [""] : [...new Set(values)];
+}
+
+function option(object: ts.ObjectLiteralExpression, key: string): ts.Expression | "unknown" | undefined {
+  const value = objectMember(object, key);
+  if (value) return ts.isMethodDeclaration(value) ? "unknown" : value;
+  if (object.properties.some(prop => ts.isSpreadAssignment(prop) ||
+      (prop.name && (ts.isComputedPropertyName(prop.name) || nameText(prop.name) === key)))) return "unknown";
+  return undefined;
+}
+
+function controllerPaths(decorator: Decorator, bindings: TypeScriptBindings): string[] | undefined {
+  const value = bindings.value(decorator.args[0]);
+  if (!value || !ts.isObjectLiteralExpression(value)) return paths(value);
+  const pathValue = option(value, "path");
+  return pathValue === "unknown" ? undefined : paths(bindings.value(pathValue));
+}
+
+function handlerRoute(decorator: Decorator, bindings: TypeScriptBindings) {
+  const value = bindings.value(decorator.args[0]);
+  if (decorator.name !== "RequestMapping") {
+    return { method: methodDecorators.get(decorator.name), paths: paths(value, true) };
+  }
+  if (!value) return { method: "GET", paths: [""] };
+  if (!ts.isObjectLiteralExpression(value)) return undefined;
+  const pathValue = option(value, "path");
+  const methodValue = option(value, "method");
+  if (pathValue === "unknown" || methodValue === "unknown") return undefined;
+  const request = bindings.value(methodValue);
+  if (!request) return { method: "GET", paths: paths(bindings.value(pathValue), true) };
+  if (!ts.isPropertyAccessExpression(request)) return undefined;
+  const binding = bindings.packageBinding(request.expression);
+  if (binding?.name !== "RequestMethod" ||
+      !(binding.module === "@nestjs/common" || binding.module.startsWith("@nestjs/common/"))) return undefined;
+  const method = request.name.text === "ALL" ? "ANY" : request.name.text;
+  if (![...methodDecorators.values()].includes(method)) return undefined;
+  return { method, paths: paths(bindings.value(pathValue), true) };
+}
+
+function parameterProperties(node: ts.ClassLikeDeclaration): Map<string, ts.ParameterDeclaration> {
+  const result = new Map<string, ts.ParameterDeclaration>();
+  for (const member of node.members) {
+    if (!ts.isConstructorDeclaration(member)) continue;
+    for (const parameter of member.parameters) {
+      if (ts.isIdentifier(parameter.name) && ts.isParameterPropertyDeclaration(parameter, member)) {
+        result.set(parameter.name.text, parameter);
+      }
+    }
+  }
+  return result;
+}
+
+function thisMember(node: ts.Expression): string | undefined {
+  return ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword ? node.name.text : undefined;
+}
+
+function persistenceHints(
+  service: ts.ClassLikeDeclaration,
+  method: ts.MethodDeclaration,
+  bindings: TypeScriptBindings,
+  fileOf: FileOf,
+): ExecutionChainNode[] {
+  if (!method.body) return [];
+  const parameters = parameterProperties(service);
+  for (const call of nodes(method.body, true).filter(ts.isCallExpression)) {
+    const callee = call.expression;
+    if (!ts.isPropertyAccessExpression(callee) || !/^(find|save|create|update|delete|upsert|remove|insert)/.test(callee.name.text)) continue;
+    const receiver = callee.expression;
+    const repoName = thisMember(receiver);
+    const repository = repoName && parameters.get(repoName);
+    let entity: string | undefined;
+    let entitySource: ts.Node | undefined;
+    if (repository) {
+      const injection = [...decorators(repository, bindings, "@nestjs/typeorm"),
+        ...decorators(repository, bindings, "@nestjs/mongoose")].find(item => ["InjectRepository", "InjectModel"].includes(item.name));
+      const type = repository.type;
+      const generic = type && ts.isTypeReferenceNode(type) && /^(Repository|Model)$/.test(type.typeName.getText())
+        ? type.typeArguments?.[0] : undefined;
+      const entityExpression = injection?.args[0] ?? (generic && ts.isTypeReferenceNode(generic) && ts.isIdentifier(generic.typeName)
+        ? generic.typeName : undefined);
+      if (entityExpression) {
+        entity = nameText(entityExpression);
+        entitySource = bindings.definition(entityExpression);
+      }
+    } else if (ts.isPropertyAccessExpression(receiver) && thisMember(receiver.expression) === "prisma") {
+      const model = receiver.name.text;
+      entity = model[0]!.toUpperCase() + model.slice(1);
+    } else if (ts.isIdentifier(receiver) && /^[A-Z]/.test(receiver.text)) {
+      const declaration = bindings.definition(receiver);
+      if (declaration && ts.isClassLike(declaration) && declaration !== service) {
+        entity = receiver.text;
+        entitySource = declaration;
+      }
+    }
+    if (!entity) continue;
+    const origin = entitySource ?? call;
+    return [{
+      stage: "repository", symbol: entity + "Repository", file: fileOf(call), line: lineOf(call),
+      description: "Persistence call on a repository or model candidate",
+    }, {
+      stage: "entity", symbol: entity, file: fileOf(origin), line: lineOf(origin),
+      description: "Entity inferred from service source",
+    }];
+  }
+  return [];
+}
+
+function serviceHints(
+  action: ts.MethodDeclaration,
+  injections: ReadonlyMap<string, ts.ParameterDeclaration>,
+  bindings: TypeScriptBindings,
+  fileOf: FileOf,
+): ExecutionChainNode[] {
+  if (!action.body) return [];
+  const hints: ExecutionChainNode[] = [];
+  for (const call of nodes(action.body, true).filter(ts.isCallExpression)) {
+    const callee = call.expression;
+    if (!ts.isPropertyAccessExpression(callee)) continue;
+    const property = thisMember(callee.expression);
+    const injection = property && injections.get(property);
+    const type = injection ? injection.type : undefined;
+    if (!type || !ts.isTypeReferenceNode(type) || !ts.isIdentifier(type.typeName)) continue;
+    const service = bindings.definition(type.typeName);
+    const method = service && ts.isClassLike(service) && service.members.find(member =>
+      ts.isMethodDeclaration(member) && nameText(member.name) === callee.name.text && !!member.body,
+    );
+    const origin = method || call;
+    hints.push({
+      stage: "service", symbol: type.typeName.text + "::" + callee.name.text,
+      file: fileOf(origin), line: lineOf(origin), description: "Injected Service Call",
+    });
+    if (method && ts.isMethodDeclaration(method) && service && ts.isClassLike(service)) {
+      hints.push(...persistenceHints(service, method, bindings, fileOf));
+    }
+  }
+  return hints;
 }
 
 export class NestJsSemanticExtractor implements SemanticSliceExtractor {
@@ -29,499 +173,97 @@ export class NestJsSemanticExtractor implements SemanticSliceExtractor {
   public readonly name = "NestJS Modular Semantic Extractor";
 
   public canHandle(projectRoot: string, framework?: string): boolean {
-    if (framework === "nestjs") return true;
-
-    if (fs.existsSync(path.join(projectRoot, "nest-cli.json"))) return true;
-
-    const pkgPath = path.join(projectRoot, "package.json");
-    if (fs.existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readOptionalSourceFile(pkgPath, "utf-8"));
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps["@nestjs/core"] || deps["@nestjs/common"]) return true;
-      } catch {}
-    }
-
-    return false;
+    if (framework === "nestjs" || probeSourcePath(path.join(projectRoot, "nest-cli.json")) === "file") return true;
+    const manifest = path.join(projectRoot, "package.json");
+    if (probeSourcePath(manifest) !== "file") return false;
+    try {
+      const pkg = JSON.parse(readOptionalSourceFile(manifest, "utf-8"));
+      const dependencies = { ...pkg.dependencies, ...pkg.devDependencies };
+      return !!(dependencies["@nestjs/common"] || dependencies["@nestjs/core"]);
+    } catch { return false; }
   }
 
   public async extractSlices(
     projectRoot: string,
     domainId?: number,
-    signal?: AbortSignal, inventory?: SourceInventory
+    signal?: AbortSignal,
+    inventory?: SourceInventory,
   ): Promise<VerticalSliceCandidate[]> {
+    const root = path.resolve(projectRoot);
+    const files = listSourceFiles(root, /\.[cm]?[jt]sx?$/, inventory).filter(file => !/\.d\.[cm]?ts$/.test(file));
+    const bindings = new TypeScriptBindings(root, new Set(files), signal);
+    const fileOf = (node: ts.Node) => path.relative(root, node.getSourceFile().fileName).replace(/\\/g, "/");
     const slices: VerticalSliceCandidate[] = [];
-    const srcDir = path.join(projectRoot, "src");
-    if (!fs.existsSync(srcDir)) return slices;
 
-    const resolver = new ImportResolver(projectRoot);
-    const controllerFiles = listSourceFiles(srcDir, /\.controller\.(ts|js)$/, inventory);
+    for (const file of files) {
+      signal?.throwIfAborted();
+      const unit = bindings.load(file);
+      if (!unit) continue;
+      const relPath = fileOf(unit.source);
+      for (const node of unit.source.statements) {
+        if (!ts.isClassDeclaration(node) || node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AbstractKeyword)) continue;
+        const declared = decorators(node, bindings);
+        const controller = declared.find(item => item.name === "Controller");
+        if (!controller) continue;
+        const prefixes = controllerPaths(controller, bindings);
+        if (!prefixes?.length) continue;
+        const controllerClass = nameText(node.name) ?? "AnonymousController";
+        const classGuards = declared.filter(item => item.name === "UseGuards");
+        const injections = parameterProperties(node);
 
-    for (const file of controllerFiles) {
-      if (signal?.aborted) throw new Error("semantic_extraction_cancelled");
-      const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
-      const content = readOptionalSourceFile(file, "utf-8");
-      if (!content.trim()) continue;
+        for (const member of node.members) {
+          signal?.throwIfAborted();
+          if (!ts.isMethodDeclaration(member) || !member.body ||
+              member.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.StaticKeyword)) continue;
+          const action = nameText(member.name);
+          if (!action) continue;
+          const declared = decorators(member, bindings);
+          const registration = declared.find(item => methodDecorators.has(item.name) || item.name === "RequestMapping");
+          if (!registration) continue;
+          const route = handlerRoute(registration, bindings);
+          if (!route?.method || !route.paths?.length) continue;
 
-      const fileSlices = await parseWithTreeSitter(
-        "typescript",
-        content,
-        (rootNode) => this.extractFromAst(file, relPath, content, rootNode, projectRoot, resolver, domainId)
-      );
+          const actionLine = lineOf(member.name);
+          const chain: ExecutionChainNode[] = [];
+          const guards = new Map<string, ts.Expression>();
+          for (const dec of [...classGuards, ...declared.filter(item => item.name === "UseGuards")]) {
+            for (const guard of dec.args) guards.set(guard.getText(), guard);
+          }
+          for (const [symbol, guard] of guards) {
+            chain.push({ stage: "guard", symbol, file: relPath, line: lineOf(guard), description: "NestJS Guard Argument" });
+          }
+          for (const param of member.parameters) {
+            if (!decorators(param, bindings).some(item => item.name === "Body")) continue;
+            const type = param.type;
+            if (type && ts.isTypeReferenceNode(type) && !["Record", "Array", "Promise"].includes(type.typeName.getText())) {
+              chain.push({ stage: "validation", symbol: type.typeName.getText(), description: "DTO Validation" });
+            }
+          }
+          chain.push({
+            stage: "controller", symbol: controllerClass + "::" + action, file: relPath, line: actionLine,
+            description: "NestJS Controller Action",
+          }, ...serviceHints(member, injections, bindings, fileOf));
 
-      if (fileSlices && fileSlices.length > 0) {
-        slices.push(...fileSlices);
+          const routes = new Set(prefixes.flatMap(prefix => route.paths!.map(subpath =>
+            "/" + [prefix, subpath].map(value => value.replace(/^\/+|\/+$/g, "")).filter(Boolean).join("/"),
+          )));
+          for (const uri of routes) {
+            const ingress: ExecutionChainNode = {
+              stage: "ingress", symbol: route.method + " " + uri, file: relPath, line: lineOf(registration.site),
+              description: "NestJS Route Decorator",
+            };
+            slices.push({
+              domain_id: domainId ?? null,
+              feature_key: `nest.${controllerClass.toLowerCase().replace("controller", "")}.${action}`,
+              http_method: route.method, route_uri: uri, route_name: `${controllerClass}.${action}`,
+              controller_class: controllerClass, action_name: action, controller_file: relPath,
+              controller_line: actionLine, architecture_style: "mvc", entry_kind: "http_route",
+              execution_chain_json: JSON.stringify([ingress, ...chain]),
+            });
+          }
+        }
       }
     }
-
     return slices;
-  }
-
-  private extractFromAst(
-    _filePath: string,
-    relPath: string,
-    content: string,
-    rootNode: Parser.SyntaxNode,
-    projectRoot: string,
-    resolver: ImportResolver,
-    domainId?: number
-  ): VerticalSliceCandidate[] {
-    const slices: VerticalSliceCandidate[] = [];
-    const lines = content.split("\n");
-
-    // Collect imports in controller file
-    const importsMap = new Map<string, string>();
-    for (const child of rootNode.namedChildren) {
-      if (child.type === "import_statement") {
-        const sourceNode = child.childForFieldName("source");
-        const specifier = sourceNode ? sourceNode.text.replace(/^['"]|['"]$/g, "") : "";
-        if (!specifier) continue;
-        const importClause = child.namedChildren.find((c) => c.type === "import_clause");
-        if (importClause) {
-          for (const ic of importClause.namedChildren) {
-            if (ic.type === "identifier") {
-              importsMap.set(ic.text.trim(), specifier);
-            } else if (ic.type === "namespace_import") {
-              const idNode = ic.namedChildren.find((n) => n.type === "identifier");
-              if (idNode) importsMap.set(idNode.text.trim(), specifier);
-            } else if (ic.type === "named_imports") {
-              for (const spec of ic.namedChildren) {
-                if (spec.type === "import_specifier") {
-                  const alias = spec.childForFieldName("alias");
-                  const name = spec.childForFieldName("name") ?? spec.namedChildren[0];
-                  const ident = alias ? alias.text.trim() : name ? name.text.trim() : "";
-                  if (ident) importsMap.set(ident, specifier);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    const walkForClasses = (node: Parser.SyntaxNode): void => {
-      let classNode: Parser.SyntaxNode | null = null;
-      let classDecorators: ParsedDecorator[] = [];
-
-      if (node.type === "class_declaration") {
-        classNode = node;
-        classDecorators = node.namedChildren
-          .filter((c) => c.type === "decorator")
-          .map((c) => this.parseDecorator(c))
-          .filter(Boolean) as ParsedDecorator[];
-      } else if (node.type === "export_statement") {
-        classDecorators = node.namedChildren
-          .filter((c) => c.type === "decorator")
-          .map((c) => this.parseDecorator(c))
-          .filter(Boolean) as ParsedDecorator[];
-        const innerClass = node.namedChildren.find((c) => c.type === "class_declaration");
-        if (innerClass) {
-          classNode = innerClass;
-          const innerDecorators = innerClass.namedChildren
-            .filter((c) => c.type === "decorator")
-            .map((c) => this.parseDecorator(c))
-            .filter(Boolean) as ParsedDecorator[];
-          classDecorators.push(...innerDecorators);
-        }
-      }
-
-      if (classNode) {
-        const controllerDec = classDecorators.find((d) => d.name === "Controller");
-        if (controllerDec) {
-          const rawPrefix = controllerDec.args[0] ?? "";
-          const routePrefix = rawPrefix ? `/${rawPrefix.replace(/^\/+|\/+$/g, "")}` : "";
-          const nameNode = classNode.namedChildren.find((c) => c.type === "type_identifier" || c.type === "identifier");
-          const controllerClass = nameNode ? nameNode.text.trim() : "AnonymousController";
-          const classGuards = classDecorators.filter((d) => d.name === "UseGuards").flatMap((d) => d.args);
-
-          this.processControllerClass(
-            classNode,
-            controllerClass,
-            routePrefix,
-            classGuards,
-            relPath,
-            lines,
-            slices,
-            importsMap,
-            projectRoot,
-            resolver,
-            domainId
-          );
-        }
-        return;
-      }
-
-      for (const child of node.namedChildren) {
-        walkForClasses(child);
-      }
-    };
-
-    walkForClasses(rootNode);
-    return slices;
-  }
-
-  private processControllerClass(
-    classNode: Parser.SyntaxNode,
-    controllerClass: string,
-    routePrefix: string,
-    classGuards: string[],
-    relPath: string,
-    _lines: string[],
-    slices: VerticalSliceCandidate[],
-    importsMap: Map<string, string>,
-    projectRoot: string,
-    resolver: ImportResolver,
-    domainId?: number
-  ): void {
-    const bodyNode =
-      classNode.childForFieldName("body") ?? classNode.namedChildren.find((c) => c.type === "class_body");
-    if (!bodyNode) return;
-
-    // 1. Identify injected services from constructor
-    const injectedServices = new Map<string, { type: string; line: number }>();
-
-    for (const member of bodyNode.namedChildren) {
-      if (member.type === "method_definition") {
-        const nameNode =
-          member.childForFieldName("name") ??
-          member.namedChildren.find((c) => c.type === "property_identifier" || c.type === "identifier");
-        if (nameNode?.text === "constructor") {
-          const paramsNode =
-            member.childForFieldName("parameters") ??
-            member.namedChildren.find((c) => c.type === "formal_parameters");
-          if (paramsNode) {
-            for (const param of paramsNode.namedChildren) {
-              if (param.type === "required_parameter" || param.type === "optional_parameter") {
-                const hasAccessibility = param.namedChildren.some((c) => c.type === "accessibility_modifier");
-                const hasReadonly = param.namedChildren.some((c) => c.type === "readonly");
-                if (hasAccessibility || hasReadonly) {
-                  const paramIdNode =
-                    param.childForFieldName("pattern") ??
-                    param.childForFieldName("name") ??
-                    param.namedChildren.find((c) => c.type === "identifier");
-                  const typeNode =
-                    param.childForFieldName("type") ??
-                    param.namedChildren.find((c) => c.type === "type_annotation");
-                  if (paramIdNode && typeNode) {
-                    const rawType = typeNode.text.replace(/^:\s*/, "").trim().split(/[<[{]/)[0].trim();
-                    if (rawType && /^[A-Z]/.test(rawType)) {
-                      injectedServices.set(paramIdNode.text.trim(), {
-                        type: rawType,
-                        line: param.startPosition.row + 1,
-                      });
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // 2. Extract controller route actions with preceding decorators
-    let pendingDecorators: ParsedDecorator[] = [];
-
-    for (const member of bodyNode.namedChildren) {
-      if (member.type === "decorator") {
-        const dec = this.parseDecorator(member);
-        if (dec) pendingDecorators.push(dec);
-        continue;
-      }
-
-      if (member.type !== "method_definition") {
-        pendingDecorators = [];
-        continue;
-      }
-
-      const nameNode =
-        member.childForFieldName("name") ??
-        member.namedChildren.find((c) => c.type === "property_identifier" || c.type === "identifier");
-      if (!nameNode || nameNode.text === "constructor") {
-        pendingDecorators = [];
-        continue;
-      }
-
-      const actionName = nameNode.text.trim();
-      const actionLine = member.startPosition.row + 1;
-
-      // Combine decorators attached to member and preceding decorators in class_body
-      const memberAttachedDecorators = member.namedChildren
-        .filter((c) => c.type === "decorator")
-        .map((c) => this.parseDecorator(c))
-        .filter(Boolean) as ParsedDecorator[];
-      const methodDecorators = [...pendingDecorators, ...memberAttachedDecorators];
-      pendingDecorators = [];
-
-      const httpDec = methodDecorators.find((d) => NEST_HTTP_METHODS[d.name]);
-      if (!httpDec) continue;
-
-      const httpMethod = NEST_HTTP_METHODS[httpDec.name]!;
-      const rawSub = httpDec.args[0] ?? "";
-      const cleanSub = rawSub ? `/${rawSub.replace(/^\/+|\/+$/g, "")}` : "";
-      const fullUri = `${routePrefix}${cleanSub}` || "/";
-      const decoratorLine = httpDec.startLine || actionLine;
-
-      // Method guards
-      const methodGuards = methodDecorators.filter((d) => d.name === "UseGuards").flatMap((d) => d.args);
-      const allGuards = Array.from(new Set([...classGuards, ...methodGuards]));
-
-      // Extract DTO from @Body() parameter
-      let validationDto: string | null = null;
-      const paramsNode =
-        member.childForFieldName("parameters") ??
-        member.namedChildren.find((c) => c.type === "formal_parameters");
-      if (paramsNode) {
-        for (const param of paramsNode.namedChildren) {
-          if (param.type === "required_parameter" || param.type === "optional_parameter") {
-            const paramDecorators = param.namedChildren
-              .filter((c) => c.type === "decorator")
-              .map((c) => this.parseDecorator(c))
-              .filter(Boolean) as ParsedDecorator[];
-            if (paramDecorators.some((d) => d.name === "Body")) {
-              const typeNode =
-                param.childForFieldName("type") ?? param.namedChildren.find((c) => c.type === "type_annotation");
-              if (typeNode) {
-                const typeStr = typeNode.text.replace(/^:\s*/, "").trim().split(/[<[{]/)[0].trim();
-                const primitiveTypes = new Set(["string", "number", "boolean", "any", "unknown", "object", "Record"]);
-                if (typeStr && !primitiveTypes.has(typeStr)) {
-                  validationDto = typeStr;
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // 3. Trace explicit service calls in method body
-      interface ExplicitServiceCall {
-        symbol: string;
-        file: string;
-        line: number;
-        persistenceNodes: Array<{ stage: string; symbol: string; file?: string; line?: number; description?: string }>;
-      }
-      const explicitCalls: ExplicitServiceCall[] = [];
-      const methodBody =
-        member.childForFieldName("body") ?? member.namedChildren.find((c) => c.type === "statement_block");
-      if (methodBody) {
-        const walkCalls = (bNode: Parser.SyntaxNode): void => {
-          if (bNode.type === "call_expression") {
-            const fnNode =
-              bNode.childForFieldName("function") ??
-              bNode.namedChildren.find((c) => c.type === "member_expression");
-            if (fnNode && fnNode.type === "member_expression") {
-              const objNode = fnNode.childForFieldName("object") ?? fnNode.namedChildren[0];
-              const propNode = fnNode.childForFieldName("property") ?? fnNode.namedChildren[1];
-              if (objNode && objNode.type === "member_expression") {
-                const subObj = objNode.childForFieldName("object") ?? objNode.namedChildren[0];
-                const subProp = objNode.childForFieldName("property") ?? objNode.namedChildren[1];
-                if (subObj?.text === "this" && subProp && injectedServices.has(subProp.text)) {
-                  const svc = injectedServices.get(subProp.text)!;
-                  const callMethod = propNode ? propNode.text.trim() : "action";
-                  let serviceFile: string | undefined;
-                  let serviceLine = bNode.startPosition.row + 1;
-                  const persistenceNodes: Array<{
-                    stage: string;
-                    symbol: string;
-                    file?: string;
-                    line?: number;
-                    description?: string;
-                  }> = [];
-
-                  const importSpec = importsMap.get(svc.type);
-                  if (importSpec) {
-                    const res = resolver.resolve(importSpec, path.resolve(projectRoot, relPath));
-                    if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-                      serviceFile = res.targets[0].files[0];
-                      const fullServicePath = path.resolve(projectRoot, serviceFile);
-                      const serviceContent = readOptionalSourceFile(fullServicePath, "utf-8");
-                      if (serviceContent) {
-                        const mMatch = new RegExp(`(?:async\\s+)?(?:public\\s+)?\\b${callMethod}\\s*\\(`).exec(serviceContent);
-                        if (mMatch) {
-                          serviceLine = serviceContent.slice(0, mMatch.index).split("\n").length;
-                        }
-
-                        // Inspect for TypeORM / Prisma / Mongoose persistence
-                        const typeOrmMatch = serviceContent.match(
-                          /@InjectRepository\s*\(\s*([A-Za-z0-9_]+)\s*\)|Repository<\s*([A-Za-z0-9_]+)\s*>/
-                        );
-                        const prismaMatch = serviceContent.match(
-                          /this\.prisma\.([a-zA-Z0-9_]+)\.(?:find|create|update|delete|upsert)/
-                        );
-                        const mongooseMatch = serviceContent.match(/@InjectModel\s*\(\s*([A-Za-z0-9_]+)/);
-                        const arMatch = serviceContent.match(
-                          /\b([A-Z][a-zA-Z0-9_]+)\.(?:save|find|findOne|create|update|delete)\s*\(/
-                        );
-
-                        const entityName =
-                          typeOrmMatch ? (typeOrmMatch[1] || typeOrmMatch[2]) :
-                          prismaMatch ? (prismaMatch[1].charAt(0).toUpperCase() + prismaMatch[1].slice(1)) :
-                          mongooseMatch ? mongooseMatch[1] :
-                          arMatch && arMatch[1] !== svc.type ? arMatch[1] : undefined;
-
-                        if (entityName) {
-                          let entityFile: string | undefined;
-                          const entImportMatch = serviceContent.match(
-                            new RegExp(
-                              `import\\s+(?:{[^}]*\\b${entityName}\\b[^}]*}|\\b${entityName}\\b)\\s+from\\s+['"]([^'"]+)['"]`
-                            )
-                          );
-                          if (entImportMatch) {
-                            const eRes = resolver.resolve(entImportMatch[1], fullServicePath);
-                            if (eRes.status === "resolved" && eRes.targets[0]?.files?.[0]) {
-                              entityFile = eRes.targets[0].files[0];
-                            }
-                          }
-
-                          persistenceNodes.push({
-                            stage: "repository",
-                            symbol: `${entityName}Repository`,
-                            file: serviceFile,
-                            description: "TypeORM / Persistence Repository",
-                          });
-                          persistenceNodes.push({
-                            stage: "entity",
-                            symbol: entityName,
-                            file: entityFile || serviceFile,
-                            description: "Database Entity / Persistence Layer",
-                          });
-                        }
-                      }
-                    }
-                  }
-
-                  explicitCalls.push({
-                    symbol: `${svc.type}::${callMethod}`,
-                    file: serviceFile || relPath,
-                    line: serviceFile ? serviceLine : bNode.startPosition.row + 1,
-                    persistenceNodes,
-                  });
-                }
-              }
-            }
-          }
-          for (const c of bNode.namedChildren) {
-            walkCalls(c);
-          }
-        };
-        walkCalls(methodBody);
-      }
-
-      // 4. Construct execution chain
-      const chain: Array<{ stage: string; symbol: string; file?: string; line?: number; description?: string }> = [
-        {
-          stage: "ingress",
-          symbol: `${httpMethod} ${fullUri}`,
-          file: relPath,
-          line: decoratorLine,
-          description: `NestJS Route: ${httpMethod} ${fullUri}`,
-        },
-      ];
-
-      for (const guard of allGuards) {
-        chain.push({
-          stage: "guard",
-          symbol: guard,
-          file: relPath,
-          line: actionLine,
-          description: `NestJS Guard: ${guard}`,
-        });
-      }
-
-      if (validationDto) {
-        chain.push({
-          stage: "validation",
-          symbol: validationDto,
-          description: "DTO Validation",
-        });
-      }
-
-      chain.push({
-        stage: "controller",
-        symbol: `${controllerClass}::${actionName}`,
-        file: relPath,
-        line: actionLine,
-        description: `NestJS Controller Action`,
-      });
-
-      for (const call of explicitCalls) {
-        chain.push({
-          stage: "service",
-          symbol: call.symbol,
-          file: call.file,
-          line: call.line,
-          description: `Injected Service Call`,
-        });
-        for (const pNode of call.persistenceNodes) {
-          chain.push(pNode);
-        }
-      }
-
-      slices.push({
-        domain_id: domainId ?? null,
-        feature_key: `nest.${controllerClass.toLowerCase().replace("controller", "")}.${actionName}`,
-        http_method: httpMethod,
-        route_uri: fullUri,
-        route_name: `${controllerClass}.${actionName}`,
-        controller_class: controllerClass,
-        action_name: actionName,
-        controller_file: relPath,
-        controller_line: actionLine,
-        architecture_style: "mvc",
-        entry_kind: "http_route",
-        execution_chain_json: JSON.stringify(chain),
-      });
-    }
-  }
-
-  private parseDecorator(node: Parser.SyntaxNode): ParsedDecorator | null {
-    if (node.type !== "decorator") return null;
-    const startLine = node.startPosition.row + 1;
-    const first = node.namedChildren[0];
-    if (!first) return null;
-
-    if (first.type === "identifier") {
-      return { name: first.text.trim(), args: [], startLine };
-    }
-
-    if (first.type === "call_expression") {
-      const fnNode = first.childForFieldName("function") ?? first.namedChildren[0];
-      const name = fnNode ? fnNode.text.trim() : "";
-      const argsNode = first.childForFieldName("arguments") ?? first.namedChildren.find((c) => c.type === "arguments");
-      const args: string[] = [];
-
-      if (argsNode) {
-        for (const arg of argsNode.namedChildren) {
-          if (arg.type === "string" || arg.type === "template_string") {
-            args.push(arg.text.replace(/^['"`]|['"`]$/g, "").trim());
-          } else {
-            args.push(arg.text.trim());
-          }
-        }
-      }
-      return { name, args, startLine };
-    }
-
-    return null;
   }
 }

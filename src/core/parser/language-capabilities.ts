@@ -45,7 +45,7 @@ export function getOperationCapabilities(filePath: string) {
     declarations,
     import_resolution: language && ["typescript", "javascript", "php", "python", "go", "rust", "java", "csharp", "ruby", "frontend"].includes(language.id) ? "partial" : "unsupported",
     source_context: declarations,
-    deep_context: /\.(?:ts|mts|cts)$/.test(filePath) ? "bounded_references" : "unsupported",
+    deep_context: /\.(?:ts|mts|cts|tsx)$/.test(filePath) ? "bounded_references" : "unsupported",
     caller_analysis: language?.extractor ? "lexical_heuristic" : "unsupported",
     runtime_dispatch: "unverified",
     limits: language?.limits ?? "No registered language extractor.",

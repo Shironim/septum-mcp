@@ -1,8 +1,13 @@
 import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
-import { readOptionalSourceFile } from "../../resources/source-files.ts";
+import { probeSourcePath, readOptionalSourceFile } from "../../resources/source-files.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { blankCommentsAndStrings } from "../boundary-tracker.ts";
+import ts from "typescript";
+import type { ExecutionChainNode } from "../../../types/index.ts";
+import { lineOf, TypeScriptBindings, nodes } from "./typescript-bindings.ts";
+import { cliRegistrations, mcpRegistrations, type Registration } from "./mcp-cli-dispatch.ts";
+import { isPathContained } from "../../resolver/path-resolver.ts";
+import { readPackageJson } from "./manifest-helpers.ts";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
 
 export class McpCliSemanticExtractor implements SemanticSliceExtractor {
@@ -18,350 +23,94 @@ export class McpCliSemanticExtractor implements SemanticSliceExtractor {
     if (hasMcp || hasCli) return true;
 
     // Check package.json for bin or MCP SDK
-    const pkgPath = path.join(projectRoot, "package.json");
-    if (fs.existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readOptionalSourceFile(pkgPath, "utf-8"));
-        if (pkg.bin || pkg.dependencies?.["@modelcontextprotocol/sdk"]) {
-          return true;
-        }
-      } catch {}
+    const pkg = readPackageJson(projectRoot);
+    if (pkg && (pkg.bin || pkg.dependencies?.["@modelcontextprotocol/sdk"])) {
+      return true;
     }
 
     return false;
   }
 
   public extractSlices(projectRoot: string, domainId?: number, signal?: AbortSignal, inventory?: SourceInventory): VerticalSliceCandidate[] {
-    const slices: VerticalSliceCandidate[] = [];
-    const { toolPrefix, cliBinName } = this.resolveProjectNaming(projectRoot);
-    const registeredTools = this.scanRegisteredMcpToolNames(projectRoot);
+    const root = path.resolve(projectRoot);
+    const files = new Set(listSourceFiles(root, /\.(?:[cm]?[jt]s|[jt]sx)$/, inventory));
+    const bindings = new TypeScriptBindings(root, files, signal);
+    const registrations: Registration[] = [];
+    const relative = (file: string) => path.relative(root, file).replace(/\\/g, "/");
 
-    // 1. Extract MCP Tools
-    const mcpToolsDir = path.join(projectRoot, "src/mcp/tools");
-    if (fs.existsSync(mcpToolsDir)) {
-      try {
-        const toolFiles = listSourceFiles(mcpToolsDir, /\.[jt]s$/, inventory).filter(file => path.dirname(file) === mcpToolsDir).map(file => path.basename(file));
-
-        for (const file of toolFiles) {
-          const fullPath = path.join(mcpToolsDir, file);
-          const relPath = path.relative(projectRoot, fullPath).replace(/\\/g, "/");
-          const content = readOptionalSourceFile(fullPath, "utf-8");
-          const baseName = path.basename(file, path.extname(file));
-          const snakeBase = baseName.replace(/-/g, "_");
-
-          // MCP-07: Only create ingress slices for whitelisted public MCP tools
-          const toolIdentifier = registeredTools.get(snakeBase) || registeredTools.get(`${toolPrefix}_${snakeBase}`);
-          if (!toolIdentifier) continue;
-
-          // Detect handler function (both sync and async) and its 1-indexed line number
-          const handlerMatch = /export\s+(?:async\s+)?function\s+([a-zA-Z0-9_]+)/.exec(content);
-          const classMatch = /export\s+class\s+([A-Za-z0-9_]+)/.exec(content);
-          const actionName = handlerMatch ? handlerMatch[1] : `handle_${snakeBase}`;
-          const controllerClass = classMatch ? classMatch[1] : baseName;
-          const handlerLine =
-            handlerMatch && handlerMatch.index !== undefined
-              ? content.slice(0, handlerMatch.index).split("\n").length
-              : 1;
-
-          // Detect args interface and its line number
-          const argsMatch = /(?:export\s+)?interface\s+([a-zA-Z0-9_]+Args)\b/.exec(content);
-          const formRequestClass = argsMatch ? argsMatch[1] : null;
-          const argsLine =
-            argsMatch && argsMatch.index !== undefined
-              ? content.slice(0, argsMatch.index).split("\n").length
-              : undefined;
-
-          // Detect service/repository dependency and its actual file path
-          const serviceDep = this.resolveServiceDependency(projectRoot, fullPath, content);
-
-          const mcpChain: Array<{
-            stage: string;
-            symbol: string;
-            file?: string;
-            line?: number;
-            description?: string;
-          }> = [
-            {
-              stage: "ingress",
-              symbol: `tool:${toolIdentifier}`,
-              file: relPath,
-              line: handlerLine,
-              description: `MCP Tool Endpoint: ${toolIdentifier}`,
-            },
-          ];
-
-          if (formRequestClass) {
-            mcpChain.push({
-              stage: "validation",
-              symbol: formRequestClass,
-              file: relPath,
-              ...(argsLine ? { line: argsLine } : {}),
-              description: "MCP Argument Schema",
-            });
-          }
-
-          mcpChain.push({
-            stage: "controller",
-            symbol: classMatch ? `${controllerClass}::${actionName}` : actionName,
-            file: relPath,
-            line: handlerLine,
-            description: "Tool Handler Execution",
-          });
-
-          if (serviceDep) {
-            mcpChain.push({
-              stage: "service",
-              symbol: serviceDep.symbol,
-              ...(serviceDep.file ? { file: serviceDep.file } : {}),
-              description: "Core Engine Service",
-            });
-          }
-
-          slices.push({
-            domain_id: domainId ?? null,
-            feature_key: `mcp.${baseName}`,
-            http_method: "MCP",
-            route_uri: `tool:${toolIdentifier}`,
-            route_name: toolIdentifier,
-            controller_class: controllerClass,
-            action_name: actionName,
-            controller_file: relPath,
-            controller_line: handlerLine,
-            architecture_style: "rpc",
-            entry_kind: "mcp_tool",
-            execution_chain_json: JSON.stringify(mcpChain),
-          });
-        }
-      } catch {}
+    for (const file of files) {
+      if (!/^src\/mcp\/server\.[cm]?[jt]s$/.test(relative(file))) continue;
+      const unit = bindings.load(file);
+      if (unit) registrations.push(...mcpRegistrations(unit.source, bindings));
     }
-
-    // 2. Extract CLI Commands
-    const cliCommandsDir = path.join(projectRoot, "src/cli/commands");
-    if (fs.existsSync(cliCommandsDir)) {
-      try {
-        const commandFiles = listSourceFiles(cliCommandsDir, /\.[jt]s$/, inventory).filter(file => path.dirname(file) === cliCommandsDir).map(file => path.basename(file));
-
-        for (const file of commandFiles) {
-          const fullPath = path.join(cliCommandsDir, file);
-          const relPath = path.relative(projectRoot, fullPath).replace(/\\/g, "/");
-          const content = readOptionalSourceFile(fullPath, "utf-8");
-          const commandName = path.basename(file, path.extname(file));
-
-          const handlerMatch = /export\s+(?:async\s+)?function\s+([a-zA-Z0-9_]+)/.exec(content);
-          const classMatch = /export\s+class\s+([A-Za-z0-9_]+)/.exec(content);
-          const actionName = handlerMatch
-            ? handlerMatch[1]
-            : `handle${commandName.charAt(0).toUpperCase() + commandName.slice(1)}Command`;
-          const controllerClass = classMatch ? classMatch[1] : commandName;
-          const handlerLine =
-            handlerMatch && handlerMatch.index !== undefined
-              ? content.slice(0, handlerMatch.index).split("\n").length
-              : 1;
-
-          // Detect options / args
-          const optionsMatch = /(?:export\s+)?interface\s+([a-zA-Z0-9_]+(?:Options|Args))\b/.exec(content);
-          const formRequestClass = optionsMatch ? optionsMatch[1] : null;
-          const optionsLine =
-            optionsMatch && optionsMatch.index !== undefined
-              ? content.slice(0, optionsMatch.index).split("\n").length
-              : undefined;
-
-          const serviceDep = this.resolveServiceDependency(projectRoot, fullPath, content);
-
-          const cliChain: Array<{
-            stage: string;
-            symbol: string;
-            file?: string;
-            line?: number;
-            description?: string;
-          }> = [
-            {
-              stage: "ingress",
-              symbol: `${cliBinName} ${commandName}`,
-              file: relPath,
-              line: handlerLine,
-              description: `CLI Command Entrypoint: ${cliBinName} ${commandName}`,
-            },
-          ];
-
-          if (formRequestClass) {
-            cliChain.push({
-              stage: "validation",
-              symbol: formRequestClass,
-              file: relPath,
-              ...(optionsLine ? { line: optionsLine } : {}),
-              description: "CLI Options Interface",
-            });
-          }
-
-          cliChain.push({
-            stage: "controller",
-            symbol: classMatch ? `${controllerClass}::${actionName}` : actionName,
-            file: relPath,
-            line: handlerLine,
-            description: "Command Execution Handler",
-          });
-
-          if (serviceDep) {
-            cliChain.push({
-              stage: "service",
-              symbol: serviceDep.symbol,
-              ...(serviceDep.file ? { file: serviceDep.file } : {}),
-              description: "Core Engine Service",
-            });
-          }
-
-          slices.push({
-            domain_id: domainId ?? null,
-            feature_key: `cli.${commandName}`,
-            http_method: "CLI",
-            route_uri: `command:${commandName}`,
-            route_name: `${cliBinName} ${commandName}`,
-            controller_class: controllerClass,
-            action_name: actionName,
-            controller_file: relPath,
-            controller_line: handlerLine,
-            architecture_style: "cli",
-            entry_kind: "cli_command",
-            execution_chain_json: JSON.stringify(cliChain),
-          });
-        }
-      } catch {}
-    }
-
-    return slices;
-  }
-
-  private resolveProjectNaming(projectRoot: string): { toolPrefix: string; cliBinName: string } {
-    const pkgPath = path.join(projectRoot, "package.json");
-    if (fs.existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readOptionalSourceFile(pkgPath, "utf-8"));
-        const rawName = typeof pkg.name === "string" ? pkg.name.replace(/^@[^/]+\//, "") : "mcp";
-        const toolPrefix = rawName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase() || "mcp";
-        let cliBinName = rawName;
-        if (typeof pkg.bin === "string") {
-          cliBinName = rawName;
-        } else if (pkg.bin && typeof pkg.bin === "object") {
-          const firstBin = Object.keys(pkg.bin)[0];
-          if (firstBin) cliBinName = firstBin;
-        }
-        return { toolPrefix, cliBinName };
-      } catch {}
-    }
-    return { toolPrefix: "mcp", cliBinName: "cli" };
-  }
-
-  private scanRegisteredMcpToolNames(projectRoot: string): Map<string, string> {
-    const map = new Map<string, string>();
-    const serverPath = path.join(projectRoot, "src/mcp/server.ts");
-    if (!fs.existsSync(serverPath)) return map;
-
+    const bins = new Map<string, string>();
     try {
-      const content = readOptionalSourceFile(serverPath, "utf-8");
-      const masked = blankCommentsAndStrings(content);
-      const scan = (start: number, namesInArray: boolean) => {
-        let depth = 0;
-        const names: string[] = [];
-        const property = /\b([A-Za-z_]\w*)\s*:\s*(['"])?/y;
-        for (let i = start; i < masked.length; i++) {
-          const ch = masked[i];
-          if ("[{(".includes(ch)) depth++;
-          else if ("]})".includes(ch)) {
-            if (--depth === 0) break;
-          }
-          if (depth !== (namesInArray ? 2 : 1) || (i > 0 && /\w/.test(masked[i - 1]))) continue;
-          property.lastIndex = i;
-          const match = property.exec(masked);
-          if (!match) continue;
-          if (!namesInArray) names.push(match[1]);
-          else if (match[1] === "name" && match[2]) {
-            const quoteStart = i + match[0].lastIndexOf(match[2]);
-            const quoteEnd = masked.indexOf(match[2], quoteStart + 1);
-            const name = content.slice(quoteStart + 1, quoteEnd);
-            if (/^[A-Za-z0-9_-]+$/.test(name)) names.push(name);
+      const manifest = path.join(root, "package.json");
+      const text = probeSourcePath(manifest) === "file" ? readOptionalSourceFile(manifest, "utf-8") : "";
+      const pkg = text ? JSON.parse(text) : {};
+      const name = typeof pkg.name === "string" ? pkg.name.split("/").at(-1)! : "cli";
+      const entries = typeof pkg.bin === "string" ? [[name, pkg.bin]] : Object.entries(pkg.bin ?? {});
+      for (const [bin, file] of entries) {
+        if (typeof bin !== "string" || typeof file !== "string") continue;
+        const target = path.resolve(root, file);
+        if (/\.[cm]?[jt]sx?$/.test(target) && isPathContained(target, root) &&
+            probeSourcePath(target) === "file" && !bins.has(target)) {
+          bins.set(target, bin);
+          // package.json is explicit entrypoint evidence even under the default bin/ exclusion.
+          files.add(target);
+        }
+      }
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+    for (const [file, bin] of bins) {
+      const unit = bindings.load(file);
+      if (unit) registrations.push(...cliRegistrations(unit.source, bin, bindings));
+    }
+
+    return registrations.map(entry => {
+      signal?.throwIfAborted();
+      const cli = entry.bin !== undefined;
+      const uri = (cli ? "command:" : "tool:") + entry.name;
+      const name = cli ? entry.bin + " " + entry.name : entry.name;
+      const ingress = { file: relative(entry.node.getSourceFile().fileName), line: lineOf(entry.node) };
+      const handler = entry.handler;
+      const handlerFile = handler ? relative(handler.node.getSourceFile().fileName) : null;
+      const chain: ExecutionChainNode[] = [{
+        stage: "ingress", symbol: cli ? name : uri, ...ingress,
+        description: cli ? "CLI command case" : "MCP tool registration",
+        relationship: { kind: "declares", derivation: "source", source: ingress, reason: "Literal public name" },
+      }];
+      if (handler && handlerFile) {
+        const typeNodes = handler.node.parameters.flatMap(param => param.type ? nodes(param.type).filter(ts.isIdentifier) : []);
+        for (const ref of typeNodes) {
+          const declaration = bindings.declaration(ref);
+          if (declaration && ts.isInterfaceDeclaration(declaration) && /(?:Options|Args)$/.test(ref.text)) {
+            chain.push({ stage: "validation", symbol: ref.text, file: handlerFile, line: lineOf(declaration),
+              description: "Handler parameter interface",
+              relationship: { kind: "schema_binding", derivation: "source", reason: "Parameter type reference" } });
           }
         }
-        // Unbalanced declarations are not evidence of public registration.
-        if (depth !== 0) return;
-        for (const fullToolName of names) {
-          const normalized = fullToolName.replace(/-/g, "_");
-          map.set(normalized, fullToolName);
-          const withoutPrefix = normalized.replace(/^[a-z0-9]+_/, "");
-          if (withoutPrefix) map.set(withoutPrefix, fullToolName);
-        }
+        chain.push({
+          stage: "controller", symbol: handler.name, file: handlerFile, line: lineOf(handler.node),
+          description: "Statically bound handler",
+          relationship: { kind: "route_binding", derivation: "source", source: ingress, reason: "Registration or dispatcher binding" },
+        });
+      }
+      return {
+        domain_id: domainId ?? null,
+        feature_key: (cli ? "cli." : "mcp.") + entry.name,
+        http_method: cli ? "CLI" : "MCP",
+        route_uri: uri,
+        route_name: name,
+        controller_class: handlerFile ? path.basename(handlerFile, path.extname(handlerFile)) : "Unresolved",
+        action_name: handler?.name ?? "unresolved_handler",
+        controller_file: handlerFile,
+        controller_line: handler ? lineOf(handler.node) : 0,
+        architecture_style: cli ? "cli" : "rpc",
+        entry_kind: cli ? "cli_command" : "mcp_tool",
+        execution_chain_json: JSON.stringify(chain),
       };
-      const listCall = /setRequestHandler\s*\(\s*ListToolsRequestSchema\b/.exec(masked);
-      if (listCall) {
-        const callStart = masked.indexOf("(", listCall.index);
-        let depth = 1;
-        let end = callStart + 1;
-        for (; end < masked.length && depth; end++) {
-          if (masked[end] === "(") depth++;
-          else if (masked[end] === ")") depth--;
-        }
-        const tools = /\btools\s*:\s*\[/.exec(masked.slice(callStart, end));
-        if (tools && depth === 0) scan(callStart + tools.index + tools[0].length - 1, true);
-      } else {
-        const schemas = /\bTOOL_SCHEMAS\s*=\s*\{/.exec(masked);
-        if (schemas) scan(schemas.index + schemas[0].length - 1, false);
-      }
-    } catch {}
-    return map;
-  }
-
-  private resolveServiceDependency(
-    projectRoot: string,
-    sourceFile: string,
-    content: string
-  ): { symbol: string; file?: string } | null {
-    const importRegex = /import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
-    let match: RegExpExecArray | null;
-
-    while ((match = importRegex.exec(content)) !== null) {
-      if (/^import\s+type\b/.test(match[0])) continue;
-      const clause = match[1];
-      const spec = match[2];
-      const identifiers = clause
-        .split(",")
-        .filter(s => !/^\s*type\s+/.test(s))
-        .map((s) => s.trim().split(/\s+as\s+/)[0].trim())
-        .filter(Boolean);
-
-      for (const id of identifiers) {
-        if (
-          /(?:Repository|Service|Manager|Loader|Pipeline|Evaluator|Tracer|Detector|Engine|Store)$/.test(
-            id
-          )
-        ) {
-          const resolvedFile = this.resolveImportFile(projectRoot, sourceFile, spec);
-          return {
-            symbol: id,
-            ...(resolvedFile ? { file: resolvedFile } : {}),
-          };
-        }
-      }
-    }
-
-    return null;
-  }
-
-  private resolveImportFile(projectRoot: string, sourceFile: string, importSpec: string): string | undefined {
-    if (!importSpec.startsWith(".")) return undefined;
-    const baseResolved = path.resolve(path.dirname(sourceFile), importSpec);
-    const candidates = [
-      baseResolved,
-      `${baseResolved}.ts`,
-      `${baseResolved}.js`,
-      baseResolved.replace(/\.js$/, ".ts"),
-      path.join(baseResolved, "index.ts"),
-    ];
-    for (const c of candidates) {
-      if (fs.existsSync(c) && fs.statSync(c).isFile()) {
-        return path.relative(projectRoot, c).replace(/\\/g, "/");
-      }
-    }
-    return undefined;
+    });
   }
 }
-

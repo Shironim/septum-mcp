@@ -1,17 +1,23 @@
+import { composeMountPrefixes } from "./route-prefixes.ts";
 import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import { readPythonStaticString as cleanLiteral } from "../static-string.ts";
 import type Parser from "web-tree-sitter";
+import {
+  pythonCallArgument, pythonCallUsesUnpacking, pythonLiteralMethods, resolvePythonRouterTarget,
+  visitPythonRouterModule, type PythonRouterTarget,
+} from "./python-route-ast.ts";
 import { parseSourceWithTreeSitter } from "../wasm-loader.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { anyFileContains } from "./manifest-helpers.ts";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
 
 interface ExtractedFlaskRoute {
   file: string;
   relPath: string;
-  routerVar: string;
+  routerKey: string;
   httpMethods: string[];
   rawPath: string;
   actionName: string;
@@ -23,27 +29,25 @@ interface ExtractedFlaskRoute {
 
 interface ExtractedBlueprintRegistration {
   file: string;
-  relPath: string;
-  parentVar: string;
-  targetExpr: string;
-  prefix: string | null | undefined; // undefined: no override; null: unresolved expression.
-  line: number;
+  parent: string;
+  target: PythonRouterTarget;
+  // null represents a supplied prefix whose value is unknown. Undefined uses the blueprint default.
+  prefix: string | null | undefined;
 }
 
-interface ImportBinding {
-  module: string;
-  symbol?: string;
+type Blueprint = { name: string; prefix: string | undefined; isApp: boolean };
+type Node = Parser.SyntaxNode;
+const verbs = /^(get|post|put|patch|delete|options|head)$/;
+
+function routeMethods(call: Node, method: string): string[] {
+  if (verbs.test(method)) return [method.toUpperCase()];
+  const value = pythonCallArgument(call, "methods");
+  return !value || value.type === "none" ? ["GET"] : pythonLiteralMethods(value) ?? [];
 }
 
-
-function normalizeRouteUri(prefix: string, rawPath: string): string {
-  const p = (prefix ?? "").trim().replace(/\/+$/, "");
-  let r = (rawPath ?? "").trim();
-  if (!r.startsWith("/")) r = "/" + r;
-  if (r === "/" && p.length > 0) return p + "/";
-  if (r === "/" && p.length === 0) return "/";
-  const joined = `${p}${r}`;
-  return joined.startsWith("/") ? joined : `/${joined}`;
+function normalizeRouteUri(prefix: string, path: string): string {
+  if (!path) return prefix || "/";
+  return prefix + "/" + path.replace(/^\/+/, "");
 }
 
 export class FlaskSemanticExtractor implements SemanticSliceExtractor {
@@ -53,31 +57,15 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
   public canHandle(projectRoot: string, framework?: string): boolean {
     if (framework === "flask") return true;
 
-    // Check configuration manifests
-    for (const manifest of ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"]) {
-      const fullPath = path.join(projectRoot, manifest);
-      if (fs.existsSync(fullPath)) {
-        try {
-          const content = fs.readFileSync(fullPath, "utf-8").toLowerCase();
-          if (content.includes("flask")) return true;
-        } catch {}
-      }
+    if (anyFileContains(projectRoot, ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"], ["flask"], true)) {
+      return true;
     }
 
-    // Check entrypoint files
-    for (const entry of ["app.py", "main.py", "wsgi.py", "run.py", "server.py", "src/app.py", "app/__init__.py"]) {
-      const fullPath = path.join(projectRoot, entry);
-      if (fs.existsSync(fullPath)) {
-        try {
-          const content = fs.readFileSync(fullPath, "utf-8");
-          if (content.includes("from flask") || content.includes("import flask")) {
-            return true;
-          }
-        } catch {}
-      }
-    }
-
-    return false;
+    return anyFileContains(
+      projectRoot,
+      ["app.py", "main.py", "wsgi.py", "run.py", "server.py", "src/app.py", "app/__init__.py"],
+      ["from flask", "import flask"]
+    );
   }
 
   public async extractSlices(
@@ -91,217 +79,63 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
 
     const allRoutes: ExtractedFlaskRoute[] = [];
     const allRegistrations: ExtractedBlueprintRegistration[] = [];
-    const localBlueprints = new Map<
-      string,
-      { bpName: string; prefix: string | null; isApp: boolean }
-    >();
-    const fileImports = new Map<string, Map<string, ImportBinding>>();
+    const blueprints = new Map<string, Blueprint>();
+    const fileRouters = new Map<string, Map<string, string>>();
 
     for (const file of pyFiles) {
       signal?.throwIfAborted();
       const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
       const content = readOptionalSourceFile(file, "utf-8");
-      if (
-        !content ||
-        (!content.includes("@") &&
-          !content.includes("register_blueprint") &&
-          !content.includes("Blueprint") &&
-          !content.includes("Flask"))
-      ) {
-        continue;
-      }
+      if (!content || !/@|register_blueprint|add_url_rule|Blueprint|Flask/.test(content)) continue;
 
-      const importsInFile = new Map<string, ImportBinding>();
-      fileImports.set(relPath, importsInFile);
+      const parsed = await parseSourceWithTreeSitter("python", content, root => {
+        const readRoute = (key: string, call: Node, method: string, handler: Node, line: number) => {
+          if (pythonCallUsesUnpacking(call)) return;
+          const rawPath = cleanLiteral(pythonCallArgument(call, "rule", 0));
+          const httpMethods = routeMethods(call, method);
+          const actionName = handler.childForFieldName("name")?.text;
+          if (rawPath === undefined || !httpMethods.length || !actionName) return;
 
-      const parsed = await parseSourceWithTreeSitter("python", content, (root) => {
-        const walk = (node: Parser.SyntaxNode, visit: (node: Parser.SyntaxNode) => void) => {
-          visit(node);
-          for (const child of node.namedChildren) walk(child, visit);
+          const endpoint = cleanLiteral(pythonCallArgument(call, "endpoint", method === "add_url_rule" ? 1 : undefined));
+          const template = handler.childForFieldName("body")?.descendantsOfType("call").find(node =>
+            node.childForFieldName("function")?.text === "render_template",
+          );
+          allRoutes.push({
+            file, relPath, routerKey: key, httpMethods, rawPath, actionName, endpoint,
+            lineIndex: line, actionLine: handler.startPosition.row + 1,
+            templateEgress: template ? cleanLiteral(pythonCallArgument(template, "template_name_or_list", 0)) : undefined,
+          });
         };
 
-        // 1. Collect import statements
-        walk(root, (node) => {
-          if (node.type === "import_statement") {
-            for (const child of node.namedChildren) {
-              if (child.type === "dotted_name") {
-                const mod = child.text.trim();
-                const alias = mod.split(".").pop() || mod;
-                importsInFile.set(alias, { module: mod });
-              } else if (child.type === "aliased_import") {
-                const orig = child.childForFieldName("name")?.text?.trim();
-                const alias = child.childForFieldName("alias")?.text?.trim();
-                if (orig && alias) {
-                  importsInFile.set(alias, { module: orig });
-                }
-              }
+        const module = visitPythonRouterModule(root, relPath, {
+          constructorCall(key, name, constructor, call) {
+            if (!/^(?:flask(?:\.app|\.blueprints)?\.)?(?:Flask|Blueprint)$/.test(constructor)) return false;
+            const isApp = constructor.endsWith("Flask");
+            const declaredName = isApp ? name : cleanLiteral(pythonCallArgument(call, "name", 0)) ?? name;
+            const prefixArg = isApp ? undefined : pythonCallArgument(call, "url_prefix", 5);
+            const prefix = !isApp && pythonCallUsesUnpacking(call) ? undefined :
+              prefixArg && prefixArg.type !== "none" ? cleanLiteral(prefixArg) : "";
+            blueprints.set(key, { name: declaredName, prefix: prefix?.replace(/\/+$/, ""), isApp });
+            return true;
+          },
+          routerCall({ key, call, method, line }, targets) {
+            if (method === "add_url_rule") {
+              const handler = targets.function(pythonCallArgument(call, "view_func", 2)?.text ?? "");
+              if (handler) readRoute(key, call, method, handler, line);
+            } else if (method === "register_blueprint") {
+              const target = targets.router(pythonCallArgument(call, "blueprint", 0)?.text ?? "");
+              if (!target) return;
+              const prefixArg = pythonCallArgument(call, "url_prefix");
+              const prefix = pythonCallUsesUnpacking(call) ? null :
+                prefixArg && prefixArg.type !== "none" ? cleanLiteral(prefixArg)?.replace(/\/+$/, "") ?? null : undefined;
+              allRegistrations.push({ file, parent: key, target, prefix });
             }
-          } else if (node.type === "import_from_statement") {
-            const moduleName = node.childForFieldName("module_name")?.text?.trim() || "";
-            for (const child of node.namedChildren) {
-              if (child === node.childForFieldName("module_name")) continue;
-              if (child.type === "dotted_name") {
-                const sym = child.text.trim();
-                importsInFile.set(sym, { module: moduleName || sym, symbol: sym });
-              } else if (child.type === "aliased_import") {
-                const orig = child.childForFieldName("name")?.text?.trim();
-                const alias = child.childForFieldName("alias")?.text?.trim();
-                if (orig && alias) {
-                  importsInFile.set(alias, { module: moduleName || orig, symbol: orig });
-                }
-              }
-            }
-          }
-        });
-
-        // 2. Collect Flask App and Blueprint instantiations
-        walk(root, (node) => {
-          if (node.type !== "assignment" || node.parent?.parent?.type !== "module") return;
-          const leftName = node.childForFieldName("left")?.text ?? "";
-          const call = node.childForFieldName("right");
-          if (call?.type !== "call") return;
-          const fnText = call.childForFieldName("function")?.text ?? "";
-          const isBlueprint = /Blueprint$/.test(fnText);
-          const isApp = /Flask$/.test(fnText);
-          if (!isBlueprint && !isApp) return;
-
-          const args = call.childForFieldName("arguments")?.namedChildren ?? [];
-          let bpName = leftName;
-          let prefix: string | null = "";
-
-          if (isBlueprint && args.length > 0) {
-            const firstArg = args[0];
-            if (firstArg.type !== "keyword_argument") {
-              const lit = cleanLiteral(firstArg);
-              if (lit) bpName = lit;
-            }
-          }
-
-          const prefixKw = args.find(
-            (child) => child.type === "keyword_argument" && child.childForFieldName("name")?.text === "url_prefix"
-          );
-          if (prefixKw) {
-            const value = prefixKw.childForFieldName("value");
-            prefix = value?.type === "none" ? "" : cleanLiteral(value) ?? null;
-          }
-
-          localBlueprints.set(`${relPath}#${leftName}`, {
-            bpName,
-            prefix: prefix?.replace(/\/+$/, "") ?? null,
-            isApp,
-          });
-        });
-
-        // 3. Collect register_blueprint calls
-        walk(root, (node) => {
-          if (node.type !== "call") return;
-          const fn = node.childForFieldName("function");
-          if (fn?.type !== "attribute" || fn.childForFieldName("attribute")?.text !== "register_blueprint") return;
-          const parentVar = fn.childForFieldName("object")?.text ?? "";
-          const args = node.childForFieldName("arguments")?.namedChildren ?? [];
-          const firstArg = args[0];
-          if (!firstArg || firstArg.type === "keyword_argument") return;
-
-          const targetExpr = firstArg.text.trim();
-          const prefixKw = args.find(
-            (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "url_prefix"
-          );
-          const prefixValue = prefixKw?.childForFieldName("value");
-          const incPrefix = !prefixKw || prefixValue?.type === "none" ? undefined : cleanLiteral(prefixValue) ?? null;
-          allRegistrations.push({
-            file,
-            relPath,
-            parentVar,
-            targetExpr,
-            prefix: incPrefix === undefined ? undefined : incPrefix?.replace(/\/+$/, "") ?? null,
-            line: node.startPosition.row + 1,
-          });
-        });
-
-        // 4. Collect route handler definitions
-        walk(root, (node) => {
-          if (node.type !== "decorated_definition" || node.parent?.type !== "module") return;
-          const fn = node.childForFieldName("definition");
-          if (fn?.type !== "function_definition") return;
-
-          for (const decorator of node.namedChildren.filter((child) => child.type === "decorator")) {
-            const call = decorator.namedChildren[0];
-            const attr = call?.childForFieldName("function");
-            if (call?.type !== "call" || attr?.type !== "attribute") continue;
-
-            const decoratorMethod = attr.childForFieldName("attribute")?.text ?? "";
-            const isRoute = decoratorMethod === "route";
-            const isShorthand = /^(get|post|put|patch|delete|options|head)$/i.test(decoratorMethod);
-            if (!isRoute && !isShorthand) continue;
-
-            const args = call.childForFieldName("arguments")?.namedChildren ?? [];
-            const rawPath = cleanLiteral(args[0]);
-            if (rawPath === undefined) continue;
-
-            const routerVar = attr.childForFieldName("object")?.text ?? "";
-            const actionName = fn.childForFieldName("name")?.text ?? "";
-
-            // Determine HTTP methods
-            let httpMethods: string[] = [];
-            if (isRoute) {
-              const methodsKw = args.find(
-                (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "methods"
-              );
-              if (methodsKw) {
-                const val = methodsKw.childForFieldName("value");
-                if (val && (val.type === "list" || val.type === "tuple")) {
-                  for (const m of val.namedChildren) {
-                    const lit = cleanLiteral(m)?.toUpperCase();
-                    if (lit) httpMethods.push(lit);
-                  }
-                }
-              }
-              if (httpMethods.length === 0) {
-                httpMethods = ["GET"];
-              }
-            } else {
-              httpMethods = [decoratorMethod.toUpperCase()];
-            }
-
-            // Extract optional endpoint
-            const endpointKw = args.find(
-              (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "endpoint"
-            );
-            const endpoint = cleanLiteral(endpointKw?.childForFieldName("value"));
-
-            // Check function body for template render egress
-            let templateEgress: string | undefined;
-            const body = fn.childForFieldName("body");
-            if (body) {
-              walk(body, (child) => {
-                if (child.type === "call") {
-                  const calledFn = child.childForFieldName("function")?.text ?? "";
-                  if (calledFn === "render_template") {
-                    const tmplArg = child.childForFieldName("arguments")?.namedChildren[0];
-                    const tmpl = cleanLiteral(tmplArg);
-                    if (tmpl && !templateEgress) {
-                      templateEgress = tmpl;
-                    }
-                  }
-                }
-              });
-            }
-
-            allRoutes.push({
-              file,
-              relPath,
-              routerVar,
-              httpMethods,
-              rawPath,
-              actionName,
-              endpoint,
-              lineIndex: decorator.startPosition.row + 1,
-              actionLine: fn.startPosition.row + 1,
-              templateEgress,
-            });
-          }
-        });
-
+          },
+          decorator({ key, call, method, line }, handler) {
+            if (method === "route" || verbs.test(method)) readRoute(key, call, method, handler, line);
+          },
+        }, signal);
+        fileRouters.set(relPath, module.routers);
         return { symbols: [], dependencies: [] };
       });
 
@@ -310,116 +144,19 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
       }
     }
 
-    // 5. Build Inclusion Graph and Resolve Cross-File Blueprint Targets
-    const routerChildren = new Map<string, Array<{ childKey: string; prefix: string | null | undefined }>>();
-    const incomingRegistrations = new Map<string, Array<{ parentKey: string; prefix: string | null | undefined }>>();
+    const roots = new Map([...blueprints].map(([key, blueprint]) => [key, blueprint.prefix]));
+    const mounts = allRegistrations.flatMap(({ file, parent, target, prefix }) => {
+      const child = resolvePythonRouterTarget(target, file, resolver, fileRouters);
+      const blueprint = child ? blueprints.get(child) : undefined;
+      if (!child || !blueprint || blueprint.isApp) return [];
+      return [{ parent, child, prefix: prefix === undefined ? blueprint.prefix : prefix ?? undefined }];
+    });
+    const prefixesByRouter = composeMountPrefixes(roots, mounts, signal);
 
-    for (const reg of allRegistrations) {
-      const parentKey = `${reg.relPath}#${reg.parentVar}`;
-      const importsInFile = fileImports.get(reg.relPath) ?? new Map<string, ImportBinding>();
-
-      let targetKey: string | undefined;
-
-      if (reg.targetExpr.includes(".")) {
-        const [objName, propName] = reg.targetExpr.split(".");
-        const binding = importsInFile.get(objName);
-        if (binding) {
-          const subTarget = binding.module ? `${binding.module}.${binding.symbol || objName}` : objName;
-          let res = resolver.resolve(subTarget, reg.file);
-          if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-            targetKey = `${res.targets[0].files[0]}#${propName}`;
-          } else if (binding.module) {
-            res = resolver.resolve(binding.module, reg.file);
-            if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-              targetKey = `${res.targets[0].files[0]}#${propName}`;
-            }
-          }
-        }
-      } else {
-        const binding = importsInFile.get(reg.targetExpr);
-        if (binding) {
-          const subTarget =
-            binding.module && binding.symbol ? `${binding.module}.${binding.symbol}` : binding.module || binding.symbol!;
-          let res = resolver.resolve(subTarget, reg.file);
-          if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-            targetKey = `${res.targets[0].files[0]}#${binding.symbol || reg.targetExpr}`;
-          } else if (binding.module) {
-            res = resolver.resolve(binding.module, reg.file);
-            if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-              targetKey = `${res.targets[0].files[0]}#${binding.symbol || reg.targetExpr}`;
-            }
-          }
-        } else {
-          // Local blueprint inside same file
-          const candidate = `${reg.relPath}#${reg.targetExpr}`;
-          if (localBlueprints.has(candidate)) {
-            targetKey = candidate;
-          }
-        }
-      }
-
-      if (targetKey) {
-        if (!routerChildren.has(parentKey)) routerChildren.set(parentKey, []);
-        routerChildren.get(parentKey)!.push({ childKey: targetKey, prefix: reg.prefix });
-
-        if (!incomingRegistrations.has(targetKey)) incomingRegistrations.set(targetKey, []);
-        incomingRegistrations.get(targetKey)!.push({ parentKey, prefix: reg.prefix });
-      }
-    }
-
-    // 6. Compute Effective Prefixes for Each Router/Blueprint
-    const effectivePrefixesByRouter = new Map<string, string[]>();
-
-    const allRouterKeys = new Set<string>([
-      ...localBlueprints.keys(),
-      ...allRoutes.map((r) => `${r.relPath}#${r.routerVar}`),
-    ]);
-
-    // Find root routers
-    for (const routerKey of allRouterKeys) {
-      const incoming = incomingRegistrations.get(routerKey);
-      if (!incoming || incoming.length === 0) {
-        const local = localBlueprints.get(routerKey);
-        effectivePrefixesByRouter.set(routerKey, local?.prefix === null ? [] : [local?.prefix ?? ""]);
-      }
-    }
-
-    // Propagate prefixes along registration edges via BFS
-    const queue = Array.from(effectivePrefixesByRouter.keys());
-    const visitedEdges = new Set<string>();
-
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      const currentPrefixes = effectivePrefixesByRouter.get(current) ?? [""];
-      const children = routerChildren.get(current) ?? [];
-
-      for (const child of children) {
-        const edgeKey = `${current}->${child.childKey}:${child.prefix}`;
-        if (visitedEdges.has(edgeKey)) continue;
-        visitedEdges.add(edgeKey);
-
-        const childPrefix = child.prefix === undefined ? localBlueprints.get(child.childKey)?.prefix ?? null : child.prefix;
-        const nextPrefixes = childPrefix === null ? [] : currentPrefixes.map((p) => {
-          const combined = `${p ? (p.startsWith("/") ? p : `/${p}`) : ""}${
-            childPrefix ? (childPrefix.startsWith("/") ? childPrefix : `/${childPrefix}`) : ""
-          }`;
-          return combined.replace(/\/+/g, "/").replace(/\/+$/, "");
-        });
-
-        const existing = effectivePrefixesByRouter.get(child.childKey) ?? [];
-        const merged = Array.from(new Set([...existing, ...nextPrefixes]));
-        effectivePrefixesByRouter.set(child.childKey, merged);
-        queue.push(child.childKey);
-      }
-    }
-
-    // 7. Generate Vertical Slices (Level 0 – Level 3)
     for (const route of allRoutes) {
-      const routerKey = `${route.relPath}#${route.routerVar}`;
-      const prefixes = effectivePrefixesByRouter.get(routerKey) ?? [];
-
-      const bpMeta = localBlueprints.get(routerKey);
-      const controllerClass = bpMeta?.bpName || path.basename(route.file, ".py");
+      const prefixes = prefixesByRouter.get(route.routerKey) ?? [];
+      const bpMeta = blueprints.get(route.routerKey);
+      const controllerClass = bpMeta?.name || path.basename(route.file, ".py");
 
       for (const prefix of prefixes) {
         const fullUri = normalizeRouteUri(prefix, route.rawPath);
@@ -456,7 +193,7 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
             });
           }
 
-          const routeName = route.endpoint || (bpMeta ? `${bpMeta.bpName}.${route.actionName}` : route.actionName);
+          const routeName = route.endpoint || (bpMeta ? `${bpMeta.name}.${route.actionName}` : route.actionName);
 
           slices.push({
             domain_id: domainId ?? null,

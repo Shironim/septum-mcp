@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { ExtractedDependency, ExtractedSymbol, ParsedFileAST, Visibility } from "../../../types/index.ts";
 import { findBraceBlockEnd, calculateControlFlowNesting } from "../boundary-tracker.ts";
 import type { CodeExtractor } from "./base.ts";
+import { warnIfUnexpectedParserError } from "./manifest-helpers.ts";
 
 const GO_STDLIB_PREFIXES = new Set([
   "bufio",
@@ -305,7 +306,9 @@ export class GoExtractor implements CodeExtractor {
         }
         currentDir = path.dirname(currentDir);
       }
-    } catch {}
+    } catch (err: unknown) {
+      warnIfUnexpectedParserError(`Failed to inspect go.mod for ${filePath}`, err);
+    }
     return null;
   }
 

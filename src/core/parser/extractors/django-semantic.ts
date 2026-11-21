@@ -1,11 +1,17 @@
+import { composeMountPrefixes } from "./route-prefixes.ts";
 import { listSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import { readPythonStaticString as cleanLiteral } from "../static-string.ts";
-import type Parser from "web-tree-sitter";
+import {
+  pythonCallArgument, pythonImportedName, pythonImports, pythonLiteralMethods, type PythonImport,
+} from "./python-route-ast.ts";
+import { readDjangoUrlconf, type DjangoUrlEntry, type DjangoViewTarget } from "./django-routing.ts";
 import { parseSourceWithTreeSitter } from "../wasm-loader.ts";
 import { readOptionalSourceFile } from "../../resources/source-files.ts";
 import { ImportResolver } from "../../resolver/import-resolver.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ExecutionChainNode } from "../../../types/index.ts";
+import { anyFileContains } from "./manifest-helpers.ts";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
 
 interface ViewMethodInfo {
@@ -14,10 +20,11 @@ interface ViewMethodInfo {
   line: number;
   isCustomAction?: boolean;
   isDetail?: boolean;
+  urlPath?: string;
 }
 
 interface ViewInfo {
-  file: string;
+  name: string;
   relPath: string;
   line: number;
   kind: "cbv" | "fbv" | "viewset";
@@ -26,38 +33,8 @@ interface ViewInfo {
   methods: ViewMethodInfo[];
 }
 
-interface RouterRegistration {
-  urlFile: string;
-  prefix: string;
-  viewName: string;
-  basename?: string;
-  line: number;
-}
-
-interface PathRoute {
-  urlFile: string;
-  pattern: string;
-  viewName: string;
-  isAsView: boolean;
-  routeName?: string;
-  line: number;
-}
-
-interface UrlInclusion {
-  parentUrlFile: string;
-  pattern: string;
-  targetModule: string;
-  line: number;
-}
-
-
-function normalizeUri(prefix: string, sub: string): string {
-  const p = (prefix ?? "").trim().replace(/^\/+|\/+$/g, "");
-  const s = (sub ?? "").trim().replace(/^\/+|\/+$/g, "");
-  if (!p && !s) return "/";
-  if (!p) return `/${s}`;
-  if (!s) return `/${p}`;
-  return `/${p}/${s}`;
+function normalizeUri(value: string): string {
+  return "/" + value.trim().replace(/^\/+|\/+$/g, "");
 }
 
 function cleanRoutePattern(raw: string): string {
@@ -83,17 +60,12 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
       return true;
     }
 
-    for (const manifest of ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"]) {
-      const fullPath = path.join(projectRoot, manifest);
-      if (fs.existsSync(fullPath)) {
-        try {
-          const content = fs.readFileSync(fullPath, "utf-8").toLowerCase();
-          if (content.includes("django")) return true;
-        } catch {}
-      }
-    }
-
-    return false;
+    return anyFileContains(
+      projectRoot,
+      ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"],
+      ["django"],
+      true
+    );
   }
 
   public async extractSlices(projectRoot: string, domainId?: number, signal?: AbortSignal, inventory?: SourceInventory): Promise<VerticalSliceCandidate[]> {
@@ -102,46 +74,76 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
     const resolver = new ImportResolver(projectRoot);
 
     const viewsMap = new Map<string, ViewInfo>();
-    const routerRegistrations: RouterRegistration[] = [];
-    const pathRoutes: PathRoute[] = [];
-    const urlInclusions: UrlInclusion[] = [];
+    const recordView = (view: ViewInfo) => {
+      const key = `${view.relPath}#${view.name}`;
+      viewsMap.set(key, view);
+      viewsMap.set(`${key}@${view.line}`, view);
+    };
+    const urlConfs = new Map<string, DjangoUrlEntry[]>();
 
-    // 1. Locate and parse all views across Python files using Tree-sitter AST
     for (const file of pyFiles) {
       signal?.throwIfAborted();
-      const fileName = path.basename(file);
-      const isCandidate =
-        fileName.includes("view") ||
-        fileName.includes("api") ||
-        fileName.includes("urls");
-
       const content = readOptionalSourceFile(file, "utf-8");
-      if (!content) continue;
-
-      const hasViewClues =
-        content.includes("ViewSet") ||
-        content.includes("APIView") ||
-        content.includes("View") ||
-        content.includes("api_view") ||
-        content.includes("router.register") ||
-        content.includes("urlpatterns");
-
-      if (!isCandidate && !hasViewClues) continue;
-
+      if (!content || !/urlpatterns|\b(?:class|def)\s/.test(content)) continue;
       const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
 
       const parsed = await parseSourceWithTreeSitter("python", content, (root) => {
-        const walk = (node: Parser.SyntaxNode, visit: (node: Parser.SyntaxNode) => void) => {
-          visit(node);
-          for (const child of node.namedChildren) walk(child, visit);
-        };
-
-        // A. Class-Based Views and ViewSets
-        walk(root, (node) => {
-          if (node.type !== "class_definition") return;
+        const imports = new Map<string, PythonImport>();
+        for (const statement of root.namedChildren) {
+          signal?.throwIfAborted();
+          for (const [name, binding] of pythonImports(statement)) {
+            imports.set(name, binding);
+            viewsMap.delete(`${relPath}#${name}`);
+          }
+          if (statement.type === "expression_statement") {
+            const expression = statement.namedChild(0);
+            if (expression?.type === "assignment") {
+              const left = expression.childForFieldName("left");
+              if (left?.type === "identifier") {
+                const right = expression.childForFieldName("right");
+                const alias = right?.type === "identifier" ? viewsMap.get(`${relPath}#${right.text}`) : undefined;
+                if (alias) viewsMap.set(`${relPath}#${left.text}`, alias);
+                else viewsMap.delete(`${relPath}#${left.text}`);
+                imports.delete(left.text);
+              }
+            }
+          }
+          const node = statement.type === "decorated_definition" ? statement.childForFieldName("definition") : statement;
+          if (!node || !["class_definition", "function_definition"].includes(node.type) || node.hasError) continue;
+          if (node.type === "function_definition") {
+            const name = node.childForFieldName("name")?.text;
+            if (!name) continue;
+            const line = node.startPosition.row + 1;
+            let methods = ["ANY"];
+            for (const decorator of statement.namedChildren.filter(child => child.type === "decorator")) {
+              const value = decorator.namedChild(0);
+              if (!value) continue;
+              const nameNode = value.type === "call" ? value.childForFieldName("function") : value;
+              const name = nameNode?.text ?? "";
+              const qualified = pythonImportedName(name, imports) ?? name;
+              if (value.type === "call" && /^(?:rest_framework\.decorators\.)?api_view$/.test(qualified)) {
+                const argument = pythonCallArgument(value, "http_method_names", 0);
+                methods = argument ? pythonLiteralMethods(argument) ?? [] : ["GET"];
+                break;
+              }
+              if (qualified === "django.views.decorators.http.require_GET") methods = ["GET"];
+              if (qualified === "django.views.decorators.http.require_POST") methods = ["POST"];
+              if (qualified === "django.views.decorators.http.require_safe") methods = ["GET", "HEAD"];
+              if (value.type === "call" && qualified === "django.views.decorators.http.require_http_methods") {
+                const argument = pythonCallArgument(value, "request_method_list", 0);
+                methods = argument ? pythonLiteralMethods(argument) ?? [] : [];
+              }
+            }
+            recordView({ name, relPath, line, kind: "fbv",
+              methods: methods.map(method => ({ method, action: name, line })),
+            });
+            imports.delete(name);
+            continue;
+          }
           const nameNode = node.childForFieldName("name");
-          if (!nameNode) return;
+          if (!nameNode) continue;
           const className = nameNode.text.trim();
+          imports.delete(className);
           const classLine = node.startPosition.row + 1;
 
           const superNode = node.childForFieldName("superclasses");
@@ -152,18 +154,14 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
             }
           }
 
-          const isViewSet = baseClasses.some((b) => /ViewSet/i.test(b));
-          const isCbv = isViewSet || baseClasses.some((b) => /View/i.test(b));
+          const isViewSet = baseClasses.some(base => {
+            const target = pythonImportedName(base, imports) ?? base;
+            return /^(?:rest_framework\.viewsets\.|viewsets\.)?\w*ViewSet$/.test(target);
+          });
 
           let serializer: string | undefined;
           let model: string | undefined;
-          const explicitMethods: Array<{
-            method: string;
-            action: string;
-            line: number;
-            isCustomAction?: boolean;
-            isDetail?: boolean;
-          }> = [];
+          const explicitMethods: ViewMethodInfo[] = [];
 
           const body = node.childForFieldName("body");
           if (body) {
@@ -187,62 +185,43 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
                     }
                   }
                 }
-              } else if (child.type === "function_definition") {
-                const fnName = child.childForFieldName("name")?.text?.trim();
-                const fnLine = child.startPosition.row + 1;
-                if (!fnName) continue;
+              } else {
+                const definition = child.type === "decorated_definition" ? child.childForFieldName("definition") : child;
+                if (definition?.type !== "function_definition") continue;
+                const action = definition.childForFieldName("name")?.text;
+                if (!action) continue;
+                const line = definition.startPosition.row + 1;
 
-                if (isViewSet) {
-                  const actionMap: Record<string, string> = {
-                    list: "GET",
-                    create: "POST",
-                    retrieve: "GET",
-                    update: "PUT",
-                    partial_update: "PATCH",
-                    destroy: "DELETE",
-                  };
-                  if (actionMap[fnName]) {
-                    explicitMethods.push({ method: actionMap[fnName], action: fnName, line: fnLine });
+                if (!isViewSet) {
+                  if (/^(get|post|put|patch|delete|options|head|trace)$/.test(action)) {
+                    explicitMethods.push({ method: action.toUpperCase(), action, line });
                   }
-                } else {
-                  if (/^(get|post|put|patch|delete|options|head)$/.test(fnName)) {
-                    explicitMethods.push({ method: fnName.toUpperCase(), action: fnName, line: fnLine });
+                  continue;
+                }
+
+                for (const decorator of child.namedChildren.filter(node => node.type === "decorator")) {
+                  const call = decorator.namedChild(0);
+                  if (call?.type !== "call") continue;
+                  const target = call.childForFieldName("function")?.text ?? "";
+                  if (!/^(?:rest_framework\.decorators\.)?action$/.test(pythonImportedName(target, imports) ?? target)) continue;
+                  const detail = pythonCallArgument(call, "detail");
+                  if (detail?.type !== "true" && detail?.type !== "false") continue;
+                  const methodArg = pythonCallArgument(call, "methods", 0);
+                  const methods = !methodArg || methodArg.type === "none" ? ["GET"] : pythonLiteralMethods(methodArg) ?? [];
+                  const pathArg = pythonCallArgument(call, "url_path");
+                  const urlPath = pathArg && pathArg.type !== "none" ? cleanLiteral(pathArg) : action;
+                  if (urlPath === undefined) continue;
+                  for (const method of methods) {
+                    explicitMethods.push({ method, action, line, isCustomAction: true,
+                      isDetail: detail.type === "true", urlPath: urlPath || action,
+                    });
                   }
                 }
-              } else if (child.type === "decorated_definition") {
-                const defNode = child.childForFieldName("definition");
-                if (defNode?.type === "function_definition") {
-                  const fnName = defNode.childForFieldName("name")?.text?.trim();
-                  const fnLine = defNode.startPosition.row + 1;
-                  if (fnName && isViewSet) {
-                    for (const dec of child.namedChildren.filter((c) => c.type === "decorator")) {
-                      const decCall = dec.namedChildren[0];
-                      if (decCall?.type === "call" && decCall.childForFieldName("function")?.text?.endsWith("action")) {
-                        const args = decCall.childForFieldName("arguments")?.namedChildren ?? [];
-                        const detailKw = args.find(
-                          (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "detail"
-                        );
-                        const isDetail = detailKw?.childForFieldName("value")?.text?.toLowerCase() === "true";
-                        const methodsKw = args.find(
-                          (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "methods"
-                        );
-                        const actMethods: string[] = [];
-                        if (methodsKw) {
-                          const val = methodsKw.childForFieldName("value");
-                          if (val?.type === "list") {
-                            for (const m of val.namedChildren) {
-                              const lit = cleanLiteral(m)?.toUpperCase();
-                              if (lit) actMethods.push(lit);
-                            }
-                          }
-                        }
-                        if (actMethods.length === 0) actMethods.push("GET");
-                        for (const method of actMethods) {
-                          explicitMethods.push({ method, action: fnName, line: fnLine, isCustomAction: true, isDetail });
-                        }
-                      }
-                    }
-                  }
+                const standardMethod = { list: "GET", create: "POST", retrieve: "GET",
+                  update: "PUT", partial_update: "PATCH", destroy: "DELETE",
+                }[action];
+                if (standardMethod && !explicitMethods.some(method => method.action === action && method.isCustomAction)) {
+                  explicitMethods.push({ method: standardMethod, action, line });
                 }
               }
             }
@@ -251,13 +230,14 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
           const methods: ViewMethodInfo[] = [];
 
           if (isViewSet) {
-            const fullCrud = baseClasses.some((b) => /\bModelViewSet\b/.test(b));
-            const readOnly = baseClasses.some((b) => /\bReadOnlyModelViewSet\b/.test(b));
-            const hasListMixin = baseClasses.some((b) => /\bListModelMixin\b/.test(b));
-            const hasCreateMixin = baseClasses.some((b) => /\bCreateModelMixin\b/.test(b));
-            const hasRetrieveMixin = baseClasses.some((b) => /\bRetrieveModelMixin\b/.test(b));
-            const hasUpdateMixin = baseClasses.some((b) => /\bUpdateModelMixin\b/.test(b));
-            const hasDestroyMixin = baseClasses.some((b) => /\bDestroyModelMixin\b/.test(b));
+            const canonicalBases = baseClasses.map(base => pythonImportedName(base, imports) ?? base);
+            const fullCrud = canonicalBases.some((b) => /\bModelViewSet\b/.test(b));
+            const readOnly = canonicalBases.some((b) => /\bReadOnlyModelViewSet\b/.test(b));
+            const hasListMixin = canonicalBases.some((b) => /\bListModelMixin\b/.test(b));
+            const hasCreateMixin = canonicalBases.some((b) => /\bCreateModelMixin\b/.test(b));
+            const hasRetrieveMixin = canonicalBases.some((b) => /\bRetrieveModelMixin\b/.test(b));
+            const hasUpdateMixin = canonicalBases.some((b) => /\bUpdateModelMixin\b/.test(b));
+            const hasDestroyMixin = canonicalBases.some((b) => /\bDestroyModelMixin\b/.test(b));
 
             const defaultActions: Array<[string, string, boolean]> = [
               ["GET", "list", fullCrud || readOnly || hasListMixin],
@@ -284,144 +264,14 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
             methods.push(...explicitMethods);
           }
 
-          if (methods.length > 0 || isViewSet || serializer || model || isCbv) {
-            viewsMap.set(className, {
-              file,
-              relPath,
-              line: classLine,
-              kind: isViewSet ? "viewset" : "cbv",
-              serializer,
-              model,
-              methods,
-            });
-          }
-        });
+          recordView({
+            name: className, relPath, line: classLine, kind: isViewSet ? "viewset" : "cbv",
+            serializer, model, methods,
+          });
+        }
 
-        // B. Function-Based Views with @api_view
-        walk(root, (node) => {
-          if (node.type !== "decorated_definition") return;
-          const fn = node.childForFieldName("definition");
-          if (fn?.type !== "function_definition") return;
-          const fnName = fn.childForFieldName("name")?.text?.trim();
-          if (!fnName) return;
-          const fnLine = fn.startPosition.row + 1;
-
-          for (const decorator of node.namedChildren.filter((c) => c.type === "decorator")) {
-            const call = decorator.namedChildren[0];
-            if (call?.type !== "call") continue;
-            const fnExpr = call.childForFieldName("function")?.text?.trim();
-            if (fnExpr !== "api_view" && fnExpr !== "rest_framework.decorators.api_view") continue;
-
-            const listArg = call.childForFieldName("arguments")?.namedChildren[0];
-            const httpMethods: string[] = [];
-            if (listArg?.type === "list") {
-              for (const item of listArg.namedChildren) {
-                const m = cleanLiteral(item)?.toUpperCase();
-                if (m) httpMethods.push(m);
-              }
-            }
-
-            if (httpMethods.length > 0) {
-              viewsMap.set(fnName, {
-                file,
-                relPath,
-                line: fnLine,
-                kind: "fbv",
-                methods: httpMethods.map((m) => ({ method: m, action: fnName, line: fnLine })),
-              });
-            }
-          }
-        });
-
-        // C. URLConf: router.register, path(), and re_path()
-        walk(root, (node) => {
-          if (node.type !== "call") return;
-          const fn = node.childForFieldName("function");
-          const args = node.childForFieldName("arguments")?.namedChildren ?? [];
-
-          // router.register(r'orders', OrderViewSet, basename='order')
-          if (fn?.type === "attribute" && fn.childForFieldName("attribute")?.text === "register") {
-            const firstArg = args[0];
-            const secondArg = args[1];
-            if (firstArg && secondArg) {
-              const prefix = cleanLiteral(firstArg);
-              if (prefix !== undefined) {
-                const viewName = secondArg.text.trim().split(".").pop() || secondArg.text.trim();
-                const bnKw = args.find(
-                  (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "basename"
-                );
-                const basename = cleanLiteral(bnKw?.childForFieldName("value"));
-                routerRegistrations.push({
-                  urlFile: relPath,
-                  prefix,
-                  viewName,
-                  basename,
-                  line: node.startPosition.row + 1,
-                });
-              }
-            }
-            return;
-          }
-
-          // path('api/checkout/', CheckoutView.as_view(), name='checkout')
-          // path('api/', include('orders.urls'))
-          const fnName = fn?.text?.trim();
-          if (fnName === "path" || fnName === "re_path") {
-            const firstArg = args[0];
-            const secondArg = args[1];
-            if (!firstArg || !secondArg) return;
-
-            const pattern = cleanLiteral(firstArg);
-            if (pattern === undefined) return;
-
-            const nameKw = args.find(
-              (c) => c.type === "keyword_argument" && c.childForFieldName("name")?.text === "name"
-            );
-            const routeName = cleanLiteral(nameKw?.childForFieldName("value"));
-
-            // Check if secondArg is include(...)
-            if (secondArg.type === "call" && secondArg.childForFieldName("function")?.text?.endsWith("include")) {
-              const incArgs = secondArg.childForFieldName("arguments")?.namedChildren ?? [];
-              let incTarget: string | undefined;
-              if (incArgs[0]?.type === "string") {
-                incTarget = cleanLiteral(incArgs[0]);
-              } else if (incArgs[0]?.type === "tuple" || incArgs[0]?.type === "list") {
-                incTarget = cleanLiteral(incArgs[0].namedChildren[0]);
-              }
-              if (incTarget) {
-                urlInclusions.push({
-                  parentUrlFile: relPath,
-                  pattern,
-                  targetModule: incTarget,
-                  line: node.startPosition.row + 1,
-                });
-              }
-              return;
-            }
-
-            // Check if secondArg is View.as_view() or FBV
-            let isAsView = false;
-            let targetView = secondArg.text.trim();
-            if (secondArg.type === "call") {
-              const callFn = secondArg.childForFieldName("function");
-              if (callFn?.type === "attribute" && callFn.childForFieldName("attribute")?.text === "as_view") {
-                isAsView = true;
-                targetView = callFn.childForFieldName("object")?.text?.trim() || targetView;
-              }
-            }
-            targetView = targetView.split(".").pop() || targetView;
-
-            pathRoutes.push({
-              urlFile: relPath,
-              pattern,
-              viewName: targetView,
-              isAsView,
-              routeName,
-              line: node.startPosition.row + 1,
-            });
-          }
-        });
-
+        const routes = readDjangoUrlconf(root, signal);
+        if (routes.length) urlConfs.set(relPath, routes);
         return { symbols: [], dependencies: [] };
       });
 
@@ -430,221 +280,95 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
       }
     }
 
-    // 2. Resolve Multi-file URLConf Inclusions (path('api/', include('orders.urls')))
-    const urlParentMap = new Map<string, Array<{ parentFile: string; prefix: string }>>();
-    for (const inc of urlInclusions) {
-      const parentAbs = path.resolve(projectRoot, inc.parentUrlFile);
-      const res = resolver.resolve(inc.targetModule, parentAbs);
-      if (res.status === "resolved" && res.targets[0]?.files?.[0]) {
-        const targetRel = res.targets[0].files[0];
-        if (!urlParentMap.has(targetRel)) urlParentMap.set(targetRel, []);
-        urlParentMap.get(targetRel)!.push({ parentFile: inc.parentUrlFile, prefix: inc.pattern });
+    const roots = new Map([...urlConfs.keys()].map(file => [file, ""]));
+    const mounts = [];
+    for (const [parent, routes] of urlConfs) {
+      for (const route of routes) {
+        if (route.kind !== "include") continue;
+        const resolved = resolver.resolve(route.module, path.resolve(projectRoot, parent));
+        const child = resolved.status === "resolved" ? resolved.targets[0]?.files[0] : undefined;
+        if (!child || !urlConfs.has(child)) continue;
+        mounts.push({ parent, child, prefix: route.pattern === undefined ? undefined : cleanRoutePattern(route.pattern) });
       }
     }
+    const urlPrefixesByFile = composeMountPrefixes(roots, mounts, signal);
+    const resolveView = (target: DjangoViewTarget, from: string): ViewInfo | undefined => {
+      if (!target.module) return viewsMap.get(`${from}#${target.symbol}@${target.line}`);
+      const resolution = resolver.resolve(target.module, path.resolve(projectRoot, from));
+      const file = resolution.status === "resolved" ? resolution.targets[0]?.files[0] : undefined;
+      return file ? viewsMap.get(`${file}#${target.symbol}`) : undefined;
+    };
 
-    // Compute effective prefix for each urls.py file
-    const urlPrefixesByFile = new Map<string, string[]>();
-    const allUrlFiles = new Set<string>([
-      ...routerRegistrations.map((r) => r.urlFile),
-      ...pathRoutes.map((p) => p.urlFile),
-      ...urlInclusions.map((i) => i.parentUrlFile),
-    ]);
+    for (const [urlFile, routes] of urlConfs) {
+      const prefixes = urlPrefixesByFile.get(urlFile) ?? [];
+      for (const route of routes) {
+        if (route.kind === "include") continue;
+        const view = resolveView(route.target, urlFile);
+        if (!view?.methods.length) continue;
 
-    for (const uFile of allUrlFiles) {
-      const parents = urlParentMap.get(uFile);
-      if (!parents || parents.length === 0) {
-        urlPrefixesByFile.set(uFile, [""]);
-      }
-    }
-
-    const queue = Array.from(urlPrefixesByFile.keys());
-    const visitedIncs = new Set<string>();
-
-    while (queue.length > 0) {
-      const currentFile = queue.shift()!;
-      const currentPrefixes = urlPrefixesByFile.get(currentFile) ?? [""];
-
-      // Check children included by currentFile
-      for (const [targetFile, parents] of urlParentMap.entries()) {
-        for (const p of parents) {
-          if (p.parentFile === currentFile) {
-            const edgeKey = `${currentFile}->${targetFile}:${p.prefix}`;
-            if (visitedIncs.has(edgeKey)) continue;
-            visitedIncs.add(edgeKey);
-
-            const nextPrefixes = currentPrefixes.map((cp) => normalizeUri(cp, p.prefix));
-            const existing = urlPrefixesByFile.get(targetFile) ?? [];
-            const merged = Array.from(new Set([...existing, ...nextPrefixes]));
-            urlPrefixesByFile.set(targetFile, merged);
-            queue.push(targetFile);
-          }
+        let methods = view.methods;
+        if (route.kind === "router") {
+          if (view.kind !== "viewset") continue;
+        } else {
+          if ((route.dispatch === "function") !== (view.kind === "fbv")) continue;
+          if (view.kind === "viewset") {
+            if (!route.actionMap) continue;
+            methods = [...route.actionMap].flatMap(([method, action]) => {
+              const declared = view.methods.find(candidate => candidate.action === action);
+              return declared ? [{ ...declared, method }] : [];
+            });
+          } else if (route.actionMap) continue;
         }
-      }
-    }
 
-    // 3. Generate Vertical Slices from DRF Router Registrations
-    for (const reg of routerRegistrations) {
-      const prefixes = urlPrefixesByFile.get(reg.urlFile) ?? [""];
-      const viewInfo = viewsMap.get(reg.viewName);
-      if (!viewInfo) continue;
+        for (const prefix of prefixes) {
+          const base = normalizeUri(prefix + cleanRoutePattern(route.pattern));
+          for (const method of methods) {
+            const isRouter = route.kind === "router";
+            const architecture = isRouter ? "django-drf" : "django-mvc";
+            const suffix = !isRouter ? "" :
+              method.isCustomAction ? (method.isDetail ? `/{id}/${method.urlPath}` : `/${method.urlPath}`) :
+              method.action === "list" || method.action === "create" ? "" : "/{id}";
+            const uri = suffix ? (base === "/" ? suffix : base + suffix) : base;
+            const chain: ExecutionChainNode[] = [{
+              stage: "ingress", symbol: `${method.method} ${uri}`, file: urlFile, line: route.line,
+              description: "Django Route Registration",
+            }];
+            if (view.serializer) {
+              chain.push({ stage: "validation", symbol: view.serializer, description: "DRF Serializer Validation" });
+            }
 
-      for (const pfx of prefixes) {
-        const routePrefix = normalizeUri(pfx, reg.prefix);
-
-        for (const m of viewInfo.methods) {
-          const uriSuffix = m.isCustomAction
-            ? (m.isDetail ? `/{id}/${m.action}` : `/${m.action}`)
-            : (m.action === "list" || m.action === "create" ? "" : "/{id}");
-          const fullUri = `${routePrefix === "/" ? "" : routePrefix}${uriSuffix}` || "/";
-
-          const chain: Array<{ stage: string; symbol: string; file?: string; line?: number; description?: string }> = [
-            {
-              stage: "ingress",
-              symbol: `${m.method} ${fullUri}`,
-              file: reg.urlFile,
-              line: reg.line,
-              description: `Django / DRF Route: ${m.method} ${fullUri}`,
-            },
-          ];
-
-          if (viewInfo.serializer) {
+            const inherited = view.kind === "viewset" && method.line === view.line;
+            const description = inherited ? "Inherited DRF action (inferred from base class or mixin; line points to class)" :
+              method.isCustomAction ? "DRF ViewSet Custom Action" : "Django View Handler";
             chain.push({
-              stage: "validation",
-              symbol: viewInfo.serializer,
-              description: "DRF Serializer Validation",
+              stage: "controller", symbol: `${view.name}::${method.action}`, file: view.relPath, line: method.line, description,
+            });
+            if (view.model) chain.push({ stage: "model", symbol: view.model, description: "Django ORM Model" });
+
+            const evidencedChain = chain.map(node => ({
+              ...node,
+              relationship: {
+                kind: node.stage === "ingress" || node.stage === "controller" ? "route_binding" : "schema_binding",
+                derivation: node.file && node.line && !(inherited && node.stage === "controller") ? "source" : "inferred",
+                source: node.file && node.line ? { file: node.file, line: node.line } : undefined,
+                reason: node.description,
+              },
+            }));
+            slices.push({
+              domain_id: domainId ?? null,
+              feature_key: null,
+              http_method: method.method,
+              route_uri: uri,
+              route_name: (route.kind === "path" && route.name) || `${view.name}.${method.action}`,
+              controller_class: view.name,
+              action_name: method.action,
+              controller_file: view.relPath,
+              controller_line: method.line,
+              architecture_style: architecture,
+              entry_kind: "http_route",
+              execution_chain_json: JSON.stringify(evidencedChain),
             });
           }
-
-          chain.push({
-            stage: "controller",
-            symbol: `${reg.viewName}::${m.action}`,
-            file: viewInfo.relPath,
-            line: m.line,
-            description:
-              m.isCustomAction
-                ? "DRF ViewSet Custom Action"
-                : m.line === viewInfo.line
-                ? "Inherited DRF action (inferred from base class or mixin; line points to class)"
-                : "DRF ViewSet Action",
-          });
-
-          if (viewInfo.model) {
-            chain.push({
-              stage: "model",
-              symbol: viewInfo.model,
-              description: "Django ORM Model",
-            });
-          }
-
-          const evidencedChain = chain.map((node) => ({
-            ...node,
-            relationship: {
-              kind:
-                node.stage === "ingress" || node.stage === "controller"
-                  ? "route_binding"
-                  : node.stage === "validation" || node.stage === "model"
-                  ? "schema_binding"
-                  : "calls",
-              derivation: node.file && node.line ? "source" : "inferred",
-              source: node.file && node.line ? { file: node.file, line: node.line } : undefined,
-              reason: node.description ?? "static adapter evidence",
-            },
-          }));
-
-          slices.push({
-            domain_id: domainId ?? null,
-            feature_key: null,
-            http_method: m.method,
-            route_uri: fullUri,
-            route_name: `${reg.viewName}.${m.action}`,
-            controller_class: reg.viewName,
-            action_name: m.action,
-            controller_file: viewInfo.relPath,
-            controller_line: m.line,
-            architecture_style: "django-drf",
-            entry_kind: "http_route",
-            execution_chain_json: JSON.stringify(evidencedChain),
-          });
-        }
-      }
-    }
-
-    // 4. Generate Vertical Slices from path() & re_path() Routes
-    for (const route of pathRoutes) {
-      const prefixes = urlPrefixesByFile.get(route.urlFile) ?? [""];
-      const viewInfo = viewsMap.get(route.viewName);
-      if (!viewInfo || viewInfo.methods.length === 0) continue;
-
-      for (const pfx of prefixes) {
-        const fullUri = normalizeUri(pfx, cleanRoutePattern(route.pattern));
-
-        for (const m of viewInfo.methods) {
-          const chain: Array<{ stage: string; symbol: string; file?: string; line?: number; description?: string }> = [
-            {
-              stage: "ingress",
-              symbol: `${m.method} ${fullUri}`,
-              file: route.urlFile,
-              line: route.line,
-              description: `Django Route: ${m.method} ${fullUri}`,
-            },
-          ];
-
-          if (viewInfo.serializer) {
-            chain.push({
-              stage: "validation",
-              symbol: viewInfo.serializer,
-              description: "Serializer Validation",
-            });
-          }
-
-          chain.push({
-            stage: "controller",
-            symbol: `${route.viewName}::${m.action}`,
-            file: viewInfo.relPath,
-            line: m.line,
-            description:
-              viewInfo.kind === "viewset" && m.line === viewInfo.line
-                ? "Inherited DRF action (inferred from base class or mixin; line points to class)"
-                : "Django View Handler",
-          });
-
-          if (viewInfo.model) {
-            chain.push({
-              stage: "model",
-              symbol: viewInfo.model,
-              description: "Django Model",
-            });
-          }
-
-          const evidencedChain = chain.map((node) => ({
-            ...node,
-            relationship: {
-              kind:
-                node.stage === "ingress" || node.stage === "controller"
-                  ? "route_binding"
-                  : node.stage === "validation" || node.stage === "model"
-                  ? "schema_binding"
-                  : "calls",
-              derivation: node.file && node.line ? "source" : "inferred",
-              source: node.file && node.line ? { file: node.file, line: node.line } : undefined,
-              reason: node.description ?? "static adapter evidence",
-            },
-          }));
-
-          slices.push({
-            domain_id: domainId ?? null,
-            feature_key: null,
-            http_method: m.method,
-            route_uri: fullUri,
-            route_name: route.routeName || `${route.viewName}.${m.action}`,
-            controller_class: route.viewName,
-            action_name: m.action,
-            controller_file: viewInfo.relPath,
-            controller_line: m.line,
-            architecture_style: "django-mvc",
-            entry_kind: "http_route",
-            execution_chain_json: JSON.stringify(evidencedChain),
-          });
         }
       }
     }
