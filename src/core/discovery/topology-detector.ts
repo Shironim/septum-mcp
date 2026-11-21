@@ -4,6 +4,12 @@ import type { DomainConfig } from "../../types/index.ts";
 import type { SeptumRepository } from "../database/repository.ts";
 import { DEFAULT_IGNORED_DIRECTORIES, isIgnoredDirectory } from "../resources/ignore.ts";
 import { assertUniqueDomainRoots, domainNameKey, domainRootIdentity } from "../config/domain-ownership.ts";
+import {
+  detectProjectFramework,
+  detectProjectLanguage,
+  readTsConfigPaths as readTsConfigPathMappings,
+  type DetectedLanguage,
+} from "./framework-detector.ts";
 
 export type ProjectType =
   | "monorepo"
@@ -32,6 +38,13 @@ export interface DiscoveredProjectTopology {
 }
 
 export class TopologyDetector {
+  private static warnIfUnexpectedError(context: string, err: unknown): void {
+    const errno = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (errno === "ENOENT" || errno === "ENOTDIR") return;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[Septum Topology] ${context}: ${msg}`);
+  }
+
   private static readonly IGNORED_DIRS = new Set([
     ...DEFAULT_IGNORED_DIRECTORIES,
     "tests",
@@ -60,22 +73,7 @@ export class TopologyDetector {
    * Reads compilerOptions.paths from tsconfig.json or jsconfig.json.
    */
   public static readTsConfigPaths(projectRoot: string): Record<string, string[]> {
-    for (const file of ["tsconfig.json", "jsconfig.json"]) {
-      const fullPath = path.join(projectRoot, file);
-      if (fs.existsSync(fullPath)) {
-        try {
-          const raw = fs.readFileSync(fullPath, "utf-8");
-          const stripped = raw.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
-          const parsed = JSON.parse(stripped);
-          if (parsed.compilerOptions?.paths) {
-            return parsed.compilerOptions.paths;
-          }
-        } catch {
-          // Ignore tsconfig parse error
-        }
-      }
-    }
-    return {};
+    return readTsConfigPathMappings(projectRoot);
   }
 
   /**
@@ -421,66 +419,75 @@ export class TopologyDetector {
       } else if (language === "go" || fs.existsSync(path.join(projectRoot, "go.mod"))) {
         architectureStyle = "clean-architecture";
         const pkgDir = path.join(projectRoot, "pkg");
-        if (fs.existsSync(pkgDir) && this.hasSourceFiles(pkgDir)) {
+        const hasPkg = fs.existsSync(pkgDir) && this.hasSourceFiles(pkgDir);
+
+        const internalDir = path.join(projectRoot, "internal");
+        const internalSubs = fs.existsSync(internalDir)
+          ? this.getSubdirectories(internalDir).filter((s) => this.hasSourceFiles(path.join(internalDir, s))).sort()
+          : [];
+        const hasFlatInternal = !internalSubs.length && fs.existsSync(internalDir) && this.hasSourceFiles(internalDir);
+        const internalNames = internalSubs.length > 0
+          ? internalSubs.map((s) => s.toLowerCase())
+          : hasFlatInternal ? ["internal"] : [];
+
+        const cmdDir = path.join(projectRoot, "cmd");
+        const cmdSubs = fs.existsSync(cmdDir)
+          ? this.getSubdirectories(cmdDir).filter((s) => this.hasSourceFiles(path.join(cmdDir, s))).sort()
+          : [];
+        const hasFlatCmd = !cmdSubs.length && fs.existsSync(cmdDir) && this.hasSourceFiles(cmdDir);
+        const cmdNames = cmdSubs.length > 0
+          ? cmdSubs.map((s) => `cmd-${s.toLowerCase()}`)
+          : hasFlatCmd ? ["cmd"] : [];
+
+        if (hasPkg) {
           domains["pkg"] = {
             root: "pkg",
             description: "Go public library pkg",
             allowed_dependencies: [],
-            forbidden_dependencies: ["internal", "cmd"],
+            forbidden_dependencies: [...internalNames, ...cmdNames],
             archetypes: this.inferDefaultArchetypes(pkgDir),
           };
         }
 
-        const internalDir = path.join(projectRoot, "internal");
-        if (fs.existsSync(internalDir)) {
-          const internalSubs = this.getSubdirectories(internalDir).filter((s) =>
-            this.hasSourceFiles(path.join(internalDir, s))
-          );
-          if (internalSubs.length > 0) {
-            for (const sub of internalSubs) {
-              domains[sub.toLowerCase()] = {
-                root: path.join("internal", sub),
-                description: `Internal ${sub} domain`,
-                allowed_dependencies: domains["pkg"] ? ["pkg"] : [],
-                forbidden_dependencies: ["cmd"],
-                archetypes: this.inferDefaultArchetypes(path.join(internalDir, sub)),
-              };
-            }
-          } else if (this.hasSourceFiles(internalDir)) {
-            domains["internal"] = {
-              root: "internal",
-              description: "Go internal layer",
-              allowed_dependencies: domains["pkg"] ? ["pkg"] : [],
-              forbidden_dependencies: ["cmd"],
-              archetypes: this.inferDefaultArchetypes(internalDir),
+        if (internalSubs.length > 0) {
+          for (const sub of internalSubs) {
+            domains[sub.toLowerCase()] = {
+              root: path.join("internal", sub),
+              description: `Internal ${sub} domain`,
+              allowed_dependencies: hasPkg ? ["pkg"] : [],
+              forbidden_dependencies: [...cmdNames],
+              archetypes: this.inferDefaultArchetypes(path.join(internalDir, sub)),
             };
           }
+        } else if (hasFlatInternal) {
+          domains["internal"] = {
+            root: "internal",
+            description: "Go internal layer",
+            allowed_dependencies: hasPkg ? ["pkg"] : [],
+            forbidden_dependencies: [...cmdNames],
+            archetypes: this.inferDefaultArchetypes(internalDir),
+          };
         }
 
-        const cmdDir = path.join(projectRoot, "cmd");
-        if (fs.existsSync(cmdDir)) {
-          const cmdSubs = this.getSubdirectories(cmdDir).filter((s) =>
-            this.hasSourceFiles(path.join(cmdDir, s))
-          );
-          if (cmdSubs.length > 0) {
-            for (const sub of cmdSubs) {
-              domains[`cmd-${sub.toLowerCase()}`] = {
-                root: path.join("cmd", sub),
-                description: `Go entrypoint: ${sub}`,
-                allowed_dependencies: Object.keys(domains),
-                forbidden_dependencies: [],
-                archetypes: this.inferDefaultArchetypes(path.join(cmdDir, sub)),
-              };
-            }
-          } else if (this.hasSourceFiles(cmdDir)) {
-            domains["cmd"] = {
-              root: "cmd",
-              description: "Go entrypoint cmd",
-              allowed_dependencies: Object.keys(domains),
+        const cmdAllowed = [...(hasPkg ? ["pkg"] : []), ...internalNames];
+        if (cmdSubs.length > 0) {
+          for (const sub of cmdSubs) {
+            domains[`cmd-${sub.toLowerCase()}`] = {
+              root: path.join("cmd", sub),
+              description: `Go entrypoint: ${sub}`,
+              allowed_dependencies: [...cmdAllowed],
               forbidden_dependencies: [],
-              archetypes: this.inferDefaultArchetypes(cmdDir),
+              archetypes: this.inferDefaultArchetypes(path.join(cmdDir, sub)),
             };
           }
+        } else if (hasFlatCmd) {
+          domains["cmd"] = {
+            root: "cmd",
+            description: "Go entrypoint cmd",
+            allowed_dependencies: [...cmdAllowed],
+            forbidden_dependencies: [],
+            archetypes: this.inferDefaultArchetypes(cmdDir),
+          };
         }
       }
     }
@@ -524,7 +531,9 @@ export class TopologyDetector {
           }
         }
       }
-    } catch {}
+    } catch (err: unknown) {
+      this.warnIfUnexpectedError(`Failed to scan ignored directories in ${projectRoot}`, err);
+    }
     ignored_folders.sort();
 
     return {
@@ -733,121 +742,22 @@ export class TopologyDetector {
       if (Object.keys(archetypes).length === 0) {
         archetypes["source"] = "**/*.*";
       }
-    } catch {}
+    } catch (err: unknown) {
+      this.warnIfUnexpectedError(`Failed to infer archetypes in ${fullDir}`, err);
+    }
 
     return archetypes;
   }
 
-  private static detectLanguage(projectRoot: string): DiscoveredProjectTopology["language"] {
-    if (
-      fs.existsSync(path.join(projectRoot, "composer.json")) ||
-      fs.existsSync(path.join(projectRoot, "artisan"))
-    ) {
-      return "php";
-    }
-    if (fs.existsSync(path.join(projectRoot, "go.mod"))) return "go";
-    if (
-      fs.existsSync(path.join(projectRoot, "pyproject.toml")) ||
-      fs.existsSync(path.join(projectRoot, "requirements.txt"))
-    ) {
-      return "python";
-    }
-    if (
-      fs.existsSync(path.join(projectRoot, "tsconfig.json")) ||
-      fs.existsSync(path.join(projectRoot, "package.json"))
-    ) {
-      return "typescript";
-    }
-    return "generic";
+  private static detectLanguage(projectRoot: string): DetectedLanguage {
+    return detectProjectLanguage(projectRoot);
   }
 
   private static detectFramework(
     projectRoot: string,
-    language: DiscoveredProjectTopology["language"]
+    language: DetectedLanguage
   ): string {
-    if (language === "php") {
-      if (fs.existsSync(path.join(projectRoot, "artisan"))) return "laravel";
-      if (
-        fs.existsSync(path.join(projectRoot, "bin/console")) ||
-        fs.existsSync(path.join(projectRoot, "symfony.lock"))
-      ) {
-        return "symfony";
-      }
-      const composerJson = path.join(projectRoot, "composer.json");
-      if (fs.existsSync(composerJson)) {
-        try {
-          const composer = JSON.parse(fs.readFileSync(composerJson, "utf-8"));
-          const reqs = { ...(composer.require ?? {}), ...(composer["require-dev"] ?? {}) };
-          if (reqs["symfony/framework-bundle"] || reqs["symfony/symfony"]) {
-            return "symfony";
-          }
-        } catch {}
-      }
-      return "generic-php";
-    }
-    if (language === "typescript" || language === "javascript") {
-      const pkgJson = path.join(projectRoot, "package.json");
-      try {
-        if (fs.existsSync(pkgJson)) {
-          const pkg = JSON.parse(fs.readFileSync(pkgJson, "utf-8"));
-          const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
-          if (allDeps.next) return "nextjs";
-          if (allDeps.nuxt) return "nuxt";
-          if (allDeps.astro) return "astro";
-          if (allDeps.vue) return "vue";
-          if (allDeps["@nestjs/core"]) return "nestjs";
-          if (allDeps.express) return "express";
-          if (allDeps.fastify) return "fastify";
-          if (allDeps.hono) return "hono";
-          if (allDeps.elysia) return "elysia";
-          if (allDeps["@modelcontextprotocol/sdk"]) return "mcp-server";
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[Septum Topology] Failed to inspect dependencies in ${pkgJson}: ${msg}`);
-      }
-      return "generic-node";
-    }
-    if (language === "python") {
-      if (
-        fs.existsSync(path.join(projectRoot, "manage.py")) ||
-        fs.existsSync(path.join(projectRoot, "wsgi.py")) ||
-        fs.existsSync(path.join(projectRoot, "asgi.py"))
-      ) {
-        return "django";
-      }
-      const readSafe = (p: string) => {
-        try {
-          return fs.existsSync(p) ? fs.readFileSync(p, "utf-8").toLowerCase() : "";
-        } catch {
-          return "";
-        }
-      };
-      const deps =
-        readSafe(path.join(projectRoot, "requirements.txt")) +
-        " " +
-        readSafe(path.join(projectRoot, "pyproject.toml")) +
-        " " +
-        readSafe(path.join(projectRoot, "Pipfile"));
-      if (deps.includes("fastapi")) return "fastapi";
-      if (deps.includes("django")) return "django";
-      if (deps.includes("flask")) return "flask";
-      return "generic-python";
-    }
-    if (language === "go") {
-      const goModPath = path.join(projectRoot, "go.mod");
-      if (fs.existsSync(goModPath)) {
-        try {
-          const modContent = fs.readFileSync(goModPath, "utf-8").toLowerCase();
-          if (modContent.includes("github.com/gin-gonic/gin")) return "gin";
-          if (modContent.includes("github.com/labstack/echo")) return "echo";
-          if (modContent.includes("github.com/go-chi/chi")) return "chi";
-          if (modContent.includes("github.com/gofiber/fiber")) return "fiber";
-        } catch {}
-      }
-      return "generic-go";
-    }
-    return "generic";
+    return detectProjectFramework(projectRoot, language);
   }
 
   private static getSubdirectories(dir: string): string[] {
