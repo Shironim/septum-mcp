@@ -30,6 +30,21 @@ export function sliceInputsCurrent(repo: SeptumRepository, root: string, signal?
   } catch { signal?.throwIfAborted(); return false; }
 }
 
+export async function refreshSliceCatalog(
+  repo: SeptumRepository,
+  root: string,
+  options: CatalogOptions & { verifyMembership: boolean },
+): Promise<void> {
+  const files = options.verifyMembership
+    ? scanSourceFiles(root, { ignorePatterns: options.ignorePatterns, signal: options.signal }).files
+        .map(file => relative(root, file).replace(/\\/g, "/"))
+    : undefined;
+  const membershipChanged = files !== undefined && JSON.stringify(files) !== repo.getMeta("semantic_catalog_files");
+  if (membershipChanged || !sliceInputsCurrent(repo, root, options.signal) || repo.getMeta("slices_dirty") === "1") {
+    await rebuildSliceCatalog(repo, root, options);
+  }
+}
+
 /** Publish slices and their input evidence together; failed builds retain a dirty catalog. */
 export async function rebuildSliceCatalog(repo: SeptumRepository, root: string, options: CatalogOptions): Promise<void> {
   try {
@@ -49,9 +64,7 @@ export async function rebuildSliceCatalog(repo: SeptumRepository, root: string, 
         const chain = JSON.parse(slice.execution_chain_json) as Array<{ stage?: string; file?: string }>;
         for (const node of chain) if (node.stage === "ingress" && node.file) coveredFiles.add(node.file);
       }
-      const fallback = new CallGraphTracer(repo, root).traceAllSlices(8, {
-        includeInferredControllers: slices.length === 0, excludeEntrypointFiles: coveredFiles,
-      });
+      const fallback = new CallGraphTracer(repo, root).traceAllSlices(8, { excludeEntrypointFiles: coveredFiles });
       return [...slices, ...fallback];
     });
     options.signal?.throwIfAborted();
@@ -63,7 +76,7 @@ export async function rebuildSliceCatalog(repo: SeptumRepository, root: string, 
     }
     repo.runInTransaction(() => {
       repo.clearVerticalSlices();
-      for (const slice of extracted.value) repo.upsertVerticalSlice(slice);
+      for (const slice of extracted.value) repo.insertVerticalSlice(slice);
       repo.setMeta("slices_dirty", "");
       repo.setMeta("semantic_extractor_revision", SEMANTIC_FINGERPRINT);
       repo.setMeta("semantic_inputs", JSON.stringify(extracted.inputs));

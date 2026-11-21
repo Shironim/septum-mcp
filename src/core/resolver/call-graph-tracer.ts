@@ -1,7 +1,8 @@
-import { ImportResolver } from "./import-resolver.ts";
+import { discoverDeclarativeRoutesFromFiles, type DiscoveredRoute } from "../discovery/declarative-routes.ts";
 import { readOptionalSourceFile } from "../resources/source-files.ts";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, normalize, relative, resolve } from "node:path";
+import { ImportCandidateResolver } from "./import-candidates.ts";
+import { existsSync } from "node:fs";
+import { relative, resolve } from "node:path";
 import type {
   ExecutionChainNode,
   FileRecord,
@@ -9,21 +10,13 @@ import type {
   VerticalSliceRecord,
 } from "../../types/index.ts";
 import type { SeptumRepository } from "../database/repository.ts";
+import { detectPipelineStage, extractImportedSymbolNames as extractImportedNames } from "./call-graph-helpers.ts";
+import { traverseAstMethodGraph } from "./ast-method-tracer.ts";
+import { traversePolyglotMethodDependencies } from "./polyglot-slice-tracer.ts";
 
-export interface DiscoveredRoute {
-  method: string;
-  uri: string;
-  file: string;
-  line: number;
-  middlewareSymbols: string[];
-  handlerSymbol?: string;
-  handlerClass?: string;
-  handlerMethod?: string;
-}
+export type { DiscoveredRoute };
 
 export class CallGraphTracer {
-  private importEvidence?: ReturnType<SeptumRepository["getImportRelationships"]>;
-  private evidenceByFile = new Map<string, ReturnType<SeptumRepository["getImportRelationships"]>>();
   private fileMapByNormPath: Map<string, FileRecord> = new Map();
   private fileMapById: Map<number, FileRecord> = new Map();
   private symbolsByFileId: Map<number, SymbolRecord[]> = new Map();
@@ -32,7 +25,11 @@ export class CallGraphTracer {
     Array<{ target: string; statement: string; line_number: number; is_external: boolean }>
   > = new Map();
 
-  constructor(private repo: SeptumRepository, private projectRoot: string = process.cwd()) {}
+  private readonly importCandidates: ImportCandidateResolver;
+
+  constructor(private repo: SeptumRepository, private projectRoot: string = process.cwd()) {
+    this.importCandidates = new ImportCandidateResolver(repo, projectRoot, this.fileMapByNormPath, path => this.fileForPath(path));
+  }
 
   private fileForPath(path: string): FileRecord | undefined {
     const key = this.normalizeFilePath(path);
@@ -60,10 +57,10 @@ export class CallGraphTracer {
    */
   public initMaps(): void {
     this.fileMapByNormPath.clear(); this.fileMapById.clear();
-    this.symbolsByFileId.clear(); this.dependenciesByFileId.clear(); this.evidenceByFile.clear();
+    this.symbolsByFileId.clear(); this.dependenciesByFileId.clear();
     const allSymbolsWithFiles = this.repo.getAllSymbolsWithFiles();
     const allDeps = this.repo.getAllDependenciesWithDomains();
-    this.importEvidence = this.repo.getMeta?.("workspace_root") ? this.repo.getImportRelationships(this.projectRoot) : undefined;
+    this.importCandidates.reset();
 
     // Map files
     const allFiles = this.repo.getAllFiles();
@@ -96,117 +93,21 @@ export class CallGraphTracer {
     }
   }
 
-  /**
-   * Discover declarative HTTP routes from known route/router files in the repository.
-   */
-  public discoverDeclarativeRoutes(): DiscoveredRoute[] {
-    const discovered: DiscoveredRoute[] = [];
-
-    for (const [normPath, file] of this.fileMapByNormPath.entries()) {
-      const isRouteFile =
-        file.archetype === "route" ||
-        /routes?|router|endpoints?/i.test(normPath) ||
-        /\.(routes?|router)\.[tj]sx?$/i.test(normPath);
-
-      if (!isRouteFile) continue;
-
-      const fullPath = resolve(this.projectRoot, file.path);
-      if (!existsSync(fullPath)) continue;
-
-      try {
-        const content = readOptionalSourceFile(fullPath, "utf-8");
-        const lines = content.split("\n");
-
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          // Pattern: router.post('/api/orders', validateMiddleware, controller.action)
-          // or app.get('/orders', handler)
-          const match = line.match(
-            /(?:router|app|server|api)\.(get|post|put|patch|delete|options|head)\s*\(\s*['"`]([^'"`]+)['"`]\s*,\s*(.+)\)/i
-          );
-
-          if (match) {
-            const method = match[1].toUpperCase();
-            const uri = match[2];
-            const rawArgs = match[3];
-
-            const argTokens = rawArgs
-              .split(",")
-              .map((t) => t.trim())
-              .filter((t) => t.length > 0 && !t.startsWith("//"));
-
-            const middlewareSymbols: string[] = [];
-            let handlerSymbol: string | undefined;
-            let handlerClass: string | undefined;
-            let handlerMethod: string | undefined;
-
-            if (argTokens.length === 1) {
-              handlerSymbol = argTokens[0];
-            } else if (argTokens.length > 1) {
-              handlerSymbol = argTokens[argTokens.length - 1];
-              middlewareSymbols.push(...argTokens.slice(0, argTokens.length - 1));
-            }
-
-            if (handlerSymbol) {
-              // Extract Class.method or classInstance.method
-              const parts = handlerSymbol.split(".");
-              if (parts.length === 2) {
-                handlerClass = parts[0];
-                handlerMethod = parts[1];
-              } else if (handlerSymbol.includes("::")) {
-                const colParts = handlerSymbol.split("::");
-                handlerClass = colParts[0];
-                handlerMethod = colParts[1];
-              }
-            }
-
-            discovered.push({
-              method,
-              uri,
-              file: file.path,
-              line: i + 1,
-              middlewareSymbols,
-              handlerSymbol,
-              handlerClass,
-              handlerMethod,
-            });
-          }
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[Septum CallGraph Warning] Route discovery failed for ${file.path}: ${msg}`);
-      }
-    }
-
-    return discovered;
+  /** Legacy route modules sometimes receive their router as an ambient global. */
+  public discoverDeclarativeRoutes(excluded?: ReadonlySet<string>): DiscoveredRoute[] {
+    return discoverDeclarativeRoutesFromFiles(this.projectRoot, this.fileMapByNormPath, excluded);
   }
 
-  /**
-   * Build execution chains for all discovered entrypoints and controller actions.
-   */
-  public traceAllSlices(maxDepth: number = 5, options: { includeInferredControllers?: boolean; excludeEntrypointFiles?: ReadonlySet<string> } = {}): Array<Omit<VerticalSliceRecord, "id" | "created_at">> {
+  public traceAllSlices(maxDepth = 5, options: { includeInferredControllers?: boolean; excludeEntrypointFiles?: ReadonlySet<string> } = {}): Array<Omit<VerticalSliceRecord, "id" | "created_at">> {
     const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
     this.initMaps();
-    const slices: Array<Omit<VerticalSliceRecord, "id" | "created_at">> = [];
-    const declarativeRoutes = this.discoverDeclarativeRoutes();
-
-    // 1. Trace from declarative routes
-    for (const route of declarativeRoutes) {
-      if (options.excludeEntrypointFiles?.has(route.file)) continue;
+    const coveredFiles = options.excludeEntrypointFiles;
+    const slices = this.discoverDeclarativeRoutes(coveredFiles).map(route => {
       const chain = this.traceChainFromRoute(route, effectiveMaxDepth);
-      if (chain.length > 0) {
-        const sliceRecord = this.buildSliceRecordFromChain(
-          route.method,
-          route.uri,
-          chain,
-          "clean"
-        );
-        slices.push(sliceRecord);
-      }
-    }
-
+      chain[0].relationship = { kind: "route_binding", derivation: "inferred", reason: "ambient_router_convention" };
+      return this.buildSliceRecordFromChain(route.method, route.uri, chain, "clean");
+    });
     if (options.includeInferredControllers === false) return slices;
-
     // 2. Trace controllers if routes were not explicitly bound or found
     for (const [normPath, file] of this.fileMapByNormPath.entries()) {
       const isController =
@@ -215,34 +116,35 @@ export class CallGraphTracer {
         normPath.endsWith("Controller.ts") ||
         normPath.endsWith("Controller.js");
 
-      if (!isController) continue;
+      if (!isController || coveredFiles?.has(file.path)) continue;
 
       const symbols = this.fileSymbols(file.id);
       const methods = symbols.filter((s) => s.kind === "method" || s.kind === "function");
 
       for (const m of methods) {
+        const action = m.name.split("::").at(-1)!;
         // Skip constructors or private helpers
-        if (m.name === "constructor" || m.name.startsWith("_")) continue;
+        if (action === "constructor" || action.startsWith("_")) continue;
 
         // Check if this method was already covered by declarative routes
         const alreadyCovered = slices.some(
           (s) =>
             s.controller_file === file.path &&
-            s.action_name.toLowerCase() === m.name.toLowerCase()
+            s.action_name.toLowerCase() === action.toLowerCase()
         );
         if (alreadyCovered) continue;
 
         const chain = this.traceChainFromController(file, m, effectiveMaxDepth);
         if (chain.length > 0) {
-          const defaultMethod = /create|store|save|add/i.test(m.name)
+          const defaultMethod = /create|store|save|add/i.test(action)
             ? "POST"
-            : /update|edit|patch/i.test(m.name)
+            : /update|edit|patch/i.test(action)
             ? "PUT"
-            : /delete|remove|destroy/i.test(m.name)
+            : /delete|remove|destroy/i.test(action)
             ? "DELETE"
             : "GET";
 
-          const inferredUri = this.inferRouteUri(file.path, m.name);
+          const inferredUri = this.inferRouteUri(file.path, action);
           const sliceRecord = this.buildSliceRecordFromChain(
             defaultMethod,
             inferredUri,
@@ -343,18 +245,20 @@ export class CallGraphTracer {
     const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
     const chain: ExecutionChainNode[] = [];
     const syms = this.fileSymbols(controllerFile.id);
-    const ctrlName =
+    const parts = method.name.split("::");
+    const action = parts.pop()!;
+    const ctrlName = parts.pop() ||
       syms.find((s) => s.kind === "class")?.name ||
       controllerFile.path.split("/").pop()?.replace(/\.[^.]+$/, "") ||
       "Controller";
 
     // Stage 1: Ingress (inferred)
-    const inferredUri = this.inferRouteUri(controllerFile.path, method.name);
-    const defaultMethod = /create|store|save|add/i.test(method.name)
+    const inferredUri = this.inferRouteUri(controllerFile.path, action);
+    const defaultMethod = /create|store|save|add/i.test(action)
       ? "POST"
-      : /update|edit|patch/i.test(method.name)
+      : /update|edit|patch/i.test(action)
       ? "PUT"
-      : /delete|remove|destroy/i.test(method.name)
+      : /delete|remove|destroy/i.test(action)
       ? "DELETE"
       : "GET";
 
@@ -363,16 +267,17 @@ export class CallGraphTracer {
       symbol: `${defaultMethod} ${inferredUri}`,
       file: controllerFile.path,
       line: method.line_start,
+      relationship: { kind: "route_binding", derivation: "inferred", reason: "controller_convention" },
       description: `Inferred Ingress: ${defaultMethod} ${inferredUri}`,
     });
 
     // Stage 3: Controller
     chain.push({
       stage: "controller",
-      symbol: `${ctrlName}::${method.name}`,
+      symbol: `${ctrlName}::${action}`,
       file: controllerFile.path,
       line: method.line_start,
-      description: `Controller Action: ${ctrlName}::${method.name}`,
+      description: `Controller Action: ${ctrlName}::${action}`,
     });
 
     // Forward reachability BFS
@@ -417,10 +322,14 @@ export class CallGraphTracer {
     }
 
     const symbols = this.fileSymbols(startFile.id);
-    const methodSymbol = symbols.find(
+    const candidates = symbols.filter(
       (s) => (s.kind === "method" || s.kind === "function") && (s.name.endsWith(`::${actionName}`) || s.name.endsWith(`@${actionName}`) || s.name === actionName)
     );
 
+    const line = existingChain.find(node => node.stage === "controller" && node.file === controllerFilePath)?.line;
+    const matches = line ? candidates.filter(s => s.line_start <= line && line <= s.line_end) : [];
+    if (candidates.length > 1 && matches.length !== 1) return existingChain;
+    const methodSymbol = matches[0] ?? candidates[0];
     if (!methodSymbol) {
       return this.expandChainFromFile(controllerFilePath, existingChain, maxDepth);
     }
@@ -436,13 +345,16 @@ export class CallGraphTracer {
       const lines = fileContent.split(/\r?\n/);
       const start = Math.max(0, methodSymbol.line_start - 1);
       const end = Math.min(lines.length, methodSymbol.line_end);
-      methodBody = this.scopeWithInjectedTypes(fileContent, lines.slice(start, end).join("\n"));
+      const owner = symbols.find(s => s.kind === "class" && s.line_start <= methodSymbol.line_start && s.line_end >= methodSymbol.line_end);
+      const ownerSource = owner ? lines.slice(owner.line_start - 1, owner.line_end).join("\n") : fileContent;
+      methodBody = this.scopeWithInjectedTypes(ownerSource, lines.slice(start, end).join("\n"));
     } catch {
       return this.expandChainFromFile(controllerFilePath, existingChain, maxDepth);
     }
 
     const chain = [...existingChain];
-    this.traverseMethodScopedDependencies(startFile, methodBody, methodSymbol, chain, effectiveMaxDepth);
+    // Method-scoped vertical slices stop at 1-hop direct collaborators (Option A).
+    this.traverseMethodScopedDependencies(startFile, methodBody, methodSymbol, chain, 1);
     return chain;
   }
 
@@ -563,78 +475,49 @@ export class CallGraphTracer {
     chain: ExecutionChainNode[],
     maxDepth: number = 5
   ): void {
-    const visitedFiles = new Set<string>();
-    visitedFiles.add(startFile.path);
-
-    const deps = this.fileDependencies(startFile.id);
-    const scopeText = (methodSymbol.signature || "") + "\n" + methodBody;
-
-    for (const dep of deps) {
-      if (/^\s*(?:import|export)\s+type\b/.test(dep.statement)) continue;
-      if (chain.length >= CallGraphTracer.MAX_CHAIN_NODES) break;
-      const importedNames = this.extractImportedSymbolNames(dep.statement);
-      const baseTarget = dep.target.split(/[\/\\]/).pop()?.replace(/\.[^.]+$/, "") || "";
-
-      // Only include if imported symbol or target name is referenced in the method scope (signature + body)
-      const isReferenced =
-        (importedNames.length > 0 &&
-          importedNames.some((name) => {
-            const camel = name.charAt(0).toLowerCase() + name.slice(1);
-            return scopeText.includes(name) || scopeText.includes(camel);
-          })) ||
-        (baseTarget.length > 0 &&
-          (scopeText.includes(baseTarget) ||
-            scopeText.includes(baseTarget.charAt(0).toLowerCase() + baseTarget.slice(1))));
-
-      if (!isReferenced) {
-        // Drop uncalled static import to eliminate cognitive noise and payload bloat
-        continue;
-      }
-
-      const resolvedFiles = this.repo.getMeta?.("workspace_root")
-        ? this.resolveImportTargets(startFile.path, dep.target)
-        : dep.is_external
-        ? []
-        : [this.resolveImportToFile(startFile.path, dep.target)].filter((file): file is FileRecord => !!file);
-
-      for (const resolvedFile of resolvedFiles) {
-        if (!resolvedFile || visitedFiles.has(resolvedFile.path)) continue;
-        visitedFiles.add(resolvedFile.path);
-
-        const stage = this.detectStage(resolvedFile.path, resolvedFile.archetype);
-        const fileSymbols = this.fileSymbols(resolvedFile.id);
-        const mainSymbol = this.resolveExecutableSymbol(fileSymbols, importedNames);
-        if (!mainSymbol) {
-          continue;
-        }
-
-        const symbolDisplay = mainSymbol.name;
-
-        const shortSymbolDisplay = symbolDisplay.split(/[\\:]/).pop();
-        const existingNode = chain.find(
-          (c) =>
-            (c.file && c.file === resolvedFile.path) ||
-            (c.stage === stage &&
-              (c.symbol === symbolDisplay || c.symbol.split(/[\\:]/).pop() === shortSymbolDisplay))
-        );
-
-        if (!existingNode) {
-          chain.push({
-            stage,
-            symbol: symbolDisplay,
-            file: resolvedFile.path,
-            line: mainSymbol.line_start || 1,
-            description: `${stage.toUpperCase()} (referenced import): ${symbolDisplay}`,
-            relationship: {
-              kind: "imports",
-              derivation: "source",
-              source: { file: startFile.path, line: dep.line_number, statement: dep.statement },
-              reason: "import referenced in method scope; not proof of a call",
-            },
-          });
-        }
-      }
+    const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
+    const hasWorkspaceRoot = Boolean(this.repo.getMeta?.("workspace_root"));
+    if (/\.[cm]?[jt]sx?$/i.test(startFile.path)) {
+      traverseAstMethodGraph(
+        {
+          projectRoot: this.projectRoot,
+          maxChainNodes: CallGraphTracer.MAX_CHAIN_NODES,
+          hasWorkspaceRoot,
+          fileSymbols: (fileId) => this.fileSymbols(fileId),
+          fileDependencies: (fileId) => this.fileDependencies(fileId),
+          resolveImportTargets: (from, spec) => this.resolveImportTargets(from, spec),
+          resolveImportToFile: (from, spec) => this.resolveImportToFile(from, spec),
+          resolveExecutableSymbol: (symbols, names) => this.resolveExecutableSymbol(symbols, names),
+          isExecutableSymbol: (symbol) => this.isExecutableSymbol(symbol),
+          detectStage: (filePath, archetype) => this.detectStage(filePath, archetype),
+        },
+        startFile,
+        methodSymbol,
+        chain,
+        effectiveMaxDepth
+      );
+      return;
     }
+
+    traversePolyglotMethodDependencies(
+      {
+        projectRoot: this.projectRoot,
+        maxChainNodes: CallGraphTracer.MAX_CHAIN_NODES,
+        hasWorkspaceRoot,
+        fileSymbols: (fileId) => this.fileSymbols(fileId),
+        fileDependencies: (fileId) => this.fileDependencies(fileId),
+        extractImportedSymbolNames: (stmt) => this.extractImportedSymbolNames(stmt),
+        resolveImportTargets: (from, target) => this.resolveImportTargets(from, target),
+        resolveImportToFile: (from, target) => this.resolveImportToFile(from, target),
+        resolveExecutableSymbol: (symbols, names) => this.resolveExecutableSymbol(symbols, names),
+        isExecutableSymbol: (symbol) => this.isExecutableSymbol(symbol),
+        detectStage: (filePath, archetype) => this.detectStage(filePath, archetype),
+      },
+      startFile,
+      methodBody,
+      methodSymbol,
+      chain
+    );
   }
 
   /**
@@ -725,165 +608,22 @@ export class CallGraphTracer {
   }
 
   private extractImportedSymbolNames(statement: string): string[] {
-    if (!statement) return [];
-    const names = new Set<string>();
-    const braceMatch = statement.match(/\{([^}]+)\}/);
-    if (braceMatch) {
-      for (const spec of braceMatch[1].split(",")) {
-        const cleaned = spec.trim().replace(/^type\s+/, "");
-        const parts = cleaned.split(/\s+as\s+/);
-        for (const p of parts) {
-          const id = p.trim();
-          if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(id)) names.add(id);
-        }
-      }
-    }
-    const defaultMatch = statement.match(/^\s*import\s+(?:type\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s+from\b/);
-    if (defaultMatch) names.add(defaultMatch[1]);
-    const pyMatch = statement.match(/\bfrom\s+[^\s]+\s+import\s+([^;(\n]+)/);
-    if (pyMatch) {
-      for (const spec of pyMatch[1].split(",")) {
-        const parts = spec.trim().split(/\s+as\s+/);
-        const id = (parts[0] || "").trim();
-        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(id)) names.add(id);
-      }
-    }
-    const phpMatch = statement.match(/^\s*use\s+(?:function\s+|const\s+)?[A-Za-z0-9_\\]+\\([A-Za-z0-9_]+)/);
-    if (phpMatch) names.add(phpMatch[1]);
-    return Array.from(names);
+    return extractImportedNames(statement);
   }
 
   /**
    * Detect generic pipeline stage from file path and archetype.
    */
   public detectStage(filePath: string, archetype: string): string {
-    const norm = filePath.toLowerCase();
-
-    if (
-      archetype === "validation" ||
-      archetype === "dto" ||
-      /validation|middleware|dto|request|schema/i.test(norm)
-    ) {
-      return "validation";
-    }
-
-    if (archetype === "controller" || /controller|handler/i.test(norm)) {
-      return "controller";
-    }
-
-    if (
-      archetype === "service" ||
-      archetype === "use_case" ||
-      /use-?cases?|interactor|application|workflow/i.test(norm)
-    ) {
-      return "use_case";
-    }
-
-    if (
-      archetype === "model" ||
-      archetype === "entity" ||
-      /domain|entities|entity|aggregate/i.test(norm)
-    ) {
-      return "entity";
-    }
-
-    if (
-      archetype === "repository" ||
-      /repositories|repository|database|persistence|egress|adapter/i.test(norm)
-    ) {
-      return "repository";
-    }
-
-    return "service";
+    return detectPipelineStage(filePath, archetype);
   }
 
-  /**
-   * Resolve an import target path (relative or alias) to a FileRecord in the catalog.
-   */
   public resolveImportTargets(sourceFilePath: string, importTarget: string): FileRecord[] {
-    if (!this.importEvidence && !this.evidenceByFile.has(sourceFilePath)) {
-      this.evidenceByFile.set(sourceFilePath, this.repo.getImportRelationships(this.projectRoot, sourceFilePath));
-    }
-    const evidence = (this.importEvidence ?? this.evidenceByFile.get(sourceFilePath))?.find(edge => edge.source.file === sourceFilePath && edge.resolution.source.target === importTarget);
-    if (evidence && (evidence.freshness !== "current" || evidence.index_coverage !== "complete")) return [];
-    const result = evidence?.resolution ?? new ImportResolver(this.projectRoot, this.repo.getAllDomains?.().map(domain => domain.root_path) ?? []).resolve(importTarget,sourceFilePath);
-    if (result.status !== "resolved" || result.coverage === "conditional") {
-      // Fallback: check symbols in repository (e.g. PHP namespace classes, Go packages, Python modules)
-      const matching = this.repo.findSymbolsByName(importTarget);
-      if (matching.length === 1) {
-        const file = this.fileForPath(matching[0].file_path);
-        if (file) return [file];
-      }
-      const shortName = importTarget.split(/[\/\\]/).pop();
-      if (shortName && shortName !== importTarget) {
-        const shortMatches = this.repo.findSymbolsByName(shortName);
-        if (shortMatches.length === 1) {
-          const file = this.fileForPath(shortMatches[0].file_path);
-          if (file) return [file];
-        }
-      }
-      return [];
-    }
-    return result.targets.flatMap(target => target.files).flatMap(file => {
-      const indexed = this.fileForPath(file);
-      return indexed ? [indexed] : [];
-    });
+    return this.importCandidates.resolveImportTargets(sourceFilePath, importTarget);
   }
 
   public resolveImportToFile(sourceFilePath: string, importTarget: string): FileRecord | undefined {
-    if (this.repo.getMeta?.("workspace_root")) {
-      const targets = this.resolveImportTargets(sourceFilePath,importTarget);
-      return targets.length === 1 ? targets[0] : undefined;
-    }
-    // 1. Relative import (./ or ../)
-    if (importTarget.startsWith(".")) {
-      const sourceDir = dirname(sourceFilePath);
-      const combined = normalize(join(sourceDir, importTarget)).replace(/\\/g, "/");
-
-      const candidates = [
-        combined,
-        `${combined}.ts`,
-        `${combined}.tsx`,
-        `${combined}.js`,
-        `${combined}.jsx`,
-        `${combined}/index.ts`,
-        `${combined}/index.js`,
-      ];
-
-      for (const cand of candidates) {
-        const found = this.fileForPath(cand);
-        if (found) return found;
-      }
-    }
-
-    // 2. Alias import (@/... or src/...)
-    const cleanAlias = importTarget.replace(/^@\//, "src/");
-    const aliasCandidates = [
-      cleanAlias,
-      `${cleanAlias}.ts`,
-      `${cleanAlias}.tsx`,
-      `${cleanAlias}.js`,
-      `${cleanAlias}.jsx`,
-      `${cleanAlias}/index.ts`,
-      `${cleanAlias}/index.js`,
-    ];
-
-    for (const cand of aliasCandidates) {
-      const found = this.fileForPath(cand);
-      if (found) return found;
-    }
-
-    // 3. Basename search fallback
-    const baseTarget = importTarget.split("/").pop()?.replace(/\.[^.]+$/, "");
-    if (baseTarget && baseTarget.length > 3) {
-      for (const [norm, file] of this.fileMapByNormPath.entries()) {
-        if (norm.includes(`/${baseTarget.toLowerCase()}.`) || norm.endsWith(`/${baseTarget.toLowerCase()}`)) {
-          return file;
-        }
-      }
-    }
-
-    return undefined;
+    return this.importCandidates.resolveImportToFile(sourceFilePath, importTarget);
   }
 
   /**
@@ -1005,7 +745,7 @@ export class CallGraphTracer {
       controller_file: controllerNode?.file || null,
       controller_line: controllerNode?.line || 0,
       architecture_style: architectureStyle,
-      entry_kind: "http_route",
+      entry_kind: "inferred_http_route",
       execution_chain_json: JSON.stringify(chain),
     };
   }

@@ -372,7 +372,7 @@ export function analyzeSymbolImpact(facts: ImpactFacts): GetSymbolImpactResponse
       found_in_index: foundInIndex,
       warning,
       impact_summary: {
-        total_dependents: inboundCallers.length,
+        total_dependents: affectedFiles.size,
         risk_level: foundInIndex ? riskLevel : "unknown",
         affected_files_count: affectedFiles.size,
       },

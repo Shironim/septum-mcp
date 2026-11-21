@@ -16,6 +16,8 @@ export interface SuggestionMatch {
   signature: string;
   line_start: number;
   line_end: number;
+  start_line?: number;
+  end_line?: number;
   similarity_score: number; // 0.0 - 1.0
   file_path?: string;
 }
@@ -36,6 +38,8 @@ export interface SymbolLocationResult {
     visibility: string;
     line_start: number;
     line_end: number;
+    start_line?: number;
+    end_line?: number;
   };
   sibling_methods?: string[];
   suggestions: SuggestionMatch[];
@@ -156,7 +160,7 @@ export class SymbolLocator {
       return {
         ...base, found: true, file_path: exact.file_path, container_name: exact.symbol_ref.container,
         symbol_ref: exact.symbol_ref,
-        exact_symbol: { name: exact.name, kind: exact.kind, signature: exact.signature, visibility: exact.visibility, line_start: exact.line_start, line_end: exact.line_end },
+        exact_symbol: { name: exact.name, kind: exact.kind, signature: exact.signature, visibility: exact.visibility, line_start: exact.line_start, line_end: exact.line_end, start_line: exact.line_start, end_line: exact.line_end },
         sibling_methods: details?.sibling_methods,
         message: `Found exact symbol '${exact.name}' in ${exact.file_path}:${exact.line_start}`,
       };
@@ -170,15 +174,22 @@ export class SymbolLocator {
       .filter(s => s.kind === "method" && symbolReference({ ...s, file_path: owner.file_path, indexed_content_hash: owner.indexed_content_hash }).container === owner.name)
       .map(s => ({ ...s, file_path: owner.file_path })) : this.repo.getAllSymbolsWithFiles();
     const domainId = selection.domain ? this.repo.getAllDomains().find(d => d.name.toLowerCase() === selection.domain!.toLowerCase())?.id : undefined;
+    const seenNames = new Set<string>();
     const suggestions = searchable
       .filter(s => !selection.filePath || s.file_path === selection.filePath)
       .filter(s => !selection.domain || this.repo.getFileByPath(s.file_path)?.domain_id === domainId)
       .map(s => ({
-        name: owner ? s.name.split(/::|[.#]/).pop()! : s.name, kind: s.kind, signature: s.signature, line_start: s.line_start, line_end: s.line_end, file_path: s.file_path,
+        name: owner ? s.name.split(/::|[.#]/).pop()! : s.name, kind: s.kind, signature: s.signature, line_start: s.line_start, line_end: s.line_end, start_line: s.line_start, end_line: s.line_end, file_path: s.file_path,
         similarity_score: Math.round(Math.max(calculateSimilarity(target, s.name.split(/::|[.#]/).pop()!), calculateSimilarity(parsed.raw, s.name)) * 100) / 100,
       }))
       .filter(s => s.similarity_score >= 0.3)
-      .sort((a, b) => b.similarity_score - a.similarity_score).slice(0, 10);
+      .sort((a, b) => b.similarity_score - a.similarity_score)
+      .filter(s => {
+        if (seenNames.has(s.name)) return false;
+        seenNames.add(s.name);
+        return true;
+      })
+      .slice(0, 10);
     return { ...base, file_path: owner?.file_path, container_name: owner?.name, sibling_methods: siblings, suggestions, message: `Symbol '${parsed.raw}' not found.${suggestions.length ? ` Did you mean '${suggestions[0]!.name}'?` : ""}` };
   }
 
@@ -223,13 +234,19 @@ export function calculateSimilarity(source: string, target: string): number {
   const t1 = tokenize(source);
   const t2 = tokenize(target);
   let tokenBonus = 0;
+  let sharedTokenCount = 0;
+  let exactTokenMatchCount = 0;
   if (t1.length > 0 && t2.length > 0) {
+    const exactTokens = t1.filter((token) => t2.includes(token));
+    exactTokenMatchCount = exactTokens.length;
     const sharedTokens = t1.filter((token) =>
       t2.some((t) => t.includes(token) || token.includes(t))
     );
+    sharedTokenCount = sharedTokens.length;
     const allUniqueTokens = new Set([...t1, ...t2]);
     const jaccard = sharedTokens.length / (allUniqueTokens.size || 1);
-    tokenBonus = jaccard * 0.35;
+    const exactCoverage = exactTokens.length / t1.length;
+    tokenBonus = jaccard * 0.35 + (exactTokens.length > 0 ? 0.25 + exactCoverage * 0.2 : 0);
   }
 
   // Damerau-Levenshtein Matrix
@@ -269,8 +286,16 @@ export function calculateSimilarity(source: string, target: string): number {
 
   const distance = matrix[len1][len2];
   const maxLen = Math.max(len1, len2);
-  const rawSimilarity = 1.0 - distance / maxLen;
+  let rawSimilarity = 1.0 - distance / maxLen;
 
-  const totalScore = rawSimilarity + prefixBonus + substringBonus + tokenBonus;
+  // Dampen accidental subsequence matches for short unrelated words against multi-token queries
+  if (t1.length > 1 && t2.length > 0 && sharedTokenCount === 0 && !s2.includes(s1) && !s1.includes(s2) && Math.min(len1, len2) / maxLen < 0.65) {
+    rawSimilarity *= 0.55;
+  }
+
+  // Boost exact word-boundary token matches (e.g. "Store" -> "SymbolDetailsStore") above edit-distance noise ("Scope", "close")
+  const totalScore = exactTokenMatchCount > 0
+    ? Math.max(rawSimilarity + prefixBonus + substringBonus + tokenBonus, 0.72 + (exactTokenMatchCount / t2.length) * 0.2)
+    : rawSimilarity + prefixBonus + substringBonus + tokenBonus;
   return Math.min(1.0, Math.max(0.0, totalScore));
 }

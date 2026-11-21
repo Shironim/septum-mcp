@@ -117,9 +117,12 @@ export function findProjectRoot(fromPath: string): string {
  */
 export function resolveWorkspaceRoot(pathHint?: string): string {
   if (pathHint && typeof pathHint === "string" && pathHint.trim()) {
-    const trimmed = pathHint.trim().replace(/^['"]|['"]$/g, "");
-    const absHint = resolve(trimmed);
-    const candidate = existsSync(absHint) && statSync(absHint).isDirectory() ? canonicalizePath(absHint) : findProjectRoot(trimmed);
+    const trimmed = pathHint.trim();
+    const unquoted = trimmed.replace(/^['"]|['"]$/g, "");
+    const literalPath = resolve(trimmed);
+    // Keep an existing literal path before accepting shell-style quoting.
+    const absHint = unquoted !== trimmed && !existsSync(literalPath) ? resolve(unquoted) : literalPath;
+    const candidate = existsSync(absHint) && statSync(absHint).isDirectory() ? canonicalizePath(absHint) : findProjectRoot(absHint);
     if (candidate && existsSync(candidate) && !isAppHostDirectory(candidate)) {
       setLastKnownProjectRoot(candidate);
       return candidate;

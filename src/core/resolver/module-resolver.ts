@@ -1,6 +1,7 @@
 import { ImportResolver } from "./import-resolver.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ImportResolution } from "../../types/index.ts";
 import type { ValidatedSeptumConfig } from "../config/schema.ts";
 import type { SeptumRepository } from "../database/repository.ts";
 import { assertUniqueDomainRoots } from "../config/domain-ownership.ts";
@@ -119,9 +120,7 @@ export class ModuleResolver {
     assertUniqueDomainRoots(config.domains, this.projectRoot);
     if (sourceFilePath && (fs.existsSync(path.resolve(this.projectRoot,sourceFilePath)) || this.repo?.getMeta?.("workspace_root"))) {
       const resolution = this.resolveImport(targetStatement,sourceFilePath,statement);
-      if (resolution.status !== "resolved" || resolution.coverage === "conditional") return null;
-      const domains = [...new Set(resolution.targets.flatMap(target => target.files.map(file => this.matchDomainByPath(file,config))).filter((d): d is string => !!d))];
-      return domains.length === 1 ? domains[0]! : null;
+      return this.resolveDomainFromEvidence(resolution, config);
     }
     // Legacy index-only/path-policy callers have no physical source evidence.
     this.ensureConfigLoaded();
@@ -242,6 +241,14 @@ export class ModuleResolver {
     }
 
     return null;
+  }
+
+  public resolveDomainFromEvidence(resolution: ImportResolution, config: ValidatedSeptumConfig): string | null {
+    if (resolution.status !== "resolved" || resolution.coverage === "conditional") return null;
+    const domains = new Set(resolution.targets.flatMap(target => target.files.map(file => this.matchDomainByPath(file, config))).filter(
+      (domain): domain is string => domain !== null,
+    ));
+    return domains.size === 1 ? [...domains][0]! : null;
   }
 
   private matchDomainByPath(targetPath: string, config: ValidatedSeptumConfig): string | null {
