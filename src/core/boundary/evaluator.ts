@@ -1,6 +1,7 @@
+import type { ImportEvidence, IndexedDependency } from "../resolver/import-evidence.ts";
 import { posix, relative, resolve, isAbsolute } from "node:path";
 import { existsSync } from "node:fs";
-import type { BoundaryViolation } from "../../types/index.ts";
+import type { BoundaryViolation, ImportResolution } from "../../types/index.ts";
 import type { ValidatedSeptumConfig } from "../config/schema.ts";
 import { ConfigLoader } from "../config/loader.ts";
 import type { SeptumRepository } from "../database/repository.ts";
@@ -8,11 +9,19 @@ import { ModuleResolver } from "../resolver/module-resolver.ts";
 import { matchesSimpleGlob } from "../parser/extractors/base.ts";
 import { assertUniqueDomainRoots } from "../config/domain-ownership.ts";
 
+function dependencyKey(file: string, line: number, target: string, statement: string): string {
+  return JSON.stringify([file, line, target, statement]);
+}
+
+function indexedDependencyKey(dependency: IndexedDependency): string {
+  return dependencyKey(dependency.source_file, dependency.line_number, dependency.target, dependency.statement);
+}
+
 export class BoundaryEvaluator {
-  private repo: SeptumRepository;
+  private repo?: SeptumRepository;
   private resolver: ModuleResolver;
 
-  constructor(repo: SeptumRepository, resolver?: ModuleResolver) {
+  constructor(repo?: SeptumRepository, resolver?: ModuleResolver) {
     this.repo = repo;
     this.resolver = resolver ?? new ModuleResolver(process.cwd(), repo);
   }
@@ -32,11 +41,11 @@ export class BoundaryEvaluator {
   ): BoundaryViolation[] {
     let activeConfig = config;
     if (!activeConfig) {
-      const fromRepo = ConfigLoader.loadFromRepository(this.repo);
+      const fromRepo = this.repo ? ConfigLoader.loadFromRepository(this.repo) : undefined;
       activeConfig =
-        Object.keys(fromRepo.domains).length > 0
+        fromRepo && Object.keys(fromRepo.domains).length > 0
           ? fromRepo
-          : ConfigLoader.loadFromDatabaseOrDefaults();
+          : ConfigLoader.load(undefined, this.resolver.getProjectRoot());
     }
     assertUniqueDomainRoots(activeConfig.domains, this.resolver.getProjectRoot());
     const violations: BoundaryViolation[] = [];
@@ -44,7 +53,7 @@ export class BoundaryEvaluator {
     if (proposedImports.length > 0) {
       violations.push(...this.checkProposedChanges(filePath, proposedImports, activeConfig));
       const sourceDomain = this.resolveSourceDomain(filePath, activeConfig);
-      if (sourceDomain && typeof this.repo.getAllDependenciesWithDomains === "function") {
+      if (sourceDomain && typeof this.repo?.getAllDependenciesWithDomains === "function") {
         const existingDeps = this.repo.getAllDependenciesWithDomains().filter(
           (dep) => dep.source_file !== filePath
         );
@@ -69,82 +78,68 @@ export class BoundaryEvaluator {
     return violations;
   }
 
-  public auditCodebase(config: ValidatedSeptumConfig): BoundaryViolation[] {
+  public auditCodebase(config: ValidatedSeptumConfig, snapshot?: ImportEvidence): BoundaryViolation[] {
+    return this.auditCodebaseWithWarnings(config, snapshot).violations;
+  }
+
+  public auditCodebaseWithWarnings(
+    config: ValidatedSeptumConfig,
+    snapshot?: ImportEvidence
+  ): { violations: BoundaryViolation[]; warnings: BoundaryViolation[] } {
     assertUniqueDomainRoots(config.domains, this.resolver.getProjectRoot());
     const violations: BoundaryViolation[] = [];
-    const allDependencies = this.repo.getAllDependenciesWithDomains();
-
-    const evidence = this.repo.getMeta?.("workspace_root") ? this.repo.getImportRelationships(this.resolver.getProjectRoot()) : undefined;
-    const key = (file: string, line: number, target: string) => JSON.stringify([file, line, target]);
-    const current = new Set(evidence?.filter(edge => edge.freshness === "current").map(edge => key(edge.source.file, edge.source.line, edge.resolution.source.target)));
-    const resolved = new Set(evidence?.filter(edge => edge.freshness === "current" && edge.resolution.status === "resolved" && edge.resolution.coverage !== "conditional").map(edge => key(edge.source.file, edge.source.line, edge.resolution.source.target)));
+    const warnings: BoundaryViolation[] = [];
+    const indexed = this.repo?.getMeta?.("workspace_root");
+    const auditEvidence = snapshot ?? (indexed && this.repo ? this.repo.getImportEvidence(this.resolver.getProjectRoot()) : undefined);
+    const allDependencies = auditEvidence?.dependencies ?? this.repo?.getAllDependenciesWithDomains() ?? [];
+    const evidence = indexed ? auditEvidence?.relationships : undefined;
+    const resolutions = evidence && new Map(evidence.filter(edge => edge.freshness === "current").map(edge => [
+      dependencyKey(edge.source.file, edge.source.line, edge.resolution.source.target, edge.source.statement),
+      edge.resolution,
+    ]));
     for (const dep of allDependencies) {
-      if (evidence && !resolved.has(key(dep.source_file, dep.line_number, dep.target))) continue;
-      const targetDomain = this.resolveTargetDomain(dep.target, config, dep.source_file, dep.statement);
-      if (!targetDomain || targetDomain === dep.source_domain) {
-        continue;
-      }
-
-      const sourceDomainConfig = config.domains[dep.source_domain];
-      if (!sourceDomainConfig) {
-        continue;
-      }
-
-      const forbidden = sourceDomainConfig.forbidden_dependencies ?? [];
-      const allowed = sourceDomainConfig.allowed_dependencies ?? [];
-
-      // 1. Explicit forbidden check
-      if (forbidden.includes(targetDomain)) {
-        violations.push({
-          file: dep.source_file,
-          line: dep.line_number,
-          source_domain: dep.source_domain,
-          target_domain: targetDomain,
-          imported_target: dep.target,
-          rule: "forbidden_dependency",
-          message: `Forbidden cross-domain dependency detected: '${dep.source_domain}' is strictly prohibited from importing domain '${targetDomain}'.`,
-        });
-        continue;
-      }
-
-      // 2. Strict enforcement allowed check
-      if (config.settings.enforcement === "strict" && !allowed.includes(targetDomain)) {
-        violations.push({
-          file: dep.source_file,
-          line: dep.line_number,
-          source_domain: dep.source_domain,
-          target_domain: targetDomain,
-          imported_target: dep.target,
-          rule: "disallowed_dependency",
-          message: `Disallowed dependency: '${targetDomain}' is not declared in allowed_dependencies for domain '${dep.source_domain}'.`,
-        });
-      }
+      const resolution = resolutions?.get(indexedDependencyKey(dep));
+      if (resolutions && (resolution?.status !== "resolved" || resolution.coverage === "conditional")) continue;
+      const evaluation = this.evaluateDependencyRuleWithWarning({
+        sourceFile: dep.source_file,
+        sourceDomain: dep.source_domain,
+        line: dep.line_number,
+        target: dep.target,
+        statement: dep.statement,
+        config,
+        mode: "audit",
+        resolution,
+      });
+      if (evaluation.violation) violations.push(evaluation.violation);
+      if (evaluation.warning) warnings.push(evaluation.warning);
     }
 
-    const currentDependencies = evidence ? allDependencies.filter(dep => current.has(key(dep.source_file, dep.line_number, dep.target))) : allDependencies;
-    violations.push(...this.detectCircularDependencies(config, currentDependencies));
+    const currentDependencies = resolutions ? allDependencies.filter(dep => resolutions.has(indexedDependencyKey(dep))) : allDependencies;
+    violations.push(...this.detectCircularDependencies(config, currentDependencies, undefined, resolutions));
 
-    return violations;
+    return { violations, warnings };
   }
 
   public detectCircularDependencies(
     config: ValidatedSeptumConfig,
-    preloadedDeps?: Array<{
-      source_file: string;
-      source_domain: string;
-      line_number: number;
-      target: string;
-      statement: string;
-      is_external: boolean;
-    }>,
-    relevantFiles?: ReadonlySet<string>
+    preloadedDeps?: IndexedDependency[],
+    relevantFiles?: ReadonlySet<string>,
+    resolutions?: ReadonlyMap<string, ImportResolution>,
   ): BoundaryViolation[] {
     assertUniqueDomainRoots(config.domains, this.resolver.getProjectRoot());
     const violations: BoundaryViolation[] = [];
-    let allDependencies = preloadedDeps ?? this.repo.getAllDependenciesWithDomains();
-    if (!preloadedDeps && this.repo.getMeta?.("workspace_root")) {
+    let allDependencies = preloadedDeps ?? this.repo?.getAllDependenciesWithDomains() ?? [];
+    if (!preloadedDeps && this.repo?.getMeta?.("workspace_root")) {
       const current = this.repo.getImportRelationships(this.resolver.getProjectRoot());
-      allDependencies = allDependencies.filter(dep => current.some(edge => edge.source.file === dep.source_file && edge.source.line === dep.line_number && edge.freshness === "current"));
+      const currentEdgeKeys = new Set<string>();
+      for (const edge of current) {
+        if (edge.freshness === "current") {
+          currentEdgeKeys.add(`${edge.source.file}\0${edge.source.line}`);
+        }
+      }
+      allDependencies = allDependencies.filter((dep) =>
+        currentEdgeKeys.has(`${dep.source_file}\0${dep.line_number}`)
+      );
     }
 
     // Prepare file lookup maps for internal file-to-file resolution
@@ -161,7 +156,7 @@ export class BoundaryEvaluator {
       }
     };
 
-    if (typeof this.repo.getAllFiles === "function") {
+    if (typeof this.repo?.getAllFiles === "function") {
       for (const f of this.repo.getAllFiles()) {
         registerKnownFile(f.path);
       }
@@ -171,7 +166,7 @@ export class BoundaryEvaluator {
     }
 
     const resolveTargetFile = (sourceFile: string, rawTarget: string, statement?: string): string | null => {
-      if (this.repo.getMeta?.("workspace_root") || existsSync(resolve(this.resolver.getProjectRoot(), sourceFile))) {
+      if (this.repo?.getMeta?.("workspace_root") || existsSync(resolve(this.resolver.getProjectRoot(), sourceFile))) {
         const result = this.resolver.resolveImport(rawTarget,sourceFile,statement);
         const files = result.targets.flatMap(target => target.files);
         return result.status === "resolved" && result.coverage !== "conditional" && files.length === 1 ? files[0]! : null;
@@ -217,12 +212,16 @@ export class BoundaryEvaluator {
     };
 
     for (const dep of allDependencies) {
-      if (this.repo.getMeta?.("workspace_root")) {
-        const result = this.resolver.resolveImport(dep.target,dep.source_file,dep.statement);
-        if (result.status !== "resolved" || result.coverage === "conditional") continue;
+      const indexed = this.repo?.getMeta?.("workspace_root");
+      const resolution = resolutions?.get(indexedDependencyKey(dep)) ??
+        (indexed ? this.resolver.resolveImport(dep.target, dep.source_file, dep.statement) : undefined);
+      if (resolution) {
+        if (resolution.status !== "resolved" || resolution.coverage === "conditional") continue;
       } else if (dep.is_external) continue;
 
-      const targetDomain = this.resolveTargetDomain(dep.target, config, dep.source_file, dep.statement);
+      const targetDomain = resolution
+        ? this.resolver.resolveDomainFromEvidence(resolution, config)
+        : this.resolveTargetDomain(dep.target, config, dep.source_file, dep.statement);
 
       // 1. Domain-to-domain edge (exclude virtual/top-level aggregator "root" domain and type-only imports)
       if (
@@ -255,7 +254,10 @@ export class BoundaryEvaluator {
         continue;
       }
 
-      const targetFile = resolveTargetFile(dep.source_file, dep.target, dep.statement);
+      const targetFiles = resolution?.targets.flatMap(target => target.files);
+      const targetFile = targetFiles
+        ? targetFiles.length === 1 ? targetFiles[0] : null
+        : resolveTargetFile(dep.source_file, dep.target, dep.statement);
       if (targetFile && targetFile !== dep.source_file) {
         let outMap = fileGraph.get(dep.source_file);
         if (!outMap) {
@@ -371,44 +373,139 @@ export class BoundaryEvaluator {
       return violations;
     }
 
-    const sourceDomainConfig = config.domains[sourceDomain];
-    if (!sourceDomainConfig) {
-      return violations;
+    for (const [index, statement] of proposedImports.entries()) {
+      const violation = this.evaluateDependencyRule({
+        sourceFile: sourceFilePath,
+        sourceDomain,
+        line: 1,
+        target: statement,
+        statement: importStatements?.[index],
+        config,
+        mode: "proposal",
+      });
+      if (violation) violations.push(violation);
     }
+
+    return violations;
+  }
+
+  private evaluateDependencyRule(params: {
+    sourceFile: string;
+    sourceDomain: string;
+    line: number;
+    target: string;
+    statement?: string;
+    config: ValidatedSeptumConfig;
+    mode: "audit" | "proposal";
+    resolution?: ImportResolution;
+  }): BoundaryViolation | null {
+    return this.evaluateDependencyRuleWithWarning(params).violation;
+  }
+
+  private evaluateDependencyRuleWithWarning(params: {
+    sourceFile: string;
+    sourceDomain: string;
+    line: number;
+    target: string;
+    statement?: string;
+    config: ValidatedSeptumConfig;
+    mode: "audit" | "proposal";
+    resolution?: ImportResolution;
+  }): { violation: BoundaryViolation | null; warning: BoundaryViolation | null } {
+    const { sourceFile, sourceDomain, line, target, statement, config, mode, resolution: evidence } = params;
+    const sourceDomainConfig = config.domains[sourceDomain];
+    if (!sourceDomainConfig) return { violation: null, warning: null };
+
+    const targetDomain = evidence
+      ? this.resolver.resolveDomainFromEvidence(evidence, config)
+      : this.resolveTargetDomain(target, config, sourceFile, statement);
+    if (!targetDomain) {
+      if (
+        config.settings.enforcement === "strict" &&
+        (this.repo?.getMeta?.("workspace_root") || existsSync(resolve(this.resolver.getProjectRoot(), sourceFile)))
+      ) {
+        const resolution = evidence ?? this.resolver.resolveImport(target, sourceFile, statement);
+        if (
+          resolution.status === "resolved" &&
+          resolution.coverage !== "conditional" &&
+          resolution.targets.some((t) => t.kind === "file" && t.files.length > 0)
+        ) {
+          return {
+            violation: {
+              file: sourceFile,
+              line,
+              source_domain: sourceDomain,
+              target_domain: "unmapped",
+              imported_target: target,
+              rule: "unmapped_domain",
+              message: `Unmapped internal target: '${target}' resolves inside the workspace outside any declared bounded context.`,
+            },
+            warning: null,
+          };
+        }
+      }
+      return { violation: null, warning: null };
+    }
+
+    if (targetDomain === sourceDomain) return { violation: null, warning: null };
 
     const forbidden = sourceDomainConfig.forbidden_dependencies ?? [];
     const allowed = sourceDomainConfig.allowed_dependencies ?? [];
 
-    for (const [index, statement] of proposedImports.entries()) {
-      const targetDomain = this.resolveTargetDomain(statement, config, sourceFilePath, importStatements?.[index]);
-      if (!targetDomain || targetDomain === sourceDomain) {
-        continue;
-      }
-
-      if (forbidden.includes(targetDomain)) {
-        violations.push({
-          file: sourceFilePath,
-          line: 1,
+    if (forbidden.includes(targetDomain)) {
+      return {
+        violation: {
+          file: sourceFile,
+          line,
           source_domain: sourceDomain,
           target_domain: targetDomain,
-          imported_target: statement,
+          imported_target: target,
           rule: "forbidden_dependency",
-          message: `Illegal import blocked: Domain '${sourceDomain}' is strictly forbidden from importing domain '${targetDomain}'.`,
-        });
-      } else if (config.settings.enforcement === "strict" && !allowed.includes(targetDomain)) {
-        violations.push({
-          file: sourceFilePath,
-          line: 1,
-          source_domain: sourceDomain,
-          target_domain: targetDomain,
-          imported_target: statement,
-          rule: "disallowed_dependency",
-          message: `Unlisted domain dependency: '${targetDomain}' must be explicitly added to allowed_dependencies before domain '${sourceDomain}' can import it.`,
-        });
-      }
+          message:
+            mode === "proposal"
+              ? `Illegal import blocked: Domain '${sourceDomain}' is strictly forbidden from importing domain '${targetDomain}'.`
+              : `Forbidden cross-domain dependency detected: '${sourceDomain}' is strictly prohibited from importing domain '${targetDomain}'.`,
+        },
+        warning: null,
+      };
     }
 
-    return violations;
+    if (!allowed.includes(targetDomain)) {
+      if (config.settings.enforcement === "strict") {
+        return {
+          violation: {
+            file: sourceFile,
+            line,
+            source_domain: sourceDomain,
+            target_domain: targetDomain,
+            imported_target: target,
+            rule: "disallowed_dependency",
+            message:
+              mode === "proposal"
+                ? `Unlisted domain dependency: '${targetDomain}' must be explicitly added to allowed_dependencies before domain '${sourceDomain}' can import it.`
+                : `Disallowed dependency: '${targetDomain}' is not declared in allowed_dependencies for domain '${sourceDomain}'.`,
+          },
+          warning: null,
+        };
+      }
+      return {
+        violation: null,
+        warning: {
+          file: sourceFile,
+          line,
+          source_domain: sourceDomain,
+          target_domain: targetDomain,
+          imported_target: target,
+          rule: "disallowed_dependency",
+          message:
+            mode === "proposal"
+              ? `Unlisted dependency warning (warn mode): '${targetDomain}' is not declared in allowed_dependencies for domain '${sourceDomain}'.`
+              : `Unlisted dependency warning (warn mode): '${targetDomain}' is not declared in allowed_dependencies for domain '${sourceDomain}'.`,
+        },
+      };
+    }
+
+    return { violation: null, warning: null };
   }
 
   public resolveSourceDomain(filePath: string, config: ValidatedSeptumConfig): string | null {
