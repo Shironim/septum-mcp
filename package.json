@@ -1,6 +1,6 @@
 {
   "name": "@dimassetoid/septum-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Deterministic Bounded-Context, Structural File Catalog & Anti-Poisoning Partition for AI Agents",
   "publishConfig": {
     "access": "public"
