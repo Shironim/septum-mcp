@@ -7,12 +7,14 @@ import { SeptumDatabase } from '../core/database/client.ts';
 import { SeptumRepository } from '../core/database/repository.ts';
 import { BoundaryEvaluator } from '../core/boundary/evaluator.ts';
 import { ModuleResolver } from '../core/resolver/module-resolver.ts';
-import { findProjectRoot, isAppHostDirectory, isPathContained, PROJECT_ROOT_MARKERS, setLastKnownProjectRoot } from '../core/resolver/path-resolver.ts';
+import { findProjectRoot, isAppHostDirectory, isPathContained, PROJECT_ROOT_MARKERS } from '../core/resolver/path-resolver.ts';
 import { IngestionPipeline } from '../core/ingestion/pipeline.ts';
 import { RESOURCE_LIMITS } from '../core/resources/limits.ts';
-import { SerialWorkQueue } from '../core/resources/work-queue.ts';
+import { SerialWorkQueue, waitForSharedWork } from '../core/resources/work-queue.ts';
 import { WatchBudget, WorkspaceWatcher } from './workspace-watcher.ts';
 import { DomainRootConflictError } from '../core/config/domain-ownership.ts';
+import { WorkspaceBusyError } from '../core/errors.ts';
+import { SeptumTelemetry } from '../core/telemetry/telemetry.ts';
 
 export function resolveServerWorkspace(options: {workspacePath?: string; filePath?: string; fallbackRoot?: string; knownRoots?: string[]; initial?: boolean; cwd?: string} = {}): string {
   const cwd = options.cwd || process.cwd();
@@ -45,7 +47,6 @@ export function resolveServerWorkspace(options: {workspacePath?: string; filePat
     }
   }
 
-  setLastKnownProjectRoot(root);
   return root;
 }
 
@@ -78,19 +79,78 @@ export class WorkspaceManager {
   private budget = new WatchBudget();
   private disposals = new Set<Promise<void>>();
   private closed = false;
+  private activeRequests = 0;
   private closing: Promise<void> | null = null;
   private idleTimer: ReturnType<typeof setInterval>;
   initialRoot?: string;
   lastRoot?: string;
   get activeRoots(): string[] { return [...this.contexts.keys()]; }
   constructor(private readonly now: () => number = Date.now) {
-    this.idleTimer = setInterval(() => { void this.expireIdle().catch(error => console.error(`[Septum Cleanup Warning] ${String(error)}`)); }, 60_000);
+    this.idleTimer = setInterval(() => {
+      void this.expireIdle().catch(error =>
+        SeptumTelemetry.recordSystemEvent({
+          level: 'WARN',
+          component: 'workspace_manager',
+          event: 'idle_expiration_failed',
+          fields: { message: String(error).slice(0, 256) },
+          workspaceRoot: this.lastRoot ?? this.initialRoot ?? null,
+        })
+      );
+    }, 60_000);
     this.idleTimer.unref();
   }
   get size(): number { return this.contexts.size; }
   get watchCount(): number { return this.budget.count; }
   get syncDurationMs(): number { return Math.max(0, ...[...this.contexts.values()].map(entry => Number(entry.context.repo.getMeta("sync_duration_ms") || 0))); }
   get pendingPaths(): number { return [...this.contexts.values()].reduce((n, entry) => n + entry.context.watcher.pendingCount, 0); }
+
+  /** Inspect an active context synchronously without renewing or creating it. */
+  peek(root: string): WorkspaceContext | undefined {
+    return this.contexts.get(root)?.context;
+  }
+
+  async runInWorkspace<T>(
+    ctx: WorkspaceContext,
+    work: (prepared: WorkspaceContext) => Promise<T>,
+    { signal, isDomainRegistration = false, onSync }: { signal?: AbortSignal; isDomainRegistration?: boolean; onSync?: () => void } = {},
+  ): Promise<T> {
+    signal?.throwIfAborted();
+    if (this.closed) throw new Error("Septum server is shutting down");
+    if (this.activeRequests >= RESOURCE_LIMITS.maxQueuePending) {
+      throw new WorkspaceBusyError(`Server is busy: workspace request limit (${RESOURCE_LIMITS.maxQueuePending}) exceeded.`);
+    }
+    this.activeRequests++;
+    try {
+      await waitForSharedWork(ctx.ready, signal);
+      signal?.throwIfAborted();
+      const registrationBeforeDiscovery =
+        isDomainRegistration && Object.keys(ctx.config.domains).length === 0 && ctx.repo.getAllDomains().length === 0;
+      try {
+        if (!registrationBeforeDiscovery) {
+          onSync?.();
+          await waitForSharedWork(ctx.watcher.flush(false), signal);
+        }
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (!isDomainRegistration || !(error instanceof DomainRootConflictError)) throw error;
+      }
+      // Flush can enqueue work on the same lane. Reload and use policy only after
+      // admission, so another queued request cannot change the policy mid-call.
+      return await this.queue.run(async () => {
+        if (this.closed) throw new Error("Septum server is shutting down");
+        const syncError = ctx.repo.getMeta("sync_error");
+        if (syncError && !(isDomainRegistration && ctx.repo.getMeta("sync_error_code") === "DOMAIN_ROOT_CONFLICT")) {
+          throw new Error(`Workspace index synchronization failed: ${syncError}`);
+        }
+        ctx.config = ConfigLoader.load(undefined, ctx.root);
+        if (!isDomainRegistration) ctx.pipeline.assertDomainOwnership(ctx.config, ctx.root);
+        ctx.evaluator.getResolver().setRepository(ctx.repo);
+        return work(ctx);
+      }, signal);
+    } finally {
+      this.activeRequests--;
+    }
+  }
 
   acquire(rawRoot: string, options: { deferDiscovery?: boolean } = {}): WorkspaceLease {
     if (this.closed) throw new Error('Septum server is shutting down');
@@ -144,17 +204,21 @@ export class WorkspaceManager {
     const disposal = stop.then(async () => { if (!idle) { await this.queue.drain(); entry.context.db.close(); } });
     entry.disposal = disposal;
     this.disposals.add(disposal);
-    void disposal.finally(() => this.disposals.delete(disposal)).catch(error => console.error(`[Septum Cleanup Warning] ${String(error)}`));
+    void disposal.finally(() => this.disposals.delete(disposal)).catch(error =>
+      SeptumTelemetry.recordSystemEvent({
+        level: 'WARN',
+        component: 'workspace_manager',
+        event: 'workspace_disposal_failed',
+        fields: { message: String(error).slice(0, 256) },
+        workspaceRoot: entry.context.root,
+      })
+    );
     return disposal;
   }
 
   async expireIdle(): Promise<void> {
     const expired = [...this.contexts.values()].filter(entry => !entry.leases && !entry.initializing && !entry.context.watcher.isBusy && this.now() - entry.lastUsed >= RESOURCE_LIMITS.workspaceIdleMs);
     await Promise.all(expired.map(entry => this.dispose(entry)));
-  }
-
-  runTool<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    return this.queue.run(() => { if (this.closed) throw new Error("Septum server is shutting down"); return work(); }, signal);
   }
 
   close(): Promise<void> {

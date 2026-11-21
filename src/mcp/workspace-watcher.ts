@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync, watch, type FSWatcher } from 'node:fs';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import type { ValidatedSeptumConfig } from '../core/config/schema.ts';
+import { SeptumTelemetry } from '../core/telemetry/telemetry.ts';
 import type { SeptumRepository } from '../core/database/repository.ts';
 import type { IngestionPipeline } from '../core/ingestion/pipeline.ts';
 import { ASTParserEngine } from '../core/parser/tree-sitter.ts';
@@ -22,6 +23,7 @@ export class WorkspaceWatcher {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private poll: ReturnType<typeof setInterval> | null = null;
   private flushing: Promise<void> | null = null;
+  private auditReconciliation?: Promise<void>;
   private closed = false;
   private reconcile = false;
   private lastVerify = 0;
@@ -63,7 +65,13 @@ export class WorkspaceWatcher {
     this.clearWatches();
     this.mode = 'polling';
     this.repo.setMeta('watcher_mode', 'polling');
-    console.error(`[Septum Watcher Warning] Using bounded polling: ${String(error)}`);
+    SeptumTelemetry.recordSystemEvent({
+      level: 'WARN',
+      component: 'watcher',
+      event: 'watcher_polling_fallback',
+      fields: { message: String(error).slice(0, 256) },
+      workspaceRoot: this.root,
+    });
   }
 
   private registerDirectories(): void {
@@ -133,6 +141,15 @@ export class WorkspaceWatcher {
     this.timer = setTimeout(() => { this.timer = null; void this.flush(false).catch(error => this.recordError(error)); }, RESOURCE_LIMITS.debounceMs);
   }
 
+  reconcileForAudit(): Promise<void> {
+    if (!this.auditReconciliation) {
+      this.auditReconciliation = this.flush(true).finally(() => {
+        this.auditReconciliation = undefined;
+      });
+    }
+    return this.auditReconciliation;
+  }
+
   async flush(forceVerify = true, signal?: AbortSignal): Promise<void> {
     if (this.closed) return;
     // Let already-ready FS notifications arrive before inspecting pending work.
@@ -172,13 +189,7 @@ export class WorkspaceWatcher {
           this.abort.signal.throwIfAborted();
           const target = resolve(this.root, filename);
           if (existsSync(target)) await this.pipeline.ingestFile(target, config);
-          else this.repo.runInTransaction(() => {
-            this.repo.deleteFileByPath(filename); this.repo.clearVerticalSlices(); this.repo.setMeta('slices_dirty', '1');
-            const unsupported: string[] = JSON.parse(this.repo.getMeta('unsupported_files') || '[]');
-            this.repo.setMeta('unsupported_files', JSON.stringify(unsupported.filter(path => path !== filename)));
-            const skipped: {path: string; reason: string}[] = JSON.parse(this.repo.getMeta('skipped_files') || '[]');
-            this.repo.setMeta('skipped_files', JSON.stringify(skipped.filter(file => file.path !== filename)));
-          });
+          else this.pipeline.removeFile(filename);
         }
       }
       if (sourceEvents || this.repo.getMeta('slices_dirty') === '1') await this.pipeline.run(config, {signal: this.abort.signal});

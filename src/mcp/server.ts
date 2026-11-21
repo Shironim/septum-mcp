@@ -1,24 +1,34 @@
-import { buildUnindexedCatalog } from "./tools/get-domain-catalog.ts";
+import { runWorkspaceBoundary } from "./workspace-boundary.ts";
+import { randomBytes } from "node:crypto";
+import { buildUnindexedCatalog } from "./tools/map.ts";
 import { WorkspaceManager, resolveServerWorkspace, isWorkspaceInitialized, type WorkspaceLease } from "./workspace-manager.ts";
 import { RESOURCE_LIMITS } from "../core/resources/limits.ts";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { ConfigLoader } from "../core/config/loader.ts";
-import { SeptumTelemetry } from "../core/telemetry/telemetry.ts";
-import { handleMapTool } from "./tools/map.ts";
-import { handleSymbolTool } from "./tools/symbol.ts";
-import { handleSliceTool } from "./tools/slice.ts";
-import { handleBoundaryTool } from "./tools/boundary.ts";
-import { DomainRootConflictError } from "../core/config/domain-ownership.ts";
-
 import {
-  parseToolRequest,
-} from "./schemas.ts";
+  getSeptumPrompt,
+  listSeptumPrompts,
+  listSeptumResources,
+  listSeptumResourceTemplates,
+  readSeptumResource,
+} from "./resources-and-prompts.ts";
+import { SeptumTelemetry, type ToolCallStage, type ToolResponse } from "../core/telemetry/telemetry.ts";
+import { SeptumError } from "../core/errors.ts";
+import { TOOL_CATALOG, parseToolRequest } from "./tool-catalog.ts";
 import { SEPTUM_VERSION, checkRuntimeVersion } from "../utils/version-check.ts";
+
+function explicitWorkspaceAlias(record: Record<string, unknown>): unknown {
+  return record.workspace_path ?? record.workspacePath ?? record.workspace ?? record.project_root ?? record.projectRoot;
+}
 
 export function extractPathHint(args: unknown): string | undefined {
   if (!args) return undefined;
@@ -39,14 +49,7 @@ export function extractPathHint(args: unknown): string | undefined {
   if (typeof args === "object" && args !== null) {
     const record = args as Record<string, any>;
 
-    const explicitWorkspace =
-      record.workspace_path ??
-      record.workspacePath ??
-      record.workspace ??
-      record.project_root ??
-      record.projectRoot ??
-      record.target_path ??
-      record.targetPath;
+    const explicitWorkspace = explicitWorkspaceAlias(record) ?? record.target_path ?? record.targetPath;
     if (typeof explicitWorkspace === "string" && explicitWorkspace.trim()) {
       return explicitWorkspace.trim();
     }
@@ -91,25 +94,16 @@ export function extractPathHint(args: unknown): string | undefined {
   return undefined;
 }
 
-function countLines(text: string): number {
-  let count = 1;
-  for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) === 10) count++;
-  }
-  return count;
-}
-
 export const SEPTUM_SERVER_INSTRUCTIONS = `Septum indexes supported declarations, imports, domain policies and static entrypoints.
 Guidelines for AI Coding Agents:
 1. CONTEXT: Call septum_symbol(action: 'context') for declaration source and supporting references. Deep TypeScript context uses budget_bytes and continuation; source inspection uses line limits. Read freshness, diagnostics and omissions, then inspect further source when needed.
 2. NAVIGATION: Call septum_map(action: 'catalog') for domain/file locations, import relationships, static entrypoints and index health.
 3. CONSUMERS: Before changing public contracts, inspect septum_symbol(action: 'impact') and relevant consumers. Import dependents and caller hints are incomplete static evidence; verify affected application behavior.
 4. ENTRYPOINTS: Call septum_slice(query: '<route|handler>') for catalog matches and related nodes. Matching confidence does not establish runtime reachability or execution order.
-5. BOUNDARIES: Call septum_boundary(scope: 'file', file_path: '...', proposed_imports: [...]) for candidate imports, or scope: 'all'/'domain'/'staged' for those audit scopes. Proposal approval does not audit existing imports. Unknown is not approval; approved describes only the evaluated static scope.`;
+5. BOUNDARIES: Call septum_boundary(scope: 'file', file_path: '...', proposed_imports: [...]) for candidate imports, or scope: 'all'/'domain'/'staged' for those audit scopes. Proposal approval does not audit existing imports. Unknown is not approval; approved describes only the evaluated static scope.
+6. RESOURCES & PROMPTS: Initial-workspace snapshots are available at septum://domains, septum://health, septum://boundaries, and septum://domain/{name}; workflow playbooks at prompts septum-pre-edit-check and septum-architecture-audit.`;
 
-export async function runMCPServer(): Promise<void> {
-  const manager = new WorkspaceManager();
-  void checkRuntimeVersion().catch(() => {});
+export function createMcpServer(manager: WorkspaceManager): Server {
 
   const server = new Server(
     {
@@ -119,422 +113,201 @@ export async function runMCPServer(): Promise<void> {
     {
       capabilities: {
         tools: {},
+        resources: {},
+        prompts: {},
       },
       instructions: SEPTUM_SERVER_INSTRUCTIONS,
     }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [
-        {
-          name: "septum_map",
-          description:
-            "Navigate architecture: workspace domains and cross-domain import adjacency, domain/file neighborhoods, static entrypoints and coverage. Output schema navigation/v1. Signatures, member lists and source belong to septum_symbol; full expands navigation only. Use file_filter to focus, include_evidence for one file's import details, or septum_slice for static handler relationships. Example: {action:'catalog',domain:'mcp'}.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              action: {
-                type: "string",
-                enum: ["catalog", "register"],
-                default: "catalog",
-                description: "Sub-operation to execute: 'catalog' (inspect domain/macro map) or 'register' (dynamically register bounded-context domain).",
-              },
-              domain: {
-                type: "string",
-                description: "Target domain name (e.g. 'orders', 'core'). If omitted in catalog action, returns project-wide Macro Semantic Map.",
-              },
-              detail_level: {
-                type: "string",
-                enum: ["compact", "full"],
-                default: "compact",
-                description: "Navigation extent: compact selects up to 40 files, full up to 100. Neither includes signatures or source; use septum_symbol for declaration inspection.",
-              },
-              archetype_filter: {
-                type: "string",
-                description: "Optional archetype filter (e.g. 'service', 'model', 'controller', 'repository').",
-              },
-              file_filter: {
-                type: "string",
-                description: "Optional substring filter to inspect specific file(s) within the domain.",
-              },
-              file_offset: { type: "integer", minimum: 0, description: "Start of the catalog file page; copy next_file_offset from pagination." },
-              file_limit: { type: "integer", minimum: 1, maximum: 100, description: "Optional navigation selection limit. Small scopes return together; pagination appears only when files remain." },
-              include_evidence: { type: "boolean", description: "Opt in to up to 20 raw import-evidence records; requires file_filter matching exactly one file." },
-              include_capabilities: { type: "boolean", description: "Opt in to language/parser capabilities; omitted from navigation by default." },
-              root: {
-                type: "string",
-                description: "Root directory path for domain registration (action='register').",
-              },
-              description: {
-                type: "string",
-                description: "Architectural purpose of the domain (action='register').",
-              },
-              allowed_dependencies: {
-                type: "array",
-                items: { type: "string" },
-                description: "List of domain names this domain is allowed to import (action='register').",
-              },
-              forbidden_dependencies: {
-                type: "array",
-                items: { type: "string" },
-                description: "List of domain names strictly forbidden from being imported (action='register').",
-              },
-              archetypes: {
-                type: "object",
-                description: "Layer archetypes mapping (action='register').",
-              },
-              ingest_now: {
-                type: "boolean",
-                default: false,
-                description: "Whether to immediately run AST ingestion on domain files upon registration.",
-              },
-              workspace_path: {
-                type: "string",
-                description: "Explicit workspace root path. Specifies the target project root in multi-root environments.",
-              },
-            },
-            required: [],
+  server.setRequestHandler(ListResourcesRequestSchema, async () => listSeptumResources());
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => listSeptumResourceTemplates());
+  server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => {
+    const traceId = randomBytes(16).toString("hex");
+    const startTime = performance.now();
+    const uri = request.params.uri;
+    return SeptumTelemetry.withTrace(traceId, async () => {
+      try {
+        const result = await readSeptumResource(manager, uri, extra.signal);
+        SeptumTelemetry.recordSystemEvent({
+          level: "INFO",
+          component: "resource",
+          event: "resource_read_completed",
+          fields: { uri: uri.slice(0, 128), duration_ms: Math.round(performance.now() - startTime) },
+          workspaceRoot: manager.initialRoot ?? null,
+          emitStderr: false,
+        });
+        return result;
+      } catch (error) {
+        SeptumTelemetry.recordSystemEvent({
+          level: "ERROR",
+          component: "resource",
+          event: "resource_read_failed",
+          fields: {
+            uri: uri.slice(0, 128),
+            duration_ms: Math.round(performance.now() - startTime),
+            message: (error instanceof Error ? error.message : String(error)).slice(0, 256),
           },
-        },
-        {
-          name: "septum_symbol",
-          description:
-            "Locate indexed declarations, retrieve source/contracts, or inspect potential consumers. action='context' (alias 'inspect') selects deep TypeScript references or bounded source inspection; read mode, freshness, diagnostics and omissions. action='impact' separates import dependents from supported static call sites and inferred caller hints; the caller set is incomplete. Use septum_map for domain/file navigation and septum_slice for static entrypoint context. Example: {action:'context',query:'handleOrder',file_path:'src/orders.ts'}.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              action: {
-                type: "string",
-                enum: ["locate", "context", "inspect", "impact"],
-                default: "locate",
-                description: "'locate' finds declarations; 'context' (or 'inspect') retrieves declaration source along with local/import-bound supporting declarations for TypeScript within budget_bytes, or bounded source for polyglot files; 'impact' reports static caller hints. Example: {action:'context',query:'submit',file_path:'src/submit.ts'}.",
-              },
-              query: {
-                type: "string",
-                description: "Symbol name, call syntax (e.g. 'OrderController::cancelOrder'), or search query.",
-              },
-              domain: {
-                type: "string",
-                description: "Optional domain filter (e.g. 'orders').",
-              },
-              file_path: {
-                type: "string",
-                description: "Exact indexed repository-relative file path. Use it to select one candidate when names are ambiguous.",
-              },
-              symbol_ref: {
-                type: "object",
-                description: "Declaration reference returned by locate or catalog. Stale indexed fingerprints are refused.",
-                properties: {
-                  file_path: { type: "string", minLength: 1 },
-                  language: { type: "string", minLength: 1 },
-                  name: { type: "string", minLength: 1 },
-                  kind: { type: "string", minLength: 1 },
-                  signature: { type: "string" },
-                  start_line: { type: "integer", minimum: 1 },
-                  end_line: { type: "integer", minimum: 1 },
-                  indexed_content_hash: { type: "string", minLength: 1 },
-                  container: { type: "string" },
-                  receiver: { type: "string" },
-                },
-                required: ["file_path", "language", "name", "kind", "signature", "start_line", "end_line", "indexed_content_hash"],
-              },
-              include_source: {
-                type: "boolean",
-                description: "Explicit true selects bounded source; explicit false selects declaration details without source. Omit for deep TypeScript context or default polyglot source. Source hashes must match disk.",
-              },
-              source_start_line: {
-                type: "number",
-                minimum: 1,
-                description: "First line to return within the selected symbol range.",
-              },
-              source_line_limit: {
-                type: "number",
-                minimum: 1,
-                maximum: 200,
-                description: "Select bounded source inspection with this line limit (capped at 200). Bounded mode uses 120 lines when omitted.",
-              },
-              context_mode: {
-                type: "string", enum: ["deep", "source"],
-                description: "Explicit context mode. deep selects referenced TypeScript declarations; source selects bounded source inspection. Omit for legacy automatic selection.",
-              },
-              include_dependencies: {
-                type: "boolean",
-                default: true,
-                description: "Whether to include injected dependencies and outbound calls.",
-              },
-              budget_bytes: {
-                type: "integer",
-                minimum: 2048,
-                maximum: 2097152,
-                default: 16384,
-                description: "For deep TypeScript context (including inspect alias): maximum UTF-8 bytes of the serialized MCP tool result, including evidence and continuation. Do not combine with bounded source options.",
-              },
-              continuation: {
-                type: "string",
-                minLength: 1,
-                maxLength: 4096,
-                description: "For action='context': copy the previous page token with the same target and budget.",
-              },
-              limit: {
-                type: "number",
-                description: "Maximum results to return for locate (default: 10).",
-              },
-              workspace_path: {
-                type: "string",
-                description: "Explicit workspace root path. Specifies the target project root in multi-root environments.",
-              },
-            },
-            required: [],
-          },
-        },
-        {
-          name: "septum_slice",
-          description:
-            "Match a supported static entrypoint and inspect related nodes with relationship evidence and diagnostics. Supports cataloged routes, handlers, jobs, CLI commands and events; results do not establish runtime execution order or complete reachability. Use septum_symbol for declarations and septum_boundary for import policy. Example: {query:'POST /orders/{id}/pay',max_depth:5} or {query:'OrderController@pay'}.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              query: {
-                type: "string",
-                description: "Route URI (e.g. 'POST /orders/{id}/pay'), action (e.g. 'OrderController@pay'), or high-level task intent.",
-              },
-              controller_file: {
-                type: "string",
-                minLength: 1,
-                description: "Exact catalog controller/handler file copied from an ambiguity candidate. Filters target selection.",
-              },
-              max_depth: {
-                type: "number",
-                default: 5,
-                minimum: 1,
-                maximum: 8,
-                description: "Maximum depth to trace (default: 5, min: 1, max: 8). Use 6-8 for deep Event/Job/Queue traces.",
-              },
-              workspace_path: {
-                type: "string",
-                description: "Explicit workspace root path. Specifies the target project root in multi-root environments.",
-              },
-            },
-            required: ["query"],
-          },
-        },
-        {
-          name: "septum_boundary",
-          description:
-            "Architectural firewall: validate proposed or staged imports against domain boundaries and circular dependency constraints. When to use: (1) scope='file' with proposed_imports BEFORE writing new import statements, (2) scope='staged' BEFORE git commit to prevent cross-domain leaks, (3) scope='all' or 'domain' for codebase audits. When NOT to use: do NOT use to read source code or locate symbols. Status 'approved' confirms zero violations; 'rejected' requires refactoring. Example: {scope:'file',file_path:'src/order/service.ts',proposed_imports:['../billing/repo']}.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              scope: {
-                type: "string",
-                enum: ["file", "staged", "all", "domain"],
-                default: "file",
-                description: "'file' evaluates proposed imports against domain policies; 'staged' audits git index changes; 'domain' checks a specific domain's violations; 'all' audits the entire workspace.",
-              },
-              file_path: {
-                type: "string",
-                description: "Path of the file being edited or created (scope='file' only). Use either file_path or file_paths.",
-              },
-              file_paths: {
-                type: "array",
-                items: { type: "string" },
-                description: "Non-empty list of file paths for batch proposed-import checks (scope='file' only).",
-              },
-              proposed_imports: {
-                type: "array",
-                items: { type: "string" },
-                description: "List of proposed import statements or target symbols (scope='file' only).",
-              },
-              domain: {
-                type: "string",
-                description: "Registered domain name, required for scope='domain'; optional for staged/file checks.",
-              },
-              staged: {
-                type: "boolean",
-                description: "Convenience flag equivalent to scope='staged'.",
-              },
-              workspace_path: {
-                type: "string",
-                description: "Explicit workspace root path. Specifies the target project root in multi-root environments.",
-              },
-            },
-            required: [],
-          },
-        },
-      ],
-    };
+          workspaceRoot: manager.initialRoot ?? null,
+          emitStderr: false,
+        });
+        throw error;
+      }
+    }, manager.initialRoot);
   });
+  server.setRequestHandler(ListPromptsRequestSchema, async () => listSeptumPrompts());
+  server.setRequestHandler(GetPromptRequestSchema, async (request) =>
+    getSeptumPrompt(request.params.name, request.params.arguments)
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: TOOL_CATALOG.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+  }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
     const startTime = performance.now();
-    let lease: WorkspaceLease | undefined;
-    try {
-    extra?.signal?.throwIfAborted();
-    let parsed;
-    try { parsed = parseToolRequest(name, args); }
-    catch (error) { throw new Error(`[Septum Validation Error] Invalid arguments for ${name}: ${error instanceof Error ? error.message : String(error)}`); }
-    const record = parsed.args;
-    const raw = (args ?? {}) as Record<string, any>;
-    const workspacePath = record.workspace_path ?? raw.workspace_path ?? raw.workspacePath ?? raw.workspace ?? raw.project_root ?? raw.projectRoot;
-    const knownRoots = manager.activeRoots;
-    if (manager.initialRoot && !knownRoots.includes(manager.initialRoot)) {
-      knownRoots.unshift(manager.initialRoot);
-    }
-    const fallbackRoot = manager.initialRoot || manager.lastRoot;
-    const root = resolveServerWorkspace({
-      workspacePath,
-      filePath: workspacePath ? undefined : extractPathHint(args),
-      fallbackRoot,
-      knownRoots,
-    });
-
-    if (!isWorkspaceInitialized(root)) {
-      if (name === "septum_map" && (!("action" in record) || !record.action || record.action === "catalog")) {
-        const runtimeVersion = await checkRuntimeVersion();
-        const diagnostic = buildUnindexedCatalog(root, runtimeVersion);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(diagnostic, null, 2),
-            },
-          ],
-          metadata: diagnostic,
-          runtime_version: runtimeVersion,
-        };
-      }
-      const isRegistration = name === "septum_map" && "action" in record && record.action === "register";
-      if (!isRegistration) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `[Septum MCP Error] Workspace '${root}' belum diinisialisasi. Jalankan 'septum init' di terminal workspace atau gunakan tool 'septum_map' dengan action='register' untuk mendaftarkan domain.`,
-            },
-          ],
-        };
-      }
-    }
-
-    extra?.signal?.throwIfAborted();
-    const isDomainRegistration = parsed.name === "septum_map" && parsed.args.action === "register";
-    lease = manager.acquire(root, { deferDiscovery: isDomainRegistration });
-    const ctx = lease.context;
-    await ctx.ready;
-    extra?.signal?.throwIfAborted();
-    const registrationBeforeDiscovery = isDomainRegistration && Object.keys(ctx.config.domains).length === 0 && ctx.repo.getAllDomains().length === 0;
-    try { if (!registrationBeforeDiscovery) await ctx.watcher.flush(false, extra?.signal); }
-    catch (error) { if (!isDomainRegistration || !(error instanceof DomainRootConflictError)) throw error; }
-    if (ctx.repo.getMeta("sync_error") && !(isDomainRegistration && ctx.repo.getMeta("sync_error_code") === "DOMAIN_ROOT_CONFLICT")) {
-      throw new Error(`Workspace index synchronization failed: ${ctx.repo.getMeta("sync_error")}`);
-    }
-    ctx.config = ConfigLoader.load(undefined, ctx.root);
-    // External policy writes do not emit source watcher events. Keep this cheap
-    // ownership gate independent of full reconciliation and target JIT refresh.
-    if (!isDomainRegistration) ctx.pipeline.assertDomainOwnership(ctx.config, ctx.root);
-    ctx.evaluator.getResolver().setRepository(ctx.repo);
-
-    const executeTool = async () => {
-      switch (parsed.name) {
-        case "septum_map": return handleMapTool(ctx.repo, ctx.config, parsed.args, ctx.root, extra?.signal);
-        case "septum_symbol": return handleSymbolTool(ctx.repo, ctx.config, parsed.args, ctx.pipeline, ctx.root, extra?.signal);
-        case "septum_slice": return handleSliceTool(ctx.repo, ctx.config, parsed.args, ctx.root, extra?.signal);
-        case "septum_boundary": return handleBoundaryTool(ctx.evaluator, ctx.config, parsed.args, ctx.repo, ctx.root);
-      }
+    const deadline = AbortSignal.timeout(RESOURCE_LIMITS.requestTimeoutMs);
+    const signal = AbortSignal.any([extra.signal, deadline]);
+    const traceId = randomBytes(16).toString("hex");
+    let stage: ToolCallStage = "validation";
+    let root: string | undefined;
+    let action: string | undefined;
+    const tool = TOOL_CATALOG.some(entry => entry.name === name) ? name : "unknown";
+    const finish = <T extends ToolResponse>(response: T, error?: Error): T => {
+      const code = error instanceof SeptumError ? error.code : undefined;
+      SeptumTelemetry.recordToolResponse({
+        trace_id: traceId,
+        stage: extra.signal.aborted ? "cancelled" : deadline.aborted ? "timeout" : stage,
+        tool,
+        action,
+        duration_ms: Math.round(performance.now() - startTime),
+        input: root ? args ?? {} : {},
+        error: error ? { code, message: root ? error.message : "Tool execution failed.", stack: root ? error.stack : undefined } : undefined,
+      }, response, root ?? manager.initialRoot ?? null, root !== undefined);
+      return response;
     };
 
-    try {
-      const response = await manager.runTool(executeTool, extra?.signal);
-      const durationMs = Math.round(performance.now() - startTime);
+    const progressToken = request.params._meta?.progressToken;
+    const reportProgress = (progress: number, message: string) => {
+      if (progressToken === undefined || signal.aborted) return;
+      void extra.sendNotification({
+        method: "notifications/progress",
+        params: { progressToken, progress, message },
+      }).catch(() => {});
+    };
 
-      let bytesOut = 0;
-      let linesOut = 0;
-      let combinedText = "";
-      if (Array.isArray(response?.content)) {
-        for (const item of response.content) {
-          if (typeof item.text === "string") {
-            bytesOut += Buffer.byteLength(item.text, "utf8");
-            linesOut += countLines(item.text);
-            if (combinedText.length < 1500) {
-              combinedText += item.text;
-            }
-          }
+    return SeptumTelemetry.withTrace(traceId, async () => {
+      let lease: WorkspaceLease | undefined;
+      try {
+      signal.throwIfAborted();
+      let parsed;
+      try { parsed = parseToolRequest(name, args); }
+      catch (error) { throw new Error(`[Septum Validation Error] Invalid arguments for ${name}: ${error instanceof Error ? error.message : String(error)}`); }
+      const record = parsed.args;
+      action = parsed.name === "septum_map" || parsed.name === "septum_symbol"
+        ? parsed.args.action
+        : parsed.name === "septum_boundary" ? parsed.args.scope : undefined;
+      stage = "workspace";
+      const rawWorkspace = args && typeof args === "object" ? explicitWorkspaceAlias(args as Record<string, unknown>) : undefined;
+      const workspacePath = record.workspace_path ?? (typeof rawWorkspace === "string" ? rawWorkspace : undefined);
+      const knownRoots = manager.activeRoots;
+      if (manager.initialRoot && !knownRoots.includes(manager.initialRoot)) {
+        knownRoots.unshift(manager.initialRoot);
+      }
+      const fallbackRoot = manager.initialRoot || manager.lastRoot;
+      root = resolveServerWorkspace({
+        workspacePath,
+        filePath: workspacePath ? undefined : extractPathHint(args),
+        fallbackRoot,
+        knownRoots,
+      });
+
+      if (!isWorkspaceInitialized(root)) {
+        if (name === "septum_map" && (!("action" in record) || !record.action || record.action === "catalog")) {
+          const runtimeVersion = await checkRuntimeVersion();
+          const diagnostic = buildUnindexedCatalog(root, runtimeVersion);
+          return finish({
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(diagnostic, null, 2),
+              },
+            ],
+            metadata: diagnostic,
+            runtime_version: runtimeVersion,
+          });
+        }
+        const isRegistration = name === "septum_map" && "action" in record && record.action === "register";
+        if (!isRegistration) {
+          return finish({
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `[Septum MCP Error] Workspace '${root}' belum diinisialisasi. Jalankan 'septum init' di terminal workspace atau gunakan tool 'septum_map' dengan action='register' untuk mendaftarkan domain.`,
+              },
+            ],
+          });
         }
       }
 
-      const inputArgs = (args as Record<string, any>) ?? {};
-      const actionName = typeof inputArgs.action === "string" ? inputArgs.action : (typeof inputArgs.scope === "string" ? inputArgs.scope : undefined);
-      const estimatedTokens = Math.round(bytesOut / 4);
-      const bloatAlert = bytesOut >= SeptumTelemetry.BLOAT_BYTE_THRESHOLD;
-      const outputDigest = SeptumTelemetry.createOutputDigest(combinedText);
-      let outcome: string | undefined;
-      try {
-        const payload = JSON.parse(combinedText);
-        const candidate = payload.status ?? (payload.found === false ? "not_found" : undefined);
-        if (["success", "partial", "unknown", "approved", "rejected", "ambiguous", "not_found", "NOT_INDEXED", "stale_reference", "invalid_context_options", "budget_too_small"].includes(candidate)) outcome = candidate;
-      } catch { /* Non-JSON results retain transport status only. */ }
-
-      SeptumTelemetry.recordToolCall({
-        event: "tool_call_completed",
-        tool: name,
-        action: actionName,
-        duration_ms: durationMs,
-        input: inputArgs,
-        metrics: {
-          bytes_out: bytesOut,
-          lines_out: linesOut,
-          estimated_tokens: estimatedTokens,
-        },
-        bloat_alert: bloatAlert,
-        output_digest: outputDigest,
-        outcome,
-        session: null,
-        status: (response as { isError?: boolean } | undefined)?.isError ? "error" : "success",
-      }, ctx.root);
-
-      return response;
-    } catch (err) {
-      const durationMs = Math.round(performance.now() - startTime);
-      const errorInstance = err instanceof Error ? err : new Error(String(err));
-      const inputArgs = (args as Record<string, any>) ?? {};
-      const actionName = typeof inputArgs.action === "string" ? inputArgs.action : (typeof inputArgs.scope === "string" ? inputArgs.scope : undefined);
-
-      SeptumTelemetry.recordToolCall({
-        event: "tool_call_failed",
-        tool: name,
-        action: actionName,
-        duration_ms: durationMs,
-        input: inputArgs,
-        session: null,
-        status: "error",
-        error: {
-          message: errorInstance.message,
-          stack: errorInstance.stack,
-        },
-      }, ctx.root);
-
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `[Septum MCP Error] ${errorInstance.message}`,
-          },
-        ],
+      signal.throwIfAborted();
+      const isDomainRegistration = parsed.name === "septum_map" && parsed.args.action === "register";
+      reportProgress(1, "Preparing workspace");
+      lease = manager.acquire(root, { deferDiscovery: isDomainRegistration });
+      const onSync = () => reportProgress(2, "Checking index freshness");
+      const onAudit = () => {
+        stage = "execution";
+        reportProgress(3, "Running tool");
       };
-    }
+      const response = parsed.name === "septum_boundary" && parsed.args.scope !== "staged" && !parsed.args.staged
+        ? await runWorkspaceBoundary(manager, lease.context, parsed.args, {
+          signal, onSync, onAudit, onRetry: () => reportProgress(4, "Reconciling stale index before retrying audit"),
+        })
+        : await manager.runInWorkspace(lease.context, prepared => {
+          onAudit();
+          return parsed.execute(prepared, signal);
+        }, { signal, isDomainRegistration, onSync });
+      return finish(response);
     } catch (error) {
-      return {isError: true, content: [{type: "text" as const, text: `[Septum MCP Error] ${error instanceof Error ? error.message : String(error)}`}]};
-    } finally { lease?.release(); }
+      const failure = error instanceof Error ? error : new Error(String(error));
+      return finish({
+        isError: true,
+        content: [{ type: "text" as const, text: `[Septum MCP Error] ${failure.message}` }],
+        metadata: { trace_id: traceId },
+      }, failure);
+    } finally {
+      lease?.release();
+    }
+    }, manager.initialRoot);
   });
 
+  return server;
+}
+
+export async function runMCPServer(): Promise<void> {
+  const initialRoot = resolveServerWorkspace({ initial: true });
+  const manager = new WorkspaceManager();
+  manager.initialRoot = initialRoot;
+  manager.lastRoot = initialRoot;
+  const server = createMcpServer(manager);
   const transport = new StdioServerTransport();
+  void checkRuntimeVersion().catch(() => {});
 
   let stopping = false;
   let memoryTimer: ReturnType<typeof setInterval> | undefined;
+  const closeResources = async () => {
+    process.off("SIGINT", cleanup);
+    process.off("SIGTERM", cleanup);
+    process.stdin.off("end", cleanup);
+    process.stdin.off("close", cleanup);
+    try {
+      await server.close();
+    } finally {
+      await manager.close();
+    }
+  };
   const cleanup = () => {
     if (stopping) return;
     stopping = true;
@@ -545,8 +318,7 @@ export async function runMCPServer(): Promise<void> {
     }, RESOURCE_LIMITS.shutdownMs);
     void (async () => {
       try {
-        await server.close();
-        await manager.close();
+        await closeResources();
         clearTimeout(deadline);
         console.error("[Septum MCP] All workspace resources closed cleanly.");
         process.exit(0);
@@ -562,15 +334,13 @@ export async function runMCPServer(): Promise<void> {
   process.stdin.once("end", cleanup);
   process.stdin.once("close", cleanup);
   server.onclose = cleanup;
-  await server.connect(transport);
   try {
-    const initialRoot = resolveServerWorkspace({initial:true});
-    manager.initialRoot = initialRoot;
-    manager.lastRoot = initialRoot;
+    await server.connect(transport);
     if (isWorkspaceInitialized(initialRoot)) {
       const initial = manager.acquire(initialRoot);
       try { await initial.context.ready; } finally { initial.release(); }
     }
+    if (stopping) return;
     if (process.env.SEPTUM_MEMORY_DIAGNOSTICS === "1") {
       memoryTimer = setInterval(() => {
         const sample = { ...process.memoryUsage(), workspaces: manager.size, watches: manager.watchCount, pending_paths: manager.pendingPaths, sync_duration_ms: manager.syncDurationMs };
@@ -583,7 +353,9 @@ export async function runMCPServer(): Promise<void> {
       memoryTimer.unref();
     }
   } catch (error) {
-    await manager.close();
+    if (stopping) return;
+    stopping = true;
+    await closeResources();
     throw error;
   }
 
