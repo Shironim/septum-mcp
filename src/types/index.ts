@@ -15,6 +15,11 @@ export type ArchetypeKind =
   | "route"
   | "util"
   | "view"
+  | "config"
+  | "parser"
+  | "resolver"
+  | "pipeline"
+  | "server"
   | "unknown";
 
 export type SymbolKind =
@@ -58,6 +63,7 @@ export interface CheckBoundaryArgs {
   proposed_imports?: string[];
   scope?: "file" | "all" | "staged" | "domain";
   domain?: string;
+  format?: "json" | "text";
   workspace_path?: string;
 }
 
@@ -265,6 +271,8 @@ export interface NavigationEntrypoint {
 
 export interface ExecutionChainNode {
   relationship?: { kind: "imports" | "declares" | "member_of" | "calls" | "route_binding" | "schema_binding"; derivation: "source" | "inferred"; source?: { file: string; line: number; statement?: string }; reason: string };
+  parent_symbol?: string;
+  depth?: number;
 
   stage:
     | "ingress"
@@ -361,7 +369,9 @@ export interface GetSymbolArgs {
   include_source?: boolean;
   source_start_line?: number;
   source_line_limit?: number;
+  budget_bytes?: number;
   semantic_depth?: number;
+  format?: "json" | "text";
   workspace_path?: string;
 }
 
@@ -412,6 +422,7 @@ export interface GetSymbolImpactArgs {
   query?: string;
   file_path?: string;
   symbol_ref?: SymbolReference;
+  format?: "json" | "text";
   workspace_path?: string;
 }
 
