@@ -1,25 +1,12 @@
-import { analyzeSymbolImpact } from "../../resolver/symbol-impact.ts";
-import { assertPathContained } from "../../resolver/path-resolver.ts";
-import { ImportResolver } from "../../resolver/import-resolver.ts";
-import { readSourceFile } from "../../resources/source-files.ts";
-import { computeContentHash } from "../../ingestion/hasher.ts";
-import { getLanguageCapability } from "../../parser/language-capabilities.ts";
-import type { ImportRelationship } from "../../../types/index.ts";
-import { posix, resolve, sep } from "node:path";
 import type { Database } from "bun:sqlite";
+import type { DependencyQueryStore } from "../../resolver/dependency-analysis.ts";
+import type { IndexedDependency } from "../../resolver/import-evidence.ts";
 import type {
   ExtractedDependency,
-  FileConnectionsSummary,
-  GetSymbolImpactResponse,
-  SymbolReference,
   VerticalSliceRecord,
 } from "../../../types/index.ts";
 
-function escapeRegExp(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-export class DependencyRepository {
+export class DependencyRepository implements DependencyQueryStore {
   constructor(private db: Database) {}
 
   public replaceFileDependencies(fileId: number, deps: ExtractedDependency[]): void {
@@ -70,29 +57,33 @@ export class DependencyRepository {
           existing.id
         );
     } else {
-      this.db
-        .query(
-          `INSERT INTO vertical_slices (
-            domain_id, feature_key, http_method, route_uri, route_name,
-            controller_class, action_name, controller_file, controller_line,
-            architecture_style, entry_kind, execution_chain_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          slice.domain_id,
-          slice.feature_key,
-          slice.http_method,
-          slice.route_uri,
-          slice.route_name,
-          slice.controller_class,
-          slice.action_name,
-          slice.controller_file,
-          slice.controller_line,
-          slice.architecture_style ?? "clean",
-          slice.entry_kind ?? "http_route",
-          slice.execution_chain_json
-        );
+      this.insertVerticalSlice(slice);
     }
+  }
+
+  public insertVerticalSlice(slice: Omit<VerticalSliceRecord, "id" | "created_at">): void {
+    this.db
+      .query(
+        `INSERT INTO vertical_slices (
+          domain_id, feature_key, http_method, route_uri, route_name,
+          controller_class, action_name, controller_file, controller_line,
+          architecture_style, entry_kind, execution_chain_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        slice.domain_id,
+        slice.feature_key,
+        slice.http_method,
+        slice.route_uri,
+        slice.route_name,
+        slice.controller_class,
+        slice.action_name,
+        slice.controller_file,
+        slice.controller_line,
+        slice.architecture_style ?? "clean",
+        slice.entry_kind ?? "http_route",
+        slice.execution_chain_json
+      );
   }
 
   public findVerticalSlices(searchTerm: string): VerticalSliceRecord[] {
@@ -132,14 +123,7 @@ export class DependencyRepository {
     }
   }
 
-  public getAllDependenciesWithDomains(sourceFile?: string): Array<{
-    source_file: string;
-    source_domain: string;
-    line_number: number;
-    target: string;
-    statement: string;
-    is_external: boolean;
-  }> {
+  public getAllDependenciesWithDomains(sourceFile?: string): IndexedDependency[] {
     const query = `
       SELECT 
         f.path AS source_file,
@@ -154,341 +138,128 @@ export class DependencyRepository {
       ${sourceFile === undefined ? "" : "WHERE f.path = ?"}
       ORDER BY d.name, f.path, dep.line_number
     `;
-    return this.db.query<any, string[]>(query).all(...(sourceFile === undefined ? [] : [sourceFile]));
+    return this.db.query<IndexedDependency, string[]>(query).all(...(sourceFile === undefined ? [] : [sourceFile]));
   }
 
-  public getImportRelationships(workspaceRoot?: string, sourceFile?: string): ImportRelationship[] {
-    const root = workspaceRoot ?? this.db.query<{ value: string }, [string]>("SELECT value FROM repo_meta WHERE key = ?").get("workspace_root")?.value;
-    if (!root) return [];
-    const files = this.db.query<{ path: string; content_hash: string; domain_id: number }, string[]>(
-      `SELECT path, content_hash, domain_id FROM files ${sourceFile === undefined ? "" : "WHERE path = ?"}`
-    ).all(...(sourceFile === undefined ? [] : [sourceFile]));
-    const domains = this.db.query<{ name: string; root_path: string }, []>("SELECT name, root_path FROM domains").all().sort((a,b)=>b.root_path.length-a.root_path.length);
-    const resolver = new ImportResolver(root, domains.map(domain => domain.root_path));
-    const freshness = new Map<string, ImportRelationship["freshness"]>();
-    const hashes = new Map(files.map(f => [f.path, f.content_hash]));
-    return this.getAllDependenciesWithDomains(sourceFile).map(dep => {
-      if (!freshness.has(dep.source_file)) {
-        try { assertPathContained(dep.source_file, root, "Import source"); freshness.set(dep.source_file, computeContentHash(readSourceFile(resolve(root,dep.source_file))) === hashes.get(dep.source_file) ? "current" : "stale"); }
-        catch { freshness.set(dep.source_file,"unavailable"); }
-      }
-      const resolution = resolver.resolve(dep.target,dep.source_file,dep.statement);
-      const current = freshness.get(dep.source_file)!;
-      if (current !== "current") { resolution.status = "unresolved"; resolution.reason = `source_${current}`; resolution.targets = []; }
-      const targetDomains = resolution.targets.flatMap(target => target.files.map(file => domains.find(domain => {
-        const targetPath = resolve(root,file), domainPath = resolve(root,domain.root_path);
-        return targetPath === domainPath || targetPath.startsWith(domainPath + sep);
-      })?.name).filter((name): name is string => !!name));
-      return {
-        kind: "imports", derivation: "source",
-        source: { file: dep.source_file, line: dep.line_number, statement: dep.statement, indexed_content_hash: hashes.get(dep.source_file) ?? "" },
-        resolution, target_domains: [...new Set(targetDomains)], freshness: current,
-        index_coverage: resolution.targets.every(target => target.files.every(file => hashes.has(file) ||
-          (sourceFile !== undefined && !!this.db.query("SELECT 1 FROM files WHERE path = ?").get(file)) || !getLanguageCapability(file))) ? "complete" : "partial",
-        ...(dep.source_file.endsWith(".go") ? { import_binding: (() => {
-          const alias = dep.statement.replace(/^\s*import\s+/, "").match(/^\s*([A-Za-z_]\w*|\.)\s+["`]/)?.[1];
-          return { kind: alias === "_" ? "blank" : alias === "." ? "dot" : alias ? "named" : "default", alias };
-        })() } : {}),
-        ...(dep.source_file.endsWith(".py") ? { import_binding: (() => {
-          if (/^\s*from\s+.*\s+import\s+\*/.test(dep.statement)) return { kind: "star" };
-          const asMatch = dep.statement.match(/\bas\s+([A-Za-z_]\w*)\s*$/);
-          return { kind: asMatch ? "named" : "default", alias: asMatch?.[1] };
-        })() } : {}),
-      };
-    });
+  public getWorkspaceRootMeta(): string | undefined {
+    return this.db.query<{ value: string }, [string]>("SELECT value FROM repo_meta WHERE key = ?").get("workspace_root")?.value;
   }
 
-  public getDomainFileConnections(domainId?: number, workspaceRoot?: string): Map<string, FileConnectionsSummary> {
-    const root = workspaceRoot ?? this.db.query<{ value: string }, [string]>("SELECT value FROM repo_meta WHERE key = ?").get("workspace_root")?.value;
-    if (root) {
-      const files = this.db.query<{ path: string; domain_id: number }, []>("SELECT path, domain_id FROM files").all();
-      const edges = this.getImportRelationships(root);
-      return new Map(files.filter(f => domainId === undefined || f.domain_id === domainId).map(file => {
-        const imports = edges.filter(edge => edge.source.file === file.path && edge.resolution.status === "resolved").flatMap(edge => edge.resolution.targets.flatMap(target => target.files));
-        const inbound = edges.filter(edge => edge.resolution.status === "resolved" && edge.resolution.targets.some(target => target.files.includes(file.path))).map(edge => edge.source.file);
-        return [file.path, { imports_from: [...new Set(imports)].sort(), imported_by: [...new Set(inbound)].sort(), imported_by_count: new Set(inbound).size }];
-      }));
-    }
-    const allFiles = this.db
-      .query<{ id: number; domain_id: number; path: string }, []>(
-        "SELECT id, domain_id, path FROM files ORDER BY path ASC"
+  public getIndexedFilesForEvidence(sourceFile?: string): Array<{ path: string; content_hash: string; domain_id: number }> {
+    return this.db
+      .query<{ path: string; content_hash: string; domain_id: number }, string[]>(
+        `SELECT path, content_hash, domain_id FROM files ${sourceFile === undefined ? "" : "WHERE path = ?"} ORDER BY path ASC`
       )
+      .all(...(sourceFile === undefined ? [] : [sourceFile]));
+  }
+
+  public getDomainsForEvidence(): Array<{ name: string; root_path: string }> {
+    return this.db.query<{ name: string; root_path: string }, []>("SELECT name, root_path FROM domains").all();
+  }
+
+  public hasIndexedFile(path: string): boolean {
+    return Boolean(this.db.query("SELECT 1 FROM files WHERE path = ?").get(path));
+  }
+
+  public getAllFileSummaries(): Array<{ id: number; domain_id: number; path: string }> {
+    return this.db
+      .query<{ id: number; domain_id: number; path: string }, []>("SELECT id, domain_id, path FROM files ORDER BY path ASC")
       .all();
+  }
 
-    const fileById = new Map<number, { id: number; domain_id: number; path: string }>();
-    const fileByNormPath = new Map<string, string>();
-    const fileByNoExtPath = new Map<string, string>();
-
-    for (const f of allFiles) {
-      const norm = f.path.replace(/\\/g, "/").replace(/^\.\//, "");
-      fileById.set(f.id, { ...f, path: norm });
-      fileByNormPath.set(norm.toLowerCase(), f.path);
-      const noExt = norm.replace(/\.[^/.]+$/, "").toLowerCase();
-      fileByNoExtPath.set(noExt, f.path);
-      if (noExt.endsWith("/index")) {
-        fileByNoExtPath.set(noExt.slice(0, -"/index".length), f.path);
-      }
-    }
-
-    const resolveInternalTarget = (sourcePath: string, rawTarget: string): string | null => {
-      const cleaned = rawTarget.trim().replace(/^['"]|['"]$/g, "").replace(/\\/g, "/");
-      if (!cleaned) return null;
-
-      if (cleaned.startsWith(".")) {
-        const srcDir = posix.dirname(sourcePath.replace(/\\/g, "/"));
-        const joined = posix.normalize(posix.join(srcDir, cleaned)).replace(/^\.\//, "");
-        const lowerJoined = joined.toLowerCase();
-        const exact = fileByNormPath.get(lowerJoined) ?? fileByNoExtPath.get(lowerJoined.replace(/\.[^/.]+$/, ""));
-        if (exact) return exact;
-      }
-
-      const aliasClean = cleaned.replace(/^@\//, "src/").replace(/^\.\//, "");
-      const lowerAlias = aliasClean.toLowerCase();
-      const byAlias = fileByNormPath.get(lowerAlias) ?? fileByNoExtPath.get(lowerAlias.replace(/\.[^/.]+$/, ""));
-      if (byAlias) return byAlias;
-
-      for (const [noExt, origPath] of fileByNoExtPath.entries()) {
-        if (noExt.endsWith(`/${lowerAlias}`)) {
-          return origPath;
-        }
-      }
-      return null;
-    };
-
-    const importsFromMap = new Map<string, Set<string>>();
-    const importedByMap = new Map<string, Set<string>>();
-    for (const f of allFiles) {
-      importsFromMap.set(f.path, new Set());
-      importedByMap.set(f.path, new Set());
-    }
-
-    const allInternalDeps = this.db
+  public getAllInternalDependencyTargets(): Array<{ source_file_id: number; target_symbol_or_path: string }> {
+    return this.db
       .query<{ source_file_id: number; target_symbol_or_path: string }, []>(
         "SELECT source_file_id, target_symbol_or_path FROM dependencies WHERE is_external = 0"
       )
       .all();
-
-    for (const dep of allInternalDeps) {
-      const srcFile = fileById.get(dep.source_file_id);
-      if (!srcFile) continue;
-      const resolvedTarget = resolveInternalTarget(srcFile.path, dep.target_symbol_or_path);
-      if (resolvedTarget && resolvedTarget !== srcFile.path) {
-        importsFromMap.get(srcFile.path)?.add(resolvedTarget);
-        if (!importedByMap.has(resolvedTarget)) {
-          importedByMap.set(resolvedTarget, new Set());
-        }
-        importedByMap.get(resolvedTarget)?.add(srcFile.path);
-      }
-    }
-
-    const result = new Map<string, FileConnectionsSummary>();
-    for (const f of allFiles) {
-      if (domainId !== undefined && f.domain_id !== domainId) continue;
-      const importsFrom = Array.from(importsFromMap.get(f.path) ?? []).sort();
-      const importedBy = Array.from(importedByMap.get(f.path) ?? []).sort();
-      result.set(f.path, {
-        imports_from: importsFrom,
-        imported_by_count: importedBy.length,
-        imported_by: importedBy,
-      });
-    }
-
-    return result;
   }
 
-  public getFileConnections(filePath: string, workspaceRoot?: string): FileConnectionsSummary {
-    const clean = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
-    const allConns = this.getDomainFileConnections(undefined,workspaceRoot);
-    return (
-      allConns.get(clean) ??
-      allConns.get(filePath) ?? {
-        imports_from: [],
-        imported_by_count: 0,
-        imported_by: [],
-      }
-    );
-  }
-
-  public getSymbolImpact(
-    symbolQuery: string,
-    options: { domain?: string; workspaceRoot?: string; filePath?: string; reference?: SymbolReference } = {}
-  ): GetSymbolImpactResponse {
-    const trimmed = symbolQuery.trim();
-    if (!trimmed) {
-      return {
-        target_symbol: symbolQuery,
-        found_in_index: false,
-        warning: "Empty symbol query provided.",
-        impact_summary: {
-          total_dependents: 0,
-          risk_level: "unknown",
-          affected_files_count: 0,
-        },
-        inbound_callers: [],
-      };
-    }
-
-    let targetContainer = trimmed;
-    let targetMethod = "";
-    if (trimmed.includes("::")) {
-      const parts = trimmed.split("::");
-      targetContainer = parts[0];
-      targetMethod = parts[1];
-    } else if (trimmed.includes("@")) {
-      const parts = trimmed.split("@");
-      targetContainer = parts[0];
-      targetMethod = parts[1];
-    }
-
-    // 1. Look up target symbol in symbols joined with files and optionally domains
-    let targetSymRows: Array<{
-      name: string;
-      kind: string;
-      line_start: number;
-      line_end: number;
-      file_path: string;
-      domain_name?: string | null;
-    }>;
-    if (targetMethod) {
-      let methodSql = `
-        SELECT s.name, s.kind, s.signature, s.line_start, s.line_end, f.path AS file_path, dom.name AS domain_name
-        FROM symbols s
-        JOIN files f ON s.file_id = f.id
-        LEFT JOIN domains dom ON f.domain_id = dom.id
-      `;
-      const methodParams: any[] = [];
-      if (options.domain) {
-        methodSql += ` WHERE LOWER(dom.name) = LOWER(?) AND `;
-        methodParams.push(options.domain);
-      } else {
-        methodSql += ` WHERE `;
-      }
-      methodSql += ` (s.name = ? OR s.name = ? OR (s.name = ? AND s.kind = 'method')) `;
-      methodParams.push(trimmed, `${targetContainer}::${targetMethod}`, targetMethod);
-      targetSymRows = this.db
-        .query<
-          {
-            name: string;
-            kind: string;
-            signature: string;
-            line_start: number;
-            line_end: number;
-            file_path: string;
-            domain_name?: string | null;
-          },
-          any[]
-        >(methodSql)
-        .all(...methodParams)
-        .filter(row => {
-          if (row.name !== targetMethod) return true;
-          // Go indexes bare method names; the receiver in its signature proves identity.
-          const receiver = row.signature.match(/^func\s*\(\s*(?:[A-Za-z_]\w*\s+)?\*?([A-Za-z_]\w*)(?:\[[^\]]+\])?\s*\)/);
-          return receiver?.[1] === targetContainer;
-        });
-
-      if (targetSymRows.length === 0) {
-        return {
-          target_symbol: trimmed,
-          found_in_index: false,
-          warning: `Symbol '${trimmed}' was not found in Septum index${options.domain ? ` for domain '${options.domain}'` : ""}. Method does not exist.`,
-          impact_summary: {
-            total_dependents: 0,
-            risk_level: "unknown",
-            affected_files_count: 0,
-          },
-          inbound_callers: [],
-        };
-      }
+  public findImpactMethodCandidates(
+    trimmed: string,
+    container: string,
+    method: string,
+    domain?: string
+  ): Array<{
+    name: string;
+    kind: string;
+    signature: string;
+    line_start: number;
+    line_end: number;
+    file_path: string;
+    domain_name?: string | null;
+  }> {
+    let sql = `
+      SELECT s.name, s.kind, s.signature, s.line_start, s.line_end, f.path AS file_path, dom.name AS domain_name
+      FROM symbols s
+      JOIN files f ON s.file_id = f.id
+      LEFT JOIN domains dom ON f.domain_id = dom.id
+    `;
+    const params: any[] = [];
+    if (domain) {
+      sql += ` WHERE LOWER(dom.name) = LOWER(?) AND `;
+      params.push(domain);
     } else {
-      let containerSql = `
-        SELECT s.name, s.kind, s.line_start, s.line_end, f.path AS file_path, dom.name AS domain_name
-        FROM symbols s
-        JOIN files f ON s.file_id = f.id
-        LEFT JOIN domains dom ON f.domain_id = dom.id
-      `;
-      const containerParams: any[] = [];
-      if (options.domain) {
-        containerSql += ` WHERE LOWER(dom.name) = LOWER(?) AND `;
-        containerParams.push(options.domain);
-      } else {
-        containerSql += ` WHERE `;
-      }
-      containerSql += ` (s.name = ? OR s.name = ? OR s.name LIKE ? OR s.name LIKE ?) `;
-      containerParams.push(trimmed, targetContainer, `${targetContainer}::%`, `%::${targetContainer}`);
-      targetSymRows = this.db
-        .query<
-          {
-            name: string;
-            kind: string;
-            line_start: number;
-            line_end: number;
-            file_path: string;
-            domain_name?: string | null;
-          },
-          any[]
-        >(containerSql)
-        .all(...containerParams);
-
-      if (targetSymRows.length === 0) {
-        return {
-          target_symbol: trimmed,
-          found_in_index: false,
-          warning: `Symbol '${trimmed}' was not found in Septum index${options.domain ? ` for domain '${options.domain}'` : ""}.`,
-          impact_summary: {
-            total_dependents: 0,
-            risk_level: "unknown",
-            affected_files_count: 0,
-          },
-          inbound_callers: [],
-        };
-      }
+      sql += ` WHERE `;
     }
+    sql += ` (s.name = ? OR s.name = ? OR (s.name = ? AND s.kind = 'method')) `;
+    params.push(trimmed, `${container}::${method}`, method);
+    return this.db.query<any, any[]>(sql).all(...params);
+  }
 
-    const targetFilePath = (options.filePath ?? options.reference?.file_path)?.replace(/\\/g, "/");
-    if (targetFilePath) {
-      targetSymRows = targetSymRows.filter((r) => r.file_path.replace(/\\/g, "/") === targetFilePath);
-      if (targetSymRows.length === 0) {
-        return {
-          target_symbol: trimmed,
-          found_in_index: false,
-          warning: `Symbol '${trimmed}' was not found in Septum index for file '${targetFilePath}'${options.domain ? ` in domain '${options.domain}'` : ""}.`,
-          impact_summary: {
-            total_dependents: 0,
-            risk_level: "unknown",
-            affected_files_count: 0,
-          },
-          inbound_callers: [],
-        };
-      }
+  public findImpactContainerCandidates(
+    trimmed: string,
+    container: string,
+    domain?: string
+  ): Array<{
+    name: string;
+    kind: string;
+    line_start: number;
+    line_end: number;
+    file_path: string;
+    domain_name?: string | null;
+  }> {
+    let sql = `
+      SELECT s.name, s.kind, s.line_start, s.line_end, f.path AS file_path, dom.name AS domain_name
+      FROM symbols s
+      JOIN files f ON s.file_id = f.id
+      LEFT JOIN domains dom ON f.domain_id = dom.id
+    `;
+    const params: any[] = [];
+    if (domain) {
+      sql += ` WHERE LOWER(dom.name) = LOWER(?) AND `;
+      params.push(domain);
+    } else {
+      sql += ` WHERE `;
     }
+    sql += ` (s.name = ? OR s.name = ? OR s.name LIKE ? OR s.name LIKE ?) `;
+    params.push(trimmed, container, `${container}::%`, `%::${container}`);
+    return this.db.query<any, any[]>(sql).all(...params);
+  }
 
-    const definingFiles = new Set<string>(
-      targetSymRows.map((r) => r.file_path.replace(/\\/g, "/"))
-    );
-    const domainByFile = new Map<string, string>();
-    for (const row of targetSymRows) if (row.domain_name) domainByFile.set(row.file_path.replace(/\\/g, "/"), row.domain_name);
-
-    const definingFileStems = Array.from(
-      new Set(
-        Array.from(definingFiles)
-          .map((p) => p.split("/").pop()?.replace(/\.[^.]+$/, "") || "")
-          .filter((s) => s.length >= 2)
-      )
-    );
-
-    // 2. Query dependencies matching targetContainer, trimmed, import_statement, or defining file stem
+  public queryDependenciesForImpact(patterns: {
+    container: string;
+    trimmed: string;
+    stems: string[];
+  }): Array<{
+    file: string;
+    line_number: number;
+    target_symbol_or_path: string;
+    import_statement: string;
+    domain_name?: string | null;
+  }> {
     const whereClauses: string[] = [
       "d.target_symbol_or_path LIKE ?",
       "d.import_statement LIKE ?",
       "d.target_symbol_or_path LIKE ?",
     ];
     const queryParams: string[] = [
-      `%${targetContainer}%`,
-      `%${targetContainer}%`,
-      `%${trimmed}%`,
+      `%${patterns.container}%`,
+      `%${patterns.container}%`,
+      `%${patterns.trimmed}%`,
     ];
 
-    for (const stem of definingFileStems) {
+    for (const stem of patterns.stems) {
       whereClauses.push("d.target_symbol_or_path LIKE ?");
       queryParams.push(`%${stem}%`);
     }
@@ -506,228 +277,102 @@ export class DependencyRepository {
       WHERE ${whereClauses.join(" OR ")}
       ORDER BY f.path ASC, d.line_number ASC
     `;
-    const rawDepRows = this.db.query<any, string[]>(depSql).all(...queryParams);
-
-    const isTargetedFile = Boolean(targetFilePath);
-    const matchesDefiningFile = (df: string, stmt: string, target: string): boolean => {
-      const normStmt = stmt.replace(/\\/g, "/");
-      const normTarget = target.replace(/\\/g, "/");
-      const clean = df.replace(/\.[^.]+$/, "");
-      const parts = clean.split("/");
-      const suffixes: string[] = [];
-      for (let i = 0; i < parts.length; i++) {
-        suffixes.push(parts.slice(i).join("/"));
-      }
-      return suffixes.some((s) => {
-        const escaped = escapeRegExp(s);
-        const r = new RegExp(`(?:^|[\\\\/\"\x27.@:])(?:${escaped})(?:$|[\\\\/\"\x27;:.()\\s]|\\.[^\\\\/]+)`, "i");
-        return r.test(normStmt) || r.test(normTarget);
-      });
-    };
-
-    const containerWordRegex = new RegExp(`\\b${escapeRegExp(targetContainer)}\\b`);
-    const depRows = rawDepRows.filter((row) => {
-      const normCallerFile = String(row.file).replace(/\\/g, "/");
-      if (row.domain_name) domainByFile.set(normCallerFile, String(row.domain_name));
-      if (definingFiles.has(normCallerFile)) return false;
-
-      const stmt = String(row.import_statement || "");
-      const target = String(row.target_symbol_or_path || "");
-
-      if (containerWordRegex.test(stmt) || containerWordRegex.test(target)) {
-        if (isTargetedFile) {
-          const matchesDefining = Array.from(definingFiles).some((df) => matchesDefiningFile(df, stmt, target));
-          if (!matchesDefining) {
-            return false;
-          }
-        }
-        return true;
-      }
-
-      // If no named specifier braces are present, accept path match against defining file stem
-      if (!stmt.includes("{")) {
-        for (const stem of definingFileStems) {
-          const stemRegex = new RegExp(`(?:^|[\\\\/])${escapeRegExp(stem)}(?:\\.[^\\\\/]+)?$`);
-          if (stemRegex.test(target)) {
-            return true;
-          }
-        }
-      }
-
-      return false;
-    });
-
-    // 2b. Discover same-directory / same-package files for languages with implicit package/namespace resolution (.go, .php, .java, .cs)
-    const implicitPackageFiles = new Set<string>();
-    const implicitLangDirs = new Set<string>();
-    for (const df of definingFiles) {
-      if (/\.(go|php|java|cs)$/i.test(df)) {
-        const dir = posix.dirname(df);
-        implicitLangDirs.add(dir === "." ? "" : dir);
-      }
-    }
-    if (implicitLangDirs.size > 0) {
-      const dirClauses: string[] = [];
-      const dirParams: string[] = [];
-      for (const dir of implicitLangDirs) {
-        if (dir === "") {
-          dirClauses.push("f.path NOT LIKE '%/%'");
-        } else {
-          dirClauses.push("(f.path LIKE ? AND SUBSTR(f.path, LENGTH(?) + 2) NOT LIKE '%/%')");
-          dirParams.push(`${dir}/%`, dir);
-        }
-      }
-      const pkgRows = this.db
-        .query<{ path: string; domain_name: string | null }, string[]>(
-          `SELECT f.path, dom.name AS domain_name
-           FROM files f
-           LEFT JOIN domains dom ON f.domain_id = dom.id
-           WHERE ${dirClauses.join(" OR ")}`
-        )
-        .all(...dirParams);
-      for (const r of pkgRows) {
-        const norm = r.path.replace(/\\/g, "/");
-        if (r.domain_name) domainByFile.set(norm, r.domain_name);
-        if (!definingFiles.has(norm) && /\.(go|php|java|cs)$/i.test(norm)) {
-          implicitPackageFiles.add(norm);
-        }
-      }
-    }
-
-    // 3. Batch-load all symbols for candidate caller files in ONE query (zero N+1)
-    const uniqueCallerFiles = Array.from(new Set(depRows.map((r) => String(r.file))));
-    const allSymbolLookupFiles = Array.from(
-      new Set([...uniqueCallerFiles, ...definingFiles, ...implicitPackageFiles])
-    );
-    const callerSymbolsByFile = new Map<
-      string,
-      Array<{ name: string; kind: string; signature: string; line_start: number; line_end: number }>
-    >();
-
-    if (allSymbolLookupFiles.length > 0) {
-      const placeholders = allSymbolLookupFiles.map(() => "?").join(",");
-      const allCallerSyms = this.db
-        .query<
-          { name: string; kind: string; signature: string; line_start: number; line_end: number; path: string },
-          string[]
-        >(
-          `SELECT s.name, s.kind, s.signature, s.line_start, s.line_end, f.path
-           FROM symbols s
-           JOIN files f ON s.file_id = f.id
-           WHERE f.path IN (${placeholders})
-           ORDER BY (s.line_end - s.line_start) ASC`
-        )
-        .all(...allSymbolLookupFiles);
-
-      for (const sym of allCallerSyms) {
-        const list = callerSymbolsByFile.get(sym.path) || [];
-        list.push(sym);
-        callerSymbolsByFile.set(sym.path, list);
-      }
-    }
-
-    return analyzeSymbolImpact({
-      query: trimmed, container: targetContainer, method: targetMethod,
-      targets: targetSymRows, dependencies: depRows, samePackageFiles: implicitPackageFiles,
-      symbolsByFile: callerSymbolsByFile, domainsByFile: domainByFile, workspaceRoot: options.workspaceRoot,
-    });
+    return this.db.query<any, string[]>(depSql).all(...queryParams);
   }
 
-  public getFileInboundImpact(filePath: string): {
-    direct_dependents_count: number;
-    top_consumers: string[];
-    symbols_count: number;
-    risk_level: "low" | "medium" | "high";
-  } {
-    const cleanPath = filePath.replace(/\\/g, "/");
-    const baseName = cleanPath.split("/").pop()?.replace(/\.[^.]+$/, "") || "";
+  public findSameDirectoryPackageFiles(dirs: string[]): Array<{ path: string; domain_name: string | null }> {
+    if (dirs.length === 0) return [];
+    const dirClauses: string[] = [];
+    const dirParams: string[] = [];
+    for (const dir of dirs) {
+      if (dir === "") {
+        dirClauses.push("f.path NOT LIKE '%/%'");
+      } else {
+        dirClauses.push("(f.path LIKE ? AND SUBSTR(f.path, LENGTH(?) + 2) NOT LIKE '%/%')");
+        dirParams.push(`${dir}/%`, dir);
+      }
+    }
+    return this.db
+      .query<{ path: string; domain_name: string | null }, string[]>(
+        `SELECT f.path, dom.name AS domain_name
+         FROM files f
+         LEFT JOIN domains dom ON f.domain_id = dom.id
+         WHERE ${dirClauses.join(" OR ")}`
+      )
+      .all(...dirParams);
+  }
 
-    const symbols = this.db
+  public findSymbolsForFiles(filePaths: string[]): Array<{
+    name: string;
+    kind: string;
+    signature: string;
+    line_start: number;
+    line_end: number;
+    path: string;
+  }> {
+    if (filePaths.length === 0) return [];
+    const placeholders = filePaths.map(() => "?").join(",");
+    return this.db
+      .query<
+        { name: string; kind: string; signature: string; line_start: number; line_end: number; path: string },
+        string[]
+      >(
+        `SELECT s.name, s.kind, s.signature, s.line_start, s.line_end, f.path
+         FROM symbols s
+         JOIN files f ON s.file_id = f.id
+         WHERE f.path IN (${placeholders})
+         ORDER BY (s.line_end - s.line_start) ASC`
+      )
+      .all(...filePaths);
+  }
+
+  public findFileSymbolNames(cleanPath: string): string[] {
+    return this.db
       .query<{ name: string }, [string, string]>(
         `SELECT s.name 
          FROM symbols s 
          JOIN files f ON s.file_id = f.id 
          WHERE f.path = ? OR f.path LIKE ?`
       )
-      .all(cleanPath, `%${cleanPath}`);
+      .all(cleanPath, `%${cleanPath}`)
+      .map((s) => s.name);
+  }
 
-    const matchedFiles = new Set<string>();
-    const relationships = this.getImportRelationships();
-    if (relationships.length > 0) {
-      for (const edge of relationships) {
-        if (edge.freshness !== "current" || edge.resolution.status !== "resolved") continue;
-        if (edge.source.file === cleanPath) continue;
-        if (edge.resolution.targets.some((t) => t.files.includes(cleanPath))) {
-          matchedFiles.add(edge.source.file);
-        }
-      }
-    } else {
-      const orConditions: string[] = [];
-      const params: string[] = [];
+  public queryDependenciesForFileInbound(
+    cleanPath: string,
+    baseName: string,
+    symbolNames: string[]
+  ): Array<{ file: string; target: string; stmt: string }> {
+    const orConditions: string[] = [];
+    const params: string[] = [];
 
-      if (baseName.length >= 3) {
+    if (baseName.length >= 3) {
+      orConditions.push("d.target_symbol_or_path LIKE ?");
+      params.push(`%${cleanPath}%`);
+      orConditions.push("d.target_symbol_or_path LIKE ?");
+      params.push(`%${baseName}%`);
+    }
+
+    for (const sym of symbolNames.slice(0, 8)) {
+      const symName = sym.split("::").pop() || sym;
+      if (symName.length >= 4) {
         orConditions.push("d.target_symbol_or_path LIKE ?");
-        params.push(`%${cleanPath}%`);
-        orConditions.push("d.target_symbol_or_path LIKE ?");
-        params.push(`%${baseName}%`);
-      }
-
-      for (const sym of symbols.slice(0, 8)) {
-        const symName = sym.name.split("::").pop() || sym.name;
-        if (symName.length >= 4) {
-          orConditions.push("d.target_symbol_or_path LIKE ?");
-          params.push(`%${symName}%`);
-          orConditions.push("d.import_statement LIKE ?");
-          params.push(`%${symName}%`);
-        }
-      }
-
-      if (orConditions.length > 0) {
-        params.push(`%${cleanPath}`);
-        const depRows = this.db
-          .query<{ file: string; target: string; stmt: string }, string[]>(
-            `SELECT DISTINCT f.path AS file, d.target_symbol_or_path AS target, d.import_statement AS stmt
-             FROM dependencies d
-             JOIN files f ON d.source_file_id = f.id
-             WHERE (${orConditions.join(" OR ")})
-               AND f.path NOT LIKE ?`
-          )
-          .all(...params);
-
-        const baseBoundary = baseName.length >= 3
-          ? new RegExp(`(?:^|[\\/\\\\.])${escapeRegExp(baseName)}(?:\\.[^.\\/\\\\]+)?$`, "i")
-          : null;
-        const symNames = symbols
-          .slice(0, 8)
-          .map((s) => s.name.split("::").pop() || s.name)
-          .filter((n) => n.length >= 4)
-          .map((n) => new RegExp(`\\b${escapeRegExp(n)}\\b`));
-
-        for (const row of depRows) {
-          const targetMatches =
-            row.target.includes(cleanPath) ||
-            (baseBoundary !== null && baseBoundary.test(row.target)) ||
-            symNames.some((re) => re.test(row.target) || re.test(row.stmt));
-          if (targetMatches) {
-            matchedFiles.add(row.file);
-          }
-        }
+        params.push(`%${symName}%`);
+        orConditions.push("d.import_statement LIKE ?");
+        params.push(`%${symName}%`);
       }
     }
 
-    const consumerList = Array.from(matchedFiles);
-    let riskLevel: "low" | "medium" | "high" = "low";
-    if (consumerList.length >= 5) {
-      riskLevel = "high";
-    } else if (consumerList.length >= 2) {
-      riskLevel = "medium";
-    }
-
-    return {
-      direct_dependents_count: consumerList.length,
-      top_consumers: consumerList.slice(0, 5),
-      symbols_count: symbols.length,
-      risk_level: riskLevel,
-    };
+    if (orConditions.length === 0) return [];
+    params.push(`%${cleanPath}`);
+    return this.db
+      .query<{ file: string; target: string; stmt: string }, string[]>(
+        `SELECT DISTINCT f.path AS file, d.target_symbol_or_path AS target, d.import_statement AS stmt
+         FROM dependencies d
+         JOIN files f ON d.source_file_id = f.id
+         WHERE (${orConditions.join(" OR ")})
+           AND f.path NOT LIKE ?`
+      )
+      .all(...params);
   }
 }

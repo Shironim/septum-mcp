@@ -97,31 +97,7 @@ export class ConfigLoader {
   }
 
   public static getDefaultConfig(): ValidatedSeptumConfig {
-    return {
-      version: "1.0",
-      settings: {
-        enforcement: "warn",
-        db_path: ".septum/septum.db",
-        ignore_patterns: [
-          "node_modules/**",
-          "vendor/**",
-          "dist/**",
-          "build/**",
-          "out/**",
-          "target/**",
-          "coverage/**",
-          ".venv/**",
-          "venv/**",
-          "__pycache__/**",
-          "tests/**",
-          "scripts/**",
-          "bin/**",
-          ".git/**",
-          ".septum/**",
-        ],
-      },
-      domains: {},
-    };
+    return SeptumConfigSchema.parse({});
   }
 
   public static loadFromRepository(repo: SeptumRepository): ValidatedSeptumConfig {

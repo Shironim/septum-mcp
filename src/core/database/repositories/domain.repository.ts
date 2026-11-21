@@ -9,6 +9,7 @@ import type {
   SymbolRecord,
 } from "../../../types/index.ts";
 import { DependencyRepository } from "./dependency.repository.ts";
+import { buildDomainFileConnections } from "../../resolver/dependency-analysis.ts";
 import { domainNameKey, domainRootIdentity, DomainRootConflictError } from "../../config/domain-ownership.ts";
 
 const CONTAINER_KINDS = new Set<SymbolKind>([
@@ -223,7 +224,7 @@ export class DomainRepository {
 
     // Batch compute file connections for the domain (zero N+1)
     const depRepo = new DependencyRepository(this.db);
-    const connectionsByPath = depRepo.getDomainFileConnections(domain.id,options?.workspaceRoot);
+    const connectionsByPath = buildDomainFileConnections(depRepo, domain.id, options?.workspaceRoot);
 
     for (const file of files) {
       const symbols = symbolsByFileId.get(file.id) ?? [];

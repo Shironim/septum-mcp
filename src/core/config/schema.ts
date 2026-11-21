@@ -1,5 +1,23 @@
 import { z } from "zod";
 
+export const DEFAULT_IGNORE_PATTERNS = [
+  "node_modules/**",
+  "vendor/**",
+  "dist/**",
+  "build/**",
+  "out/**",
+  "target/**",
+  "coverage/**",
+  ".venv/**",
+  "venv/**",
+  "__pycache__/**",
+  "tests/**",
+  "scripts/**",
+  "bin/**",
+  ".git/**",
+  ".septum/**",
+];
+
 export const DomainConfigSchema = z.object({
   root: z.string().min(1, "root path cannot be empty"),
   description: z.string().optional(),
@@ -12,47 +30,17 @@ export const SeptumConfigSchema = z.object({
   version: z.string().default("1.0"),
   settings: z
     .object({
-      enforcement: z.enum(["strict", "warn"]).default("strict"),
+      enforcement: z.enum(["strict", "warn"]).default("warn"),
       db_path: z.string().default(".septum/septum.db"),
       ignore_patterns: z
         .array(z.string())
-        .default([
-          "node_modules/**",
-          "vendor/**",
-          "dist/**",
-          "build/**",
-          "out/**",
-          "target/**",
-          "coverage/**",
-          ".venv/**",
-          "venv/**",
-          "__pycache__/**",
-          "tests/**",
-          "scripts/**",
-          "bin/**",
-          ".git/**",
-        ]),
+        .default(() => [...DEFAULT_IGNORE_PATTERNS]),
     })
-    .default({
-      enforcement: "strict",
+    .default(() => ({
+      enforcement: "warn" as const,
       db_path: ".septum/septum.db",
-      ignore_patterns: [
-        "node_modules/**",
-        "vendor/**",
-        "dist/**",
-        "build/**",
-        "out/**",
-        "target/**",
-        "coverage/**",
-        ".venv/**",
-        "venv/**",
-        "__pycache__/**",
-        "tests/**",
-        "scripts/**",
-        "bin/**",
-        ".git/**",
-      ],
-    }),
+      ignore_patterns: [...DEFAULT_IGNORE_PATTERNS],
+    })),
   domains: z.record(DomainConfigSchema).default({}),
 });
 

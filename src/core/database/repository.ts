@@ -41,6 +41,15 @@ import { DomainRepository } from "./repositories/domain.repository.ts";
 import { FileRepository } from "./repositories/file.repository.ts";
 import { MetaRepository } from "./repositories/meta.repository.ts";
 import { SymbolRepository } from "./repositories/symbol.repository.ts";
+import {
+  buildDomainFileConnections,
+  buildFileConnections,
+  buildFileInboundImpact,
+  buildImportEvidence,
+  buildImportRelationships,
+  buildSymbolImpact,
+} from "../resolver/dependency-analysis.ts";
+import { buildSymbolDetails } from "../retrieval/symbol-details.ts";
 
 export type DatabaseRepository = SeptumRepository;
 
@@ -249,6 +258,10 @@ export class SeptumRepository {
     this.dependencies.upsertVerticalSlice(slice);
   }
 
+  public insertVerticalSlice(slice: Omit<VerticalSliceRecord, "id" | "created_at">): void {
+    this.dependencies.insertVerticalSlice(slice);
+  }
+
   public findVerticalSlices(searchTerm: string): VerticalSliceRecord[] {
     return this.dependencies.findVerticalSlices(searchTerm);
   }
@@ -265,16 +278,20 @@ export class SeptumRepository {
     this.dependencies.clearVerticalSlices(domainId);
   }
 
+  public getImportEvidence(workspaceRoot: string, verifyFile?: (file: string) => boolean) {
+    return buildImportEvidence(this.dependencies, workspaceRoot, undefined, verifyFile);
+  }
+
   public getImportRelationships(workspaceRoot?: string, sourceFile?: string) {
-    return this.dependencies.getImportRelationships(workspaceRoot, sourceFile);
+    return buildImportRelationships(this.dependencies, workspaceRoot, sourceFile);
   }
 
   public getDomainFileConnections(domainId?: number, workspaceRoot?: string) {
-    return this.dependencies.getDomainFileConnections(domainId,workspaceRoot);
+    return buildDomainFileConnections(this.dependencies, domainId, workspaceRoot);
   }
 
   public getFileConnections(filePath: string, workspaceRoot?: string) {
-    return this.dependencies.getFileConnections(filePath,workspaceRoot);
+    return buildFileConnections(this.dependencies, filePath, workspaceRoot);
   }
 
   public getAllDependenciesWithDomains(): Array<{
@@ -319,18 +336,26 @@ export class SeptumRepository {
     return this.symbols.getFileWithDomain(filePath);
   }
 
+  public findConstructorSignature(fileId: number, classOwner: string): string | null {
+    return this.symbols.findConstructorSignature(fileId, classOwner);
+  }
+
+  public getInternalImportStatements(fileId: number): string[] {
+    return this.symbols.getInternalImportStatements(fileId);
+  }
+
   public getSymbolDetails(
     symbolQuery: string,
     options: SymbolSelectionOptions & { includeDependencies?: boolean; workspaceRoot?: string } = {}
   ): GetSymbolDetailsResponse | null {
-    return this.symbols.getSymbolDetails(symbolQuery, options);
+    return buildSymbolDetails(this, symbolQuery, options);
   }
 
   public getSymbolImpact(
     symbolName: string,
     options: { domain?: string; workspaceRoot?: string; filePath?: string; reference?: SymbolReference } = {}
   ): GetSymbolImpactResponse {
-    return this.dependencies.getSymbolImpact(symbolName, options);
+    return buildSymbolImpact(this.dependencies, symbolName, options);
   }
 
   public getFileInboundImpact(filePath: string): {
@@ -339,7 +364,7 @@ export class SeptumRepository {
     symbols_count: number;
     risk_level: "low" | "medium" | "high";
   } {
-    return this.dependencies.getFileInboundImpact(filePath);
+    return buildFileInboundImpact(this.dependencies, filePath);
   }
 
   // --- Metadata Methods ---

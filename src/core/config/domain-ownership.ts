@@ -1,16 +1,18 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { SeptumError } from "../errors.ts";
 
 // SQLite's built-in NOCASE/LOWER folds ASCII, not all Unicode case pairs.
 export function domainNameKey(name: string): string {
   return name.replace(/[A-Z]/g, letter => letter.toLowerCase());
 }
 
-export class DomainRootConflictError extends Error {
-  readonly code = "DOMAIN_ROOT_CONFLICT";
+export class DomainRootConflictError extends SeptumError {
   constructor(readonly owner: string, readonly contender: string, readonly root: string) {
-    super(`Domain root conflict: '${owner}' and '${contender}' both own '${root}'. Update the existing domain by name, or move one domain to a distinct root. Nested roots are allowed; no domains were merged or deleted.`);
-    this.name = "DomainRootConflictError";
+    super(
+      "DOMAIN_ROOT_CONFLICT",
+      `Domain root conflict: '${owner}' and '${contender}' both own '${root}'. Update the existing domain by name, or move one domain to a distinct root. Nested roots are allowed; no domains were merged or deleted.`
+    );
   }
 }
 

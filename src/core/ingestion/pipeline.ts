@@ -9,7 +9,7 @@ import { readSourceFile, SourceFileLimitError, type SkippedSourceFile, type Sour
 import { existsSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isPathContained, resolveWorkspaceRoot } from "../resolver/path-resolver.ts";
-import type { ParsedFileAST } from "../../types/index.ts";
+import type { ArchetypeKind, ParsedFileAST } from "../../types/index.ts";
 import type { ValidatedSeptumConfig } from "../config/schema.ts";
 import type { SeptumRepository } from "../database/repository.ts";
 import { detectArchetype } from "../parser/extractors/base.ts";
@@ -20,6 +20,7 @@ import { ModuleResolver } from "../resolver/module-resolver.ts";
 import { computeContentHash } from "./hasher.ts";
 import { assertUniqueDomainRoots, domainNameKey, DomainRootConflictError } from "../config/domain-ownership.ts";
 import { ConfigLoader } from "../config/loader.ts";
+import { SeptumTelemetry } from "../telemetry/telemetry.ts";
 
 export interface IngestionMetrics {
   domains_processed: number;
@@ -50,7 +51,8 @@ export class IngestionPipeline {
   }
 
   public async run(config: ValidatedSeptumConfig, options: { verifyContent?: boolean; rebuild?: boolean; signal?: AbortSignal } = {}): Promise<IngestionMetrics> {
-    this.repo.setMeta("workspace_root", this.resolveWorkspaceRoot(config, Object.values(config.domains)[0]?.root ?? "."));
+    const workspaceRoot = this.resolveWorkspaceRoot(config, Object.values(config.domains)[0]?.root ?? ".");
+    this.repo.setMeta("workspace_root", workspaceRoot);
     this.repo.setMeta("settings_json", JSON.stringify(config.settings));
     this.repo.setMeta("resolver_revision", RESOLVER_REVISION);
     this.repo.setMeta("sync_state", "running");
@@ -67,9 +69,38 @@ export class IngestionPipeline {
       this.repo.setMeta("sync_state", "complete");
       this.repo.setMeta("sync_error", "");
       this.repo.setMeta("sync_error_code", "");
+      SeptumTelemetry.recordSystemEvent({
+        level: "INFO",
+        component: "ingestion",
+        event: "ingestion_completed",
+        fields: {
+          state_previous: "running",
+          state_current: "complete",
+          files_scanned: result!.files_scanned,
+          files_updated: result!.files_updated,
+          files_skipped: result!.files_skipped,
+          parser_invocations: result!.parser_invocations,
+          duration_ms: result!.duration_ms,
+        },
+        workspaceRoot,
+        emitStderr: false,
+      });
       return result!;
     } catch (error) {
       this.recordSyncFailure(error);
+      SeptumTelemetry.recordSystemEvent({
+        level: "ERROR",
+        component: "ingestion",
+        event: "ingestion_failed",
+        fields: {
+          state_previous: "running",
+          state_current: "error",
+          error_code: error instanceof DomainRootConflictError ? error.code : undefined,
+          message: (error instanceof Error ? error.message : String(error)).slice(0, 256),
+        },
+        workspaceRoot,
+        emitStderr: false,
+      });
       throw error;
     }
   }
@@ -202,20 +233,8 @@ export class IngestionPipeline {
             } else this.repo.updateFileMetadataOnly(meta.id, meta.mtimeMs, meta.sizeBytes);
           }
 
-          if (pendingUpdates.length) this.repo.setMeta("slices_dirty", "1");
           for (const item of pendingUpdates) {
-            const fileId = this.repo.upsertFile(
-              domainId,
-              item.relPath,
-              item.archetype,
-              item.contentHash,
-              item.lineCount,
-              item.mtimeMs,
-              item.sizeBytes
-            );
-
-            this.repo.replaceFileSymbols(fileId, item.ast.symbols);
-            this.repo.replaceFileDependencies(fileId, item.ast.dependencies);
+            this.publishParsedFile(domainId, item);
 
             symbolsIndexed += item.ast.symbols.length;
             dependenciesIndexed += item.ast.dependencies.length;
@@ -321,8 +340,7 @@ export class IngestionPipeline {
         for (const [existingPath, existingRecord] of existingFilesMap.entries()) {
           if (existingRecord.domain_id === domainId && !activeRelPaths.has(existingPath)) {
             removedFiles++;
-            this.repo.setMeta("slices_dirty", "1");
-            this.repo.deleteFileByPath(existingPath);
+            this.removeIndexedFile(existingPath);
             existingFilesMap.delete(existingPath);
           }
         }
@@ -479,6 +497,49 @@ export class IngestionPipeline {
    * JIT single-file ingestion: quickly verifies and updates a single file's AST,
    * symbols, and dependencies in SQLite if its mtime or content hash has changed.
    */
+  /** Apply inside the caller's transaction after checking the source hash. */
+  private publishParsedFile(domainId: number, file: {
+    relPath: string;
+    archetype: ArchetypeKind;
+    contentHash: string;
+    lineCount: number;
+    mtimeMs: number;
+    sizeBytes: number;
+    ast: ParsedFileAST;
+  }): void {
+    const { relPath, archetype, contentHash, lineCount, mtimeMs, sizeBytes, ast } = file;
+    const fileId = this.repo.upsertFile(domainId, relPath, archetype, contentHash, lineCount, mtimeMs, sizeBytes);
+    this.repo.replaceFileSymbols(fileId, ast.symbols);
+    this.repo.replaceFileDependencies(fileId, ast.dependencies);
+    this.repo.setMeta("slices_dirty", "1");
+  }
+
+  private removeIndexedFile(path: string): void {
+    this.repo.deleteFileByPath(path);
+    this.repo.setMeta("slices_dirty", "1");
+  }
+
+  private updateFileDiagnostics(path: string, reason?: "file_too_large" | "unsupported"): void {
+    const skipped: SkippedSourceFile[] = JSON.parse(this.repo.getMeta("skipped_files") || "[]");
+    const unsupported: string[] = JSON.parse(this.repo.getMeta("unsupported_files") || "[]");
+    this.repo.setMeta("skipped_files", JSON.stringify([
+      ...skipped.filter(file => file.path !== path),
+      ...(reason === "file_too_large" ? [{ path, reason }] : []),
+    ]));
+    this.repo.setMeta("unsupported_files", JSON.stringify([
+      ...unsupported.filter(file => file !== path),
+      ...(reason === "unsupported" ? [path] : []),
+    ]));
+  }
+
+  public removeFile(path: string, reason?: "file_too_large" | "unsupported"): void {
+    this.repo.runInTransaction(() => {
+      this.removeIndexedFile(path);
+      this.repo.clearVerticalSlices();
+      this.updateFileDiagnostics(path, reason);
+    });
+  }
+
   public async ingestFile(targetFilePath: string, config: ValidatedSeptumConfig): Promise<boolean> {
     try { this.assertDomainOwnership(config, this.customWorkspaceRoot || resolveWorkspaceRoot()); }
     catch (error) { this.recordSyncFailure(error); throw error; }
@@ -518,13 +579,7 @@ export class IngestionPipeline {
     try { content = readSourceFile(fullPath); }
     catch (error) {
       if (!(error instanceof SourceFileLimitError)) throw error;
-      this.repo.runInTransaction(() => {
-        this.repo.deleteFileByPath(relPath);
-        this.repo.clearVerticalSlices();
-        this.repo.setMeta("slices_dirty", "1");
-        const skipped: SkippedSourceFile[] = JSON.parse(this.repo.getMeta("skipped_files") || "[]");
-        this.repo.setMeta("skipped_files", JSON.stringify([...skipped.filter(file => file.path !== relPath), {path: relPath, reason: "file_too_large"}]));
-      });
+      this.removeFile(relPath, "file_too_large");
       return false;
     }
     const currentHash = computeContentHash(content);
@@ -546,10 +601,7 @@ export class IngestionPipeline {
     const lineCount = content.split("\n").length;
     const ast = await this.parserEngine.parseFile(fullPath, content);
     if (ast.status === "unsupported") {
-      this.repo.deleteFileByPath(relPath);
-      const unsupported = new Set<string>(JSON.parse(this.repo.getMeta("unsupported_files") || "[]"));
-      unsupported.add(relPath);
-      this.repo.setMeta("unsupported_files", JSON.stringify([...unsupported]));
+      this.removeFile(relPath, "unsupported");
       return false;
     }
     if (ast.status === "degraded") throw new Error(`Cannot reliably index '${relPath}': parser is degraded. ${ast.diagnostics?.map(d => `${d.code}: ${d.message}`).join("; ") ?? ""}`);
@@ -565,23 +617,9 @@ export class IngestionPipeline {
     }
 
     this.repo.runInTransaction(() => {
-      const fileId = this.repo.upsertFile(
-        domainId,
-        relPath,
-        archetype,
-        currentHash,
-        lineCount,
-        mtimeMs,
-        sizeBytes
-      );
-      this.repo.replaceFileSymbols(fileId, ast.symbols);
-      this.repo.replaceFileDependencies(fileId, ast.dependencies);
+      this.publishParsedFile(domainId, { relPath, archetype, contentHash: currentHash, lineCount, mtimeMs, sizeBytes, ast });
       this.repo.clearVerticalSlices();
-      this.repo.setMeta("slices_dirty", "1");
-      const skipped: SkippedSourceFile[] = JSON.parse(this.repo.getMeta("skipped_files") || "[]");
-      this.repo.setMeta("skipped_files", JSON.stringify(skipped.filter(file => file.path !== relPath)));
-      const unsupported = JSON.parse(this.repo.getMeta("unsupported_files") || "[]") as string[];
-      this.repo.setMeta("unsupported_files", JSON.stringify(unsupported.filter(path => path !== relPath)));
+      this.updateFileDiagnostics(relPath);
     });
 
     return true;
