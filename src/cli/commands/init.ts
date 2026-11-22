@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { handleSyncCommand } from "./sync.ts";
+import { createSyncProgressReporter } from "./sync-progress.ts";
 import { TopologyDetector } from "../../core/discovery/topology-detector.ts";
 import { SeptumDatabase } from "../../core/database/client.ts";
 import { SeptumRepository } from "../../core/database/repository.ts";
@@ -91,8 +92,16 @@ export async function handleInitCommand(force: boolean = false): Promise<void> {
 
   // 4. Run initial codebase ingestion
   console.log("\x1b[36m◇\x1b[0m  Indexing codebase AST (Tree-Sitter) to build symbol table & dependency graph...");
+  const progressReporter = createSyncProgressReporter({ prefix: "\x1b[36m│\x1b[0m  " });
   try {
-    await handleSyncCommand({ workspaceRoot, dbPath, rebuild: true });
+    await handleSyncCommand({
+      workspaceRoot,
+      dbPath,
+      rebuild: true,
+      quiet: true,
+      onProgress: progressReporter.onProgress,
+    });
+    progressReporter.cleanup();
     console.log("\x1b[36m│\x1b[0m  \x1b[32m✓\x1b[0m AST indexing completed successfully.");
     console.log("\x1b[36m│\x1b[0m");
 
