@@ -31,6 +31,9 @@ jobs:
       - name: Compile Standalone Binaries
         run: bun run scripts/compile.ts
 
+      - name: Smoke Test Standalone MCP App
+        run: python3 tests/integration/standalone-mcp-app.py dist/septum-linux-x64
+
       - name: Generate Checksums
         working-directory: dist
         run: |

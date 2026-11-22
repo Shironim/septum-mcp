@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
+import appHtmlPath from "./ui/app.html" with { type: "file" };
 import type { WorkspaceManager } from "./workspace-manager.ts";
 import { isWorkspaceInitialized, resolveServerWorkspace } from "./workspace-manager.ts";
 import { handleGetDomainCatalog } from "./tools/map.ts";
@@ -185,6 +186,7 @@ function loadSeptumAppHtml(): string {
   const envPath = process.env.SEPTUM_APP_HTML?.trim();
   const candidates = [
     ...(envPath ? [resolve(envPath)] : []),
+    ...(typeof appHtmlPath === "string" ? [appHtmlPath] : []),
     resolve(import.meta.dir, "ui/app.html"),
     resolve(process.cwd(), "src/mcp/ui/app.html"),
   ];
