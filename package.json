@@ -21,19 +21,21 @@
     "sync": "bun run bin/septum.ts sync",
     "check": "bun run bin/septum.ts check",
     "test": "bun test",
-    "build": "bun build ./bin/septum.ts --compile --outfile dist/septum",
+    "build:ui": "bun run scripts/build-mcp-app.ts",
+    "build": "bun run build:ui && bun build ./bin/septum.ts --compile --outfile dist/septum",
     "compile:all": "bun run scripts/compile.ts",
     "typecheck": "tsc --noEmit",
     "test:integration": "python3 tests/integration/mcp-reliability.py",
     "postinstall": "bun run scripts/postinstall.ts || true"
   },
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^2.0.4",
     "@modelcontextprotocol/sdk": "^1.5.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "typescript": "^5.7.3",
     "web-tree-sitter": "^0.24.0",
     "yaml": "^2.7.0",
-    "zod": "^3.24.2",
-    "tree-sitter-wasms": "^0.1.13",
-    "typescript": "^5.7.3"
+    "zod": "^3.24.2"
   },
   "license": "MIT",
   "repository": {
