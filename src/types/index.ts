@@ -206,6 +206,7 @@ export interface BoundaryViolation {
   imported_target: string;
   rule: BoundaryViolationRule;
   message: string;
+  pre_existing?: boolean;
 }
 
 export interface FileConnectionsSummary {

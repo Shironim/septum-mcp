@@ -94,6 +94,7 @@ export async function registerDomainPolicy(
         policySource
       );
     }
+    repo.rebindFilesToDomain(stored.root_path || domainConfig.root, id);
     return id;
   }, true);
 

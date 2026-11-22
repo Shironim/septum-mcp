@@ -70,6 +70,7 @@ export class SymbolRepository {
     options: SymbolSelectionOptions = {}
   ): SymbolCandidate[] {
     const target = name.trim().replace(/\(\)$/, "");
+    if (!target) return [];
     const leaf = target.split(/::|->|[.#\\]/).pop() ?? target;
     let query = `SELECT s.*, f.path AS file_path, f.content_hash AS indexed_content_hash, d.name AS domain_name
       FROM symbols s JOIN files f ON s.file_id = f.id JOIN domains d ON f.domain_id = d.id
@@ -143,15 +144,25 @@ export class SymbolRepository {
     return files.map((file) => ({ file }));
   }
 
-  public getAllSymbolsWithFiles(): Array<SymbolRecord & { file_path: string }> {
+  public getAllSymbolsWithFiles(filter?: { domainId?: number; filePath?: string }): Array<SymbolRecord & { file_path: string }> {
+    const clauses = ["s.kind IN ('class', 'interface', 'trait', 'struct', 'enum', 'type', 'method', 'function', 'constant')"];
+    const params: Array<string | number> = [];
+    if (filter?.filePath) {
+      clauses.push("f.path = ?");
+      params.push(filter.filePath);
+    }
+    if (filter?.domainId !== undefined) {
+      clauses.push("f.domain_id = ?");
+      params.push(filter.domainId);
+    }
     const query = `
       SELECT s.*, f.path AS file_path
       FROM symbols s
       JOIN files f ON s.file_id = f.id
-      WHERE s.kind IN ('class', 'interface', 'trait', 'struct', 'enum', 'type', 'method', 'function', 'constant')
+      WHERE ${clauses.join(" AND ")}
       ORDER BY s.line_start ASC, s.name ASC
     `;
-    return this.db.query<SymbolRecord & { file_path: string }, []>(query).all();
+    return this.db.query<SymbolRecord & { file_path: string }, Array<string | number>>(query).all(...params);
   }
 
   public findSymbolWithDomain(symbolName: string): {

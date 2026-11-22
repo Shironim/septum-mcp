@@ -1,7 +1,7 @@
 export const RESOURCE_LIMITS = Object.freeze({
   workspaces: 4,
   workspaceIdleMs: 10 * 60_000,
-  watches: 2048,
+  watches: 8192,
   pendingPaths: 1000,
   debounceMs: 300,
   pollMs: 5000,

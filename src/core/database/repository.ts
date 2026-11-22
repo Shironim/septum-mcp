@@ -198,6 +198,10 @@ export class SeptumRepository {
     return this.files.deleteFilesNotInPaths(domainId, validPaths);
   }
 
+  public rebindFilesToDomain(rootPrefix: string, domainId: number): number {
+    return this.files.rebindFilesToDomain(rootPrefix, domainId);
+  }
+
   public deleteFile(path: string): void {
     this.files.deleteFile(path);
   }
@@ -243,8 +247,8 @@ export class SeptumRepository {
     return this.symbols.findContainers(containerName);
   }
 
-  public getAllSymbolsWithFiles(): Array<SymbolRecord & { file_path: string }> {
-    return this.symbols.getAllSymbolsWithFiles();
+  public getAllSymbolsWithFiles(filter?: { domainId?: number; filePath?: string }): Array<SymbolRecord & { file_path: string }> {
+    return this.symbols.getAllSymbolsWithFiles(filter);
   }
 
   // --- Dependency & Slice Methods ---
@@ -262,12 +266,20 @@ export class SeptumRepository {
     this.dependencies.insertVerticalSlice(slice);
   }
 
+  public insertVerticalSlices(slices: ReadonlyArray<Omit<VerticalSliceRecord, "id" | "created_at">>): void {
+    this.dependencies.insertVerticalSlices(slices);
+  }
+
   public findVerticalSlices(searchTerm: string): VerticalSliceRecord[] {
     return this.dependencies.findVerticalSlices(searchTerm);
   }
 
   public getAllVerticalSlices(): VerticalSliceRecord[] {
     return this.dependencies.getAllVerticalSlices();
+  }
+
+  public findExactVerticalSlices(rawQuery: string, controllerFile?: string): VerticalSliceRecord[] {
+    return this.dependencies.findExactVerticalSlices(rawQuery, controllerFile);
   }
 
   public countVerticalSlices(): number {

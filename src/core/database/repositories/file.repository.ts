@@ -114,4 +114,14 @@ export class FileRepository {
 
     return { file, domain };
   }
+
+  public rebindFilesToDomain(rootPrefix: string, domainId: number): number {
+    const normalized = rootPrefix.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+    if (!normalized || normalized === ".") return 0;
+    const result = this.db.run(
+      "UPDATE files SET domain_id = ? WHERE (path = ? OR path LIKE ? || '/%')",
+      [domainId, normalized, normalized]
+    );
+    return result.changes;
+  }
 }

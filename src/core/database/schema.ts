@@ -48,6 +48,7 @@ export const TABLE_STATEMENTS = [
     import_statement TEXT NOT NULL,
     line_number INTEGER NOT NULL DEFAULT 0,
     is_external BOOLEAN NOT NULL DEFAULT 0,
+    resolved_target_file TEXT,
     FOREIGN KEY (source_file_id) REFERENCES files(id) ON DELETE CASCADE
   );`,
 
@@ -86,6 +87,7 @@ export const INDEX_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);",
   "CREATE INDEX IF NOT EXISTS idx_dependencies_source ON dependencies(source_file_id);",
   "CREATE INDEX IF NOT EXISTS idx_dependencies_target ON dependencies(target_symbol_or_path);",
+  "CREATE INDEX IF NOT EXISTS idx_dependencies_resolved_target ON dependencies(resolved_target_file);",
   "CREATE INDEX IF NOT EXISTS idx_slices_route_uri ON vertical_slices(route_uri);",
   "CREATE INDEX IF NOT EXISTS idx_slices_route_name ON vertical_slices(route_name);",
   "CREATE INDEX IF NOT EXISTS idx_slices_controller ON vertical_slices(controller_class, action_name);",
@@ -113,6 +115,12 @@ export function initializeDatabaseSchema(db: Database): void {
 
   for (const tableSql of TABLE_STATEMENTS) {
     db.run(tableSql);
+  }
+
+  // Additive migration for existing v5 databases without resolved_target_file column
+  const depCols = db.query<{ name: string }, []>("PRAGMA table_info(dependencies);").all();
+  if (!depCols.some(col => col.name === "resolved_target_file")) {
+    db.run("ALTER TABLE dependencies ADD COLUMN resolved_target_file TEXT;");
   }
 
   for (const indexSql of INDEX_STATEMENTS) {

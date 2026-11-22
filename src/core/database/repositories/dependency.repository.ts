@@ -62,15 +62,20 @@ export class DependencyRepository implements DependencyQueryStore {
   }
 
   public insertVerticalSlice(slice: Omit<VerticalSliceRecord, "id" | "created_at">): void {
-    this.db
-      .query(
-        `INSERT INTO vertical_slices (
-          domain_id, feature_key, http_method, route_uri, route_name,
-          controller_class, action_name, controller_file, controller_line,
-          architecture_style, entry_kind, execution_chain_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
+    this.insertVerticalSlices([slice]);
+  }
+
+  public insertVerticalSlices(slices: ReadonlyArray<Omit<VerticalSliceRecord, "id" | "created_at">>): void {
+    if (slices.length === 0) return;
+    const stmt = this.db.query(
+      `INSERT INTO vertical_slices (
+        domain_id, feature_key, http_method, route_uri, route_name,
+        controller_class, action_name, controller_file, controller_line,
+        architecture_style, entry_kind, execution_chain_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const slice of slices) {
+      stmt.run(
         slice.domain_id,
         slice.feature_key,
         slice.http_method,
@@ -84,28 +89,87 @@ export class DependencyRepository implements DependencyQueryStore {
         slice.entry_kind ?? "http_route",
         slice.execution_chain_json
       );
+    }
   }
 
   public findVerticalSlices(searchTerm: string): VerticalSliceRecord[] {
     const term = searchTerm.trim();
-    const wild = `%${term}%`;
-    const query = `
-      SELECT * FROM vertical_slices
-      WHERE route_uri LIKE ?
-         OR route_name LIKE ?
-         OR controller_class LIKE ?
-         OR action_name LIKE ?
-         OR feature_key LIKE ?
-         OR execution_chain_json LIKE ?
-      ORDER BY id ASC
-    `;
-    return this.db.query<VerticalSliceRecord, [string, string, string, string, string, string]>(query).all(
-      wild, wild, wild, wild, wild, wild
-    );
+    const runQuery = (candidate: string) => {
+      const wild = `%${candidate}%`;
+      const query = `
+        SELECT * FROM vertical_slices
+        WHERE route_uri LIKE ?
+           OR route_name LIKE ?
+           OR controller_class LIKE ?
+           OR action_name LIKE ?
+           OR feature_key LIKE ?
+           OR execution_chain_json LIKE ?
+        ORDER BY id ASC
+      `;
+      return this.db.query<VerticalSliceRecord, [string, string, string, string, string, string]>(query).all(
+        wild, wild, wild, wild, wild, wild
+      );
+    };
+
+    const direct = runQuery(term);
+    if (direct.length > 0 || !term || term.includes("_")) return direct;
+
+    // Normalize PascalCase / camelCase queries (e.g. AppSetActive -> app_set_active)
+    const snake = term
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+      .toLowerCase();
+    if (snake !== term.toLowerCase()) {
+      return runQuery(snake);
+    }
+    return direct;
   }
 
   public getAllVerticalSlices(): VerticalSliceRecord[] {
     return this.db.query<VerticalSliceRecord, []>("SELECT * FROM vertical_slices ORDER BY id ASC").all();
+  }
+
+  public findExactVerticalSlices(rawQuery: string, controllerFile?: string): VerticalSliceRecord[] {
+    const trimmed = rawQuery.trim();
+    if (!trimmed) return [];
+    const fileFilter = controllerFile ? " AND controller_file = ?" : "";
+    const fileParams = controllerFile ? [controllerFile] : [];
+
+    const methodUri = trimmed.match(/^([A-Z][A-Z0-9-]*)\s+(\/[^\s]*)$/i);
+    if (methodUri) {
+      const httpMethod = methodUri[1]!.toUpperCase();
+      const uri = methodUri[2]!;
+      return this.db
+        .query<VerticalSliceRecord, string[]>(
+          `SELECT * FROM vertical_slices
+           WHERE route_uri = ? AND (UPPER(http_method) = ? OR UPPER(http_method) = 'ANY')${fileFilter}
+           ORDER BY id ASC`
+        )
+        .all(uri, httpMethod, ...fileParams);
+    }
+
+    if (trimmed.startsWith("/")) {
+      return this.db
+        .query<VerticalSliceRecord, string[]>(
+          `SELECT * FROM vertical_slices WHERE route_uri = ?${fileFilter} ORDER BY id ASC`
+        )
+        .all(trimmed, ...fileParams);
+    }
+
+    const ctrlAction = trimmed.match(/^([A-Za-z0-9_\\]+)(?:@|::)([A-Za-z0-9_]+)$/);
+    if (ctrlAction) {
+      return this.db
+        .query<VerticalSliceRecord, string[]>(
+          `SELECT * FROM vertical_slices WHERE controller_class = ? AND action_name = ?${fileFilter} ORDER BY id ASC`
+        )
+        .all(ctrlAction[1]!, ctrlAction[2]!, ...fileParams);
+    }
+
+    return this.db
+      .query<VerticalSliceRecord, string[]>(
+        `SELECT * FROM vertical_slices WHERE route_name = ?${fileFilter} ORDER BY id ASC`
+      )
+      .all(trimmed, ...fileParams);
   }
 
   public countVerticalSlices(): number {

@@ -32,6 +32,8 @@ export class SeptumDatabase {
     this.db.run("PRAGMA busy_timeout = 5000;");
     this.db.run("PRAGMA foreign_keys = ON;");
     this.db.run("PRAGMA synchronous = NORMAL;");
+    this.db.run("PRAGMA temp_store = MEMORY;");
+    this.db.run("PRAGMA cache_size = -16000;");
   }
 
   private initSchema(): void {
