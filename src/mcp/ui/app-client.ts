@@ -5,6 +5,7 @@ import {
   applyHostStyleVariables,
 } from "@modelcontextprotocol/ext-apps";
 import { z } from "zod";
+import { version } from "../../../package.json" with { type: "json" };
 
 type AnyRecord = Record<string, any>;
 type TabKind = "map" | "slice" | "boundary";
@@ -43,7 +44,7 @@ const DEFAULT_ASK_PROMPT: Record<TabKind, string> = {
   boundary: "Analyze this Septum boundary audit and suggest remediations:",
 };
 
-const app = new App({ name: "Septum Architecture", version: "0.4.0" });
+const app = new App({ name: "Septum Architecture", version });
 
 let currentTab: TabKind = "map";
 let activeWorkspace: string | undefined;
