@@ -10,7 +10,7 @@ Common selectors are `query` (alias `symbol`), `domain`, `file_path`, `symbol_re
 {"action":"locate","query":"OrderController::store"}
 ```
 
-The locator parses supported PHP-style undefined-method errors, Python missing-attribute errors, class/member syntax (`::`, `->`, `.`) and bare names. Fuzzy suggestions prioritize exact camelCase/snake_case word-boundary token matches ahead of Damerau-Levenshtein edit similarity, combined with prefix/substring signals. Suggestions are candidates, not confirmed declarations.
+The locator parses supported PHP-style undefined-method errors, Python missing-attribute errors, class/member syntax (`::`, `->`, `.`) and bare names. On fuzzy misses, `domain` and `file_path` filters are pushed down to SQLite and large candidate sets apply a 32-bit character-overlap bitmask prefilter before Damerau-Levenshtein scoring. Fuzzy suggestions prioritize exact camelCase/snake_case word-boundary token matches ahead of Damerau-Levenshtein edit similarity, combined with prefix/substring signals. Suggestions are candidates, not confirmed declarations.
 
 A successful response includes `found`, `file_path`, `container_name`, `exact_symbol`, `symbol_ref`, suggestions and sibling methods. The nested coordinates are:
 
@@ -50,7 +50,7 @@ In automatic source mode, the byte budget applies to `source_slice.text`. The ha
 
 For slices of at most 15 lines, or with `semantic_depth: 2`, the handler attempts one-hop delegated implementation expansion. It recognizes selected PHP, TypeScript/JavaScript, Python, Go, Rust (`Arc`/`Box`/`Rc`/`&`), static-call patterns, and same-file local helper calls, inferring dependency types from declarations or naming. Resolution is heuristic and can fail or select a similarly named target. The delegated text is not covered by the primary 120/200-line cap and is read using indexed coordinates without a separate delegated-target hash comparison. It must not be treated as a verified runtime callee.
 
-`include_source: false` returns declaration details and, when dependencies are enabled, injected dependencies/outbound-call inference instead of a source slice. Relationship and connected-file lists are compacted to at most 20 with omission counts. Source mode has no deep-context serialized byte guarantee.
+`include_source: false` returns declaration details and, when dependencies are enabled, injected dependencies/outbound-call inference and file-scoped import relationships (`row.file_path`) instead of a source slice. Relationship and connected-file lists are compacted to at most 20 with omission counts. Source mode has no deep-context serialized byte guarantee.
 
 ## Impact
 

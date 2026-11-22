@@ -37,7 +37,7 @@ Go workspace members and local replacements must remain inside the selected Sept
 
 Watchers reconcile on supported interpretation-input changes. The same input predicate materializes manifests/project files in frozen Git-index snapshots and broadens staged analysis when their bytes change. This includes requirements/lockfiles, Gemfile, Cargo/go files, Maven/Gradle and C# project inputs. Unsupported dynamic includes or build outputs are not generated on the user's behalf.
 
-Java/C# source scans are bounded but can inspect multiple files per import. Large-project latency and repeated scans across many imports have not been benchmarked by the regression suite. These paths have no cross-request retained resolution cache.
+Within a single batch evidence collection (`collectImportEvidence`), `ImportResolver` enables an ephemeral `batchCache` that reuses filesystem probes, manifest reads, JSON parses, and parsed Python manifest/lockfile dependencies (`pyproject.toml`, `poetry.lock`, etc.) and pre-computes longest-prefix domain roots. This cache is discarded immediately when the call returns; there is no cross-request retained resolution cache. Java/C# source scans are bounded but can inspect multiple files per import, and large-project latency across all languages has not been exhaustively benchmarked by the regression suite.
 
 ## Verification owners
 

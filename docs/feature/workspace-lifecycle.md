@@ -14,14 +14,14 @@ Registration updates the authoritative policy owner as described in [map](septum
 
 ## SQLite facts
 
-The database enables WAL, foreign keys, a 5-second busy timeout and `synchronous=NORMAL`. Its principal stored facts include:
+The database enables WAL, foreign keys, a 5-second busy timeout, `synchronous=NORMAL`, `temp_store=MEMORY` and a 16 MiB page cache (`cache_size=-16000`). Its principal stored facts include:
 
 | Table | Contents |
 | --- | --- |
 | `domains` | Root ownership and dependency policies |
 | `files` | Paths, content hashes, source metadata and archetypes |
 | `symbols` | Names, kinds, signatures and indexed line spans |
-| `dependencies` | Extracted import targets/statements and source lines |
+| `dependencies` | Extracted import targets/statements, source lines and indexed `resolved_target_file` column |
 | `vertical_slices` | Static entrypoint records and serialized chains |
 | `repo_meta` | Sync state, revisions, observed inputs and diagnostics |
 
@@ -31,9 +31,9 @@ These records are an index of supported static evidence, not authoritative appli
 
 The shared source inventory applies configured ignores, workspace containment and recognized-language filtering. Contained file symlinks are eligible; directory symlinks are not traversed. Recognized unsupported formats can generate diagnostics. Non-ENOENT scan/I/O errors propagate instead of becoming empty successful scans.
 
-Ingestion assigns source to registered domains, extracts declarations/imports and publishes the slice catalog. Semantic adapters can inspect eligible source outside domain roots. Duplicate physical roots are rejected; nested roots are supported by ownership resolution.
+Ingestion scans the workspace once, partitions files across registered domains in a single longest-prefix pass, extracts declarations/imports (using native Tree-Sitter `descendantsOfType` import queries for Python/TypeScript and zero-copy `content.slice` declaration headers across language extractors), and publishes the slice catalog. Semantic adapters can inspect eligible source outside domain roots. Duplicate physical roots are rejected; nested roots are supported by ownership resolution.
 
-Warm synchronization can skip parsing after metadata and content verification agree. Verification/rebuild options read content. Changed source is stored in bounded transactions after hashes are checked. One retry is allowed for the supported “source changed during synchronization” condition.
+Warm synchronization can skip parsing after metadata and content verification agree. Verification/rebuild options read content. Changed source is stored in bounded transactions after verifying file metadata (`size`, `mtimeMs`, `ctimeMs`, `ino`) and re-hashing only when metadata changed. Bulk rebuilds on repositories with 500 or more files automatically widen commit batches to 250 files / 4 MiB. One retry is allowed for the supported “source changed during synchronization” condition. `init` displays four sequential stage milestones (`Scanning files`, `Parsing code`, `Resolving refs & domains`, `Linking entrypoints & slices`) without inline timings; detailed per-stage timings (`scan_ms`, `parse_ms`, `commit_ms`, `slice_ms`) are written to `.septum/septum.log`.
 
 Synchronization records `running`, then `complete` or `error`, with error metadata. Earlier committed batches can remain after a later failure; there is no workspace-wide rollback guarantee. Oversized or unsupported files are recorded and constrain downstream analysis.
 
@@ -45,7 +45,7 @@ Supported manifest/project changes also trigger watcher reconciliation and are i
 
 Workspace resolution uses explicit `workspace_path`, supported environment roots, file hints and known/fallback roots. The manager rejects unsuitable roots such as the filesystem root, home directory and known app-host locations. Multi-project callers should supply explicit workspace paths.
 
-Contexts hold database, repository, parser pipeline, resolver and watcher state. Leases prevent eviction during active use. A bounded serial queue orders tool work. Watchers coalesce events, periodically verify content and fall back to polling when watch resources are exhausted. Query dispatch awaits readiness and flushes pending work, then reloads effective policy and checks ownership in the serial queue immediately before executing the tool.
+Contexts hold database, repository, parser pipeline, resolver and watcher state. Leases prevent eviction during active use. A bounded serial queue orders tool work. Watchers coalesce events, periodically verify content, rebuild the slice catalog directly when single-file ingestion marks `slices_dirty` (avoiding a full workspace rescan), and fall back to polling when watch resources are exhausted. Query dispatch awaits readiness and flushes pending work, then reloads effective policy and checks ownership in the serial queue immediately before executing the tool.
 
 Tool calls that provide an MCP progress token receive notifications for preparation, index freshness checks, and execution. A cancelled request can stop waiting for shared initialization or reconciliation. The workspace retains ownership of that work until it settles or the workspace closes.
 
@@ -55,13 +55,13 @@ The initial workspace comes from `SEPTUM_WORKSPACE_ROOT`, then `WORKSPACE_ROOT`,
 | --- | --- |
 | Cached workspaces | 4 |
 | Idle expiry | 10 minutes |
-| Watch budget | 2,048 |
+| Watch budget | 8,192 |
 | Pending watcher paths | 1,000 |
 | Event debounce | 300 ms |
 | Poll interval | 5 seconds |
 | Content verification interval | 60 seconds |
 | Source read limit per file | 2 MiB |
-| Ingestion batch limits | 50 files / 1 MiB |
+| Ingestion batch limits | 50 files / 1 MiB (250 files / 4 MiB on bulk rebuilds >= 500 files) |
 | Pending serial queue limit | 50 |
 | In-flight workspace request limit | 50 |
 | Cooperative MCP tool deadline | 120 seconds |

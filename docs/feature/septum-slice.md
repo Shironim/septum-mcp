@@ -16,7 +16,7 @@ This tool matches a query against a stored static entrypoint catalog and returns
 
 ## Query matching
 
-The tracer attempts method/URI, URI-only, named-route, trigger, controller/action, symbol and token-scored matching. Supported examples include:
+The tracer first attempts an exact indexed SQL lookup (`findExactVerticalSlices`) for literal `METHOD /uri`, `/uri`, `Controller@action`, `Controller::action` and named-route queries before falling back to full catalog scoring for parameterized URIs, omni-triggers, symbol matches and token-scored task intent. Supported examples include:
 
 - `POST /orders`, `/orders/{id}` and named routes.
 - `OrderController@store`, `OrderController::store` or a controller name.
@@ -47,7 +47,7 @@ Registration does not mean an adapter applies to every repository, nor that all 
 
 Generic extraction complements uncovered route files. Files already represented by an adapter are excluded from generic declarative-route extraction to avoid duplicate/unprefixed mounted routes. Uncovered controller files retain convention-based entrypoints when another file gains an adapter route. Generic TypeScript/JavaScript route discovery recognizes literal calls on unbound conventional router names in route modules. These calls and controller conventions carry inferred ingress evidence. Locally declared receivers require adapter recognition. The shared source inventory applies containment and ignore rules; semantic files can be outside registered domain roots.
 
-Both ingestion and query refresh use the shared slice-catalog publisher. Catalog inputs, filesystem observations, membership and adapter counts are tracked. Dirty/changed catalogs can be refreshed; extraction failure is surfaced rather than certifying a complete empty catalog. Stored generic chains are constructed to the supported maximum depth; query depth limits returned expansion.
+Both ingestion and query refresh use the shared slice-catalog publisher with bulk prepared SQLite inserts. All 12 semantic adapters use entrypoint-first discovery or fast text pre-filters (such as two-pass URLconf-to-view parsing in Django, route-call/decorator pre-filters in Express, NestJS, Fastify, Hono, Elysia, FastAPI, Flask, Symfony and Go) so non-routing files are not redundantly re-parsed. `CallGraphTracer` and `ImportCandidateResolver` load symbols, dependencies and import evidence lazily per visited file and compute outbound controller dependencies once per controller file rather than repeating BFS per method. Catalog inputs, filesystem observations, membership and adapter counts are tracked. Dirty/changed catalogs can be refreshed; extraction failure is surfaced rather than certifying a complete empty catalog. Stored generic chains are constructed to the supported maximum depth; query depth limits returned expansion.
 
 SQLite stores convention-based entries as `inferred_http_route`. The framework registration probe compares the remaining entries with its expected registrations. TypeScript handler binding uses the workspace import resolver, including supported `tsconfig.json` path aliases that resolve to one indexed source file.
 
