@@ -6,6 +6,7 @@ import selectors
 import subprocess
 import tempfile
 import time
+from urllib.parse import urlencode
 
 PROJECT = Path(__file__).resolve().parents[2]
 CLI = PROJECT / 'bin/septum.ts'
@@ -90,6 +91,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         resources = request('resources/list', {})['resources']
         assert {item['uri'] for item in resources} == {
             'septum://domains', 'septum://health', 'septum://boundaries',
+            'septum://apps', 'ui://septum/app.html',
         }, resources
         assert [entry['uriTemplate'] for entry in request('resources/templates/list', {})['resourceTemplates']] == ['septum://domain/{name}']
         domain_resource = request('resources/read', {'uri': 'septum://domain/orders'})
@@ -100,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
             'arguments': {'scope': 'all', 'max_bytes': 512, 'format': 'json'},
             '_meta': {'progressToken': 'boundary-test'},
         }, progress=progress)
-        assert len(json.dumps(bounded, ensure_ascii=False, separators=(',', ':')).encode()) <= 512
+        assert len(json.dumps(bounded, ensure_ascii=False, separators=(',', ':')).encode()) <= 512, bounded
         assert [item['progress'] for item in progress] == [1, 2, 3], progress
         assert all(item['progressToken'] == 'boundary-test' for item in progress)
         status = json.loads(bounded['content'][0]['text'])
@@ -112,7 +114,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         error = request('resources/read', {'uri': missing_uri}, expected_error=-32002)
         assert error['data']['uri'] == missing_uri, error
 
-        refactor_name = 'septum_refactor_plan'
+        refactor_name = 'plan-refactor'
         refactor_prompt = next(item for item in request('prompts/list', {})['prompts']
                                if item['name'] == refactor_name)
         assert any(arg['name'] == 'target' for arg in refactor_prompt['arguments']), refactor_prompt
@@ -223,7 +225,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         policy = discovered / 'septum.config.json'
         policy.write_text('{}')
 
-        prompt_name = 'septum_spaghetti_audit'
+        prompt_name = 'audit-coupling'
         listed = request('prompts/list', {})['prompts']
         prompt = next(entry for entry in listed if entry['name'] == prompt_name)
         assert {arg['name'] for arg in prompt['arguments']} == {'domain', 'workspace_path'}
@@ -245,11 +247,13 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         health_item = request('resources/read', {'uri': 'septum://health'})['contents'][0]
         assert health_item['mimeType'] == 'application/json', health_item
         health = json.loads(health_item['text'])
-        assert health['workspace_root'] == str(a.resolve()), health
+        assert health['workspace_root'] == str(discovered.resolve()), health
         assert health['domains_count'] == 2 and health['last_sync'], health
 
+        workspace_query = urlencode({'workspace': str(a)})
+
         def read_resource(name):
-            item = request('resources/read', {'uri': f'septum://{name}'})['contents'][0]
+            item = request('resources/read', {'uri': f'septum://{name}?{workspace_query}'})['contents'][0]
             return json.loads(item['text'])
 
         catalog = read_resource('domains')
@@ -274,10 +278,10 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         assert audit['status'] == 'rejected', audit
         assert any(item['rule'] == 'forbidden_dependency' and item['file'] == 'src/orders/Order.ts'
                    for item in audit['violations']), audit
-        assert audit == tool('septum_boundary', {'scope': 'all'})
+        assert audit == tool('septum_boundary', {'scope': 'all', 'workspace_path': str(a)})
 
         primary_config.write_text('{')
-        request('resources/read', {'uri': 'septum://boundaries'}, expected_error=-32603)
+        request('resources/read', {'uri': f'septum://boundaries?{workspace_query}'}, expected_error=-32603)
         primary_config.write_text(json.dumps(primary_policy))
         assert read_resource('boundaries')['status'] == 'rejected'
 

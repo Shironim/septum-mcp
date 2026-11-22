@@ -101,7 +101,7 @@ Guidelines for AI Coding Agents:
 3. CONSUMERS: Before changing public contracts, inspect septum_symbol(action: 'impact') and relevant consumers. Import dependents and caller hints are incomplete static evidence; verify affected application behavior.
 4. ENTRYPOINTS: Call septum_slice(query: '<route|handler>') for catalog matches and related nodes. Matching confidence does not establish runtime reachability or execution order.
 5. BOUNDARIES: Call septum_boundary(scope: 'file', file_path: '...', proposed_imports: [...]) for candidate imports, or scope: 'all'/'domain'/'staged' for those audit scopes. Proposal approval does not audit existing imports. Unknown is not approval; approved describes only the evaluated static scope.
-6. RESOURCES & PROMPTS: Initial-workspace snapshots are available at septum://domains, septum://health, septum://boundaries, septum://apps, and septum://domain/{name}; workflow playbooks at prompts septum_apps, septum_spaghetti_audit, septum_pre_commit_guard, septum_refactor_plan, and septum_trace_feature.`;
+6. RESOURCES & PROMPTS: Initial-workspace snapshots are available at septum://domains, septum://health, septum://boundaries, septum://apps, and septum://domain/{name}; workflow playbooks at prompts open-apps, audit-coupling, check-staged, plan-refactor, and trace-feature.`;
 
 export function createMcpServer(manager: WorkspaceManager): Server {
 
@@ -207,9 +207,11 @@ export function createMcpServer(manager: WorkspaceManager): Server {
           }
         }
         if (wantsStructured && structured && typeof structured === "object") {
+          const structuredRecord = structured as Record<string, unknown>;
           const withRoot =
-            root && !("workspace_root" in (structured as Record<string, unknown>))
-              ? { workspace_root: root, ...(structured as Record<string, unknown>) }
+            root && !("workspace_root" in structuredRecord) &&
+              structuredRecord.code !== "BUDGET_RESPONSE_TOO_LARGE"
+              ? { workspace_root: root, ...structuredRecord }
               : structured;
           if (withRoot !== record.structuredContent) {
             return {

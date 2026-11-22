@@ -41,7 +41,7 @@ export const TOOL_CATALOG = [
       },
     },
     description:
-      "Navigate architecture: workspace domains and cross-domain import adjacency, domain/file neighborhoods, static entrypoints and coverage. Output schema navigation/v1. Signatures, member lists and source belong to septum_symbol; full expands navigation only. Use file_filter to focus, include_evidence for one file's import details, or septum_slice for static handler relationships. Example: {action:'catalog',domain:'mcp'}.",
+      "Inspect workspace architecture or register domains. action='catalog' (default) returns domain topology, cross-domain import adjacency, file neighborhoods, static entrypoints, and index health. action='register' adds a bounded-context domain and optionally ingests it. Use file_filter to focus files, include_evidence=true for one file's import details, septum_symbol for declarations/source, or septum_slice for entrypoint traces. Example: {action:'catalog',domain:'mcp'}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -119,7 +119,7 @@ export const TOOL_CATALOG = [
     schema: SymbolToolSchema,
     execute: (ctx, args, signal) => handleSymbolTool(ctx.repo, ctx.config, args, ctx.pipeline, ctx.root, signal),
     description:
-      "Locate indexed declarations, retrieve source/contracts, or inspect potential consumers. action='context' (alias 'inspect') selects deep TypeScript references or bounded source inspection; read mode, freshness, diagnostics and omissions. action='impact' separates import dependents from supported static call sites and inferred caller hints; the caller set is incomplete. Use septum_map for domain/file navigation and septum_slice for static entrypoint context. Example: {action:'context',query:'handleOrder',file_path:'src/orders.ts'}.",
+      "Find indexed symbols, read declaration context/source, or check refactor impact. action='locate' (default) searches declarations by name or call syntax. action='context' (alias 'inspect') returns declaration source plus supporting TypeScript references (within budget_bytes) or bounded polyglot source; check freshness, diagnostics, and omissions in the result. action='impact' lists import dependents, static call sites, and inferred caller hints (incomplete static evidence). Use septum_map for domain/file navigation and septum_slice for entrypoints. Example: {action:'context',query:'handleOrder',file_path:'src/orders.ts'}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -228,7 +228,7 @@ export const TOOL_CATALOG = [
       ui: { resourceUri: SEPTUM_APP_URI },
     },
     description:
-      "Match a supported static entrypoint and inspect related nodes with relationship evidence and diagnostics. Supports cataloged routes, handlers, jobs, CLI commands and events; results do not establish runtime execution order or complete reachability. Use septum_symbol for declarations and septum_boundary for import policy. Example: {query:'POST /orders/{id}/pay',max_depth:5} or {query:'OrderController@pay'}.",
+      "Trace a cataloged static entrypoint (HTTP route, handler, job, CLI command, or event) to related nodes with relationship evidence and diagnostics. Static matches do not establish runtime execution order or complete reachability. Use septum_symbol for declarations and septum_boundary for import policy. Example: {query:'POST /orders/{id}/pay',max_depth:5} or {query:'OrderController@pay'}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -270,7 +270,7 @@ export const TOOL_CATALOG = [
       ui: { resourceUri: SEPTUM_APP_URI },
     },
     description:
-      "Architectural firewall: validate proposed or staged imports against domain boundaries and circular dependency constraints. When to use: (1) scope='file' with proposed_imports BEFORE writing new import statements, (2) scope='staged' BEFORE git commit to prevent cross-domain leaks, (3) scope='all' or 'domain' for codebase audits. When NOT to use: do NOT use to read source code or locate symbols. Status 'approved' confirms zero violations; 'rejected' requires refactoring. Example: {scope:'file',file_path:'src/order/service.ts',proposed_imports:['../billing/repo']}.",
+      "Validate proposed or staged imports against domain boundaries and circular-dependency rules. When to use: (1) scope='file' with proposed_imports BEFORE writing new import statements, (2) scope='staged' BEFORE git commit to catch cross-domain leaks, (3) scope='all' or 'domain' for codebase audits. When NOT to use: do NOT use to read source code or locate symbols. Status 'approved' confirms zero violations; 'rejected' requires refactoring. Example: {scope:'file',file_path:'src/order/service.ts',proposed_imports:['../billing/repo']}.",
     inputSchema: {
       type: "object",
       properties: {
