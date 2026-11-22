@@ -45,7 +45,11 @@ export class VerticalSliceTracer {
   // Synchronous compatibility API reads persisted slices only; use traceAsync for on-demand extraction.
   public trace(rawQuery: string, maxDepth: number = 5, controllerFile?: string): VerticalSliceTraceResponse {
     const effectiveMaxDepth = Math.min(Math.max(Math.trunc(maxDepth || 5), 1), 8);
-    const selection = selectSliceTarget(this.repo.getAllVerticalSlices(), rawQuery, effectiveMaxDepth, controllerFile);
+    const exactCandidates = typeof this.repo.findExactVerticalSlices === "function"
+      ? this.repo.findExactVerticalSlices(rawQuery, controllerFile)
+      : [];
+    const slices = exactCandidates.length > 0 ? exactCandidates : this.repo.getAllVerticalSlices();
+    const selection = selectSliceTarget(slices, rawQuery, effectiveMaxDepth, controllerFile);
     if ("record" in selection) {
       return this.formatSuccessResponse(selection.query, selection.record, selection.confidence, selection.alternatives, effectiveMaxDepth);
     }

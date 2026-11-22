@@ -53,13 +53,12 @@ export class CallGraphTracer {
   }
 
   /**
-   * Initializes internal fast lookup maps from SQLite repository data.
+   * Initializes file lookup maps from SQLite repository data.
+   * Symbols and dependencies are loaded lazily per file on demand to keep memory bounded on large repos.
    */
   public initMaps(): void {
     this.fileMapByNormPath.clear(); this.fileMapById.clear();
     this.symbolsByFileId.clear(); this.dependenciesByFileId.clear();
-    const allSymbolsWithFiles = this.repo.getAllSymbolsWithFiles();
-    const allDeps = this.repo.getAllDependenciesWithDomains();
     this.importCandidates.reset();
 
     // Map files
@@ -68,28 +67,6 @@ export class CallGraphTracer {
       const norm = this.normalizeFilePath(f.path);
       this.fileMapByNormPath.set(norm, f);
       this.fileMapById.set(f.id, f);
-    }
-
-    // Map symbols
-    for (const s of allSymbolsWithFiles) {
-      const existing = this.symbolsByFileId.get(s.file_id) || [];
-      existing.push(s);
-      this.symbolsByFileId.set(s.file_id, existing);
-    }
-
-    // Map dependencies
-    for (const d of allDeps) {
-      const file = this.fileMapByNormPath.get(this.normalizeFilePath(d.source_file));
-      if (file) {
-        const existing = this.dependenciesByFileId.get(file.id) || [];
-        existing.push({
-          target: d.target,
-          statement: d.statement,
-          line_number: d.line_number,
-          is_external: d.is_external,
-        });
-        this.dependenciesByFileId.set(file.id, existing);
-      }
     }
   }
 
@@ -108,8 +85,16 @@ export class CallGraphTracer {
       return this.buildSliceRecordFromChain(route.method, route.uri, chain, "clean");
     });
     if (options.includeInferredControllers === false) return slices;
+    const coveredActions = new Set<string>();
+    for (const s of slices) {
+      if (s.controller_file) coveredActions.add(`${s.controller_file}\0${s.action_name.toLowerCase()}`);
+    }
     // 2. Trace controllers if routes were not explicitly bound or found
     for (const [normPath, file] of this.fileMapByNormPath.entries()) {
+      // Python web frameworks manage routing declaratively via URLconf (Django) or decorators (FastAPI/Flask).
+      // Do not synthesize speculative HTTP endpoints on Python view/handler files by convention.
+      if (normPath.endsWith(".py")) continue;
+
       const isController =
         file.archetype === "controller" ||
         /controller/i.test(normPath) ||
@@ -120,39 +105,69 @@ export class CallGraphTracer {
 
       const symbols = this.fileSymbols(file.id);
       const methods = symbols.filter((s) => s.kind === "method" || s.kind === "function");
+      if (methods.length === 0) continue;
+
+      const defaultCtrlName =
+        symbols.find((s) => s.kind === "class")?.name ||
+        file.path.split("/").pop()?.replace(/\.[^.]+$/, "") ||
+        "Controller";
+
+      // Outbound dependencies depend only on controllerFile, not on individual methods;
+      // compute once per controller file instead of repeating BFS per method.
+      const outboundChain: ExecutionChainNode[] = [
+        { stage: "ingress", symbol: "", description: "" },
+        { stage: "controller", symbol: "", description: "" },
+      ];
+      this.traverseOutboundDependencies(file, outboundChain, effectiveMaxDepth);
+      const outboundTail = outboundChain.slice(2);
 
       for (const m of methods) {
-        const action = m.name.split("::").at(-1)!;
+        const parts = m.name.split("::");
+        const action = parts.pop()!;
         // Skip constructors or private helpers
         if (action === "constructor" || action.startsWith("_")) continue;
 
-        // Check if this method was already covered by declarative routes
-        const alreadyCovered = slices.some(
-          (s) =>
-            s.controller_file === file.path &&
-            s.action_name.toLowerCase() === action.toLowerCase()
-        );
-        if (alreadyCovered) continue;
+        const actionKey = `${file.path}\0${action.toLowerCase()}`;
+        if (coveredActions.has(actionKey)) continue;
 
-        const chain = this.traceChainFromController(file, m, effectiveMaxDepth);
-        if (chain.length > 0) {
-          const defaultMethod = /create|store|save|add/i.test(action)
-            ? "POST"
-            : /update|edit|patch/i.test(action)
-            ? "PUT"
-            : /delete|remove|destroy/i.test(action)
-            ? "DELETE"
-            : "GET";
+        const ctrlName = parts.pop() || defaultCtrlName;
+        const defaultMethod = /create|store|save|add/i.test(action)
+          ? "POST"
+          : /update|edit|patch/i.test(action)
+          ? "PUT"
+          : /delete|remove|destroy/i.test(action)
+          ? "DELETE"
+          : "GET";
+        const inferredUri = this.inferRouteUri(file.path, action);
 
-          const inferredUri = this.inferRouteUri(file.path, action);
-          const sliceRecord = this.buildSliceRecordFromChain(
+        const chain: ExecutionChainNode[] = [
+          {
+            stage: "ingress",
+            symbol: `${defaultMethod} ${inferredUri}`,
+            file: file.path,
+            line: m.line_start,
+            relationship: { kind: "route_binding", derivation: "inferred", reason: "controller_convention" },
+            description: `Inferred Ingress: ${defaultMethod} ${inferredUri}`,
+          },
+          {
+            stage: "controller",
+            symbol: `${ctrlName}::${action}`,
+            file: file.path,
+            line: m.line_start,
+            description: `Controller Action: ${ctrlName}::${action}`,
+          },
+          ...outboundTail,
+        ];
+
+        coveredActions.add(actionKey);
+        slices.push(
+          this.buildSliceRecordFromChain(
             defaultMethod,
             inferredUri,
             chain,
             "clean"
-          );
-          slices.push(sliceRecord);
-        }
+          )
+        );
       }
     }
 
@@ -656,15 +671,11 @@ export class CallGraphTracer {
       }
     }
 
-    // Global symbol search
-    for (const [fileId, syms] of this.symbolsByFileId.entries()) {
-      const match = syms.find((s) => s.name === cleanSymbol);
-      if (match) {
-        const file = this.fileMapById.get(fileId);
-        if (file) {
-          return { file: file.path, line: match.line_start };
-        }
-      }
+    // Global symbol search via indexed SQLite lookup (avoids loading all symbols into RAM)
+    const exactMatches = this.repo.findSymbolsByName(cleanSymbol);
+    const exactMatch = exactMatches.find((s) => s.name === cleanSymbol);
+    if (exactMatch) {
+      return { file: exactMatch.file_path, line: exactMatch.line_start };
     }
 
     return null;
@@ -758,7 +769,11 @@ export class CallGraphTracer {
       .replace(/\.[^.]+$/, "")
       .toLowerCase();
 
-    const resource = base ? `/${base}s` : "/resource";
+    const resource = base
+      ? base.endsWith("s")
+        ? `/${base}`
+        : `/${base}s`
+      : "/resource";
     if (/store|create/i.test(methodName)) return resource;
     if (/show|get|find/i.test(methodName)) return `${resource}/:id`;
     if (/update|edit|patch/i.test(methodName)) return `${resource}/:id`;

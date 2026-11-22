@@ -16,8 +16,7 @@ export class ImportCandidateResolver {
 
   reset(): void {
     this.evidenceByFile.clear();
-    this.hasWorkspaceEvidence = Boolean(this.repo.getMeta?.("workspace_root"));
-    if (this.hasWorkspaceEvidence) this.indexEvidence(this.repo.getImportRelationships(this.projectRoot));
+    this.hasWorkspaceEvidence = false;
   }
 
   private indexEvidence(relationships: ImportRelationship[]): void {

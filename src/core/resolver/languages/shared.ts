@@ -5,6 +5,8 @@ import { probeSourcePath, readSourceDirectory } from "../../resources/source-fil
 export interface ResolutionIO {
   root: string;
   read(file: string): string | undefined;
+  probe?(file: string): ReturnType<typeof probeSourcePath>;
+  cache?: Map<string, unknown>;
   check(file: string): void;
   finish(status: ImportResolution["status"], reason: string, targets?: ImportResolution["targets"]): ImportResolution;
 }
@@ -21,9 +23,10 @@ export function ancestors(io: ResolutionIO, source: string): string[] {
 }
 
 export function existingFiles(io: ResolutionIO, candidates: string[]): string[] {
+  const probe = io.probe ?? probeSourcePath;
   return [...new Set(candidates.filter(file => {
     io.check(file);
-    return probeSourcePath(file) === "file";
+    return probe(file) === "file";
   }).map(file => path.relative(io.root, file).replace(/\\/g, "/")))].sort();
 }
 

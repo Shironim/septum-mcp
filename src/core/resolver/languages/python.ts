@@ -6,6 +6,7 @@ const DIST_MODULES: Record<string, string[]> = {
   beautifulsoup4: ["bs4"], opencv_python: ["cv2"], protobuf: ["google"], typing_extensions: ["typing_extensions"],
   pyjwt: ["jwt"], python_jose: ["jose"], python_dateutil: ["dateutil"], django_rest_framework: ["rest_framework"],
   djangorestframework: ["rest_framework"], psycopg2_binary: ["psycopg2"], opencv_python_headless: ["cv2"],
+  graphql_core: ["graphql"], graphql: ["graphql"], graphene: ["graphene"], strawberry_graphql: ["strawberry"],
 };
 const manifests = ["requirements.txt", "pyproject.toml", "Pipfile", "poetry.lock", "uv.lock", "Pipfile.lock"];
 const normalize = (name: string) => name.toLowerCase().replace(/[-_.]+/g, "_");
@@ -15,13 +16,25 @@ function distribution(value: string): string | undefined {
 }
 
 function declaredDependencies(io: ResolutionIO, owner: string): { packages: Set<string>; local: Map<string, string> } {
+  const cacheKey = `py_deps:${owner}`;
+  const cached = io.cache?.get(cacheKey) as { packages: Set<string>; local: Map<string, string>; files: string[] } | undefined;
+  if (cached) {
+    // Still touch manifests via io.read so config_revision reflects all observed manifests
+    for (const file of cached.files) io.read(file);
+    return cached;
+  }
+  const observedFiles: string[] = [];
+  const readManifest = (file: string): string | undefined => {
+    observedFiles.push(file);
+    return io.read(file);
+  };
   const packages = new Set<string>();
   const local = new Map<string, string>();
   const add = (name: string) => { packages.add(normalize(name)); };
   const requirementFile = (file: string, visited = new Set<string>()): void => {
     if (visited.has(file) || visited.size >= 64) throw new Error("python_requirements_cycle_or_limit");
     visited.add(file);
-    const text = io.read(file);
+    const text = readManifest(file);
     if (text === undefined) throw new Error("python_requirements_include_missing");
     for (const raw of text.replace(/\\\r?\n/g, " ").split(/\r?\n/)) {
       const line = raw.replace(/\s+#.*$/, "").trim();
@@ -33,8 +46,8 @@ function declaredDependencies(io: ResolutionIO, owner: string): { packages: Set<
       const name = distribution(line); if (name) add(name);
     }
   };
-  if (io.read(path.join(owner, "requirements.txt")) !== undefined) requirementFile(path.join(owner, "requirements.txt"));
-  const projectText = io.read(path.join(owner, "pyproject.toml"));
+  if (readManifest(path.join(owner, "requirements.txt")) !== undefined) requirementFile(path.join(owner, "requirements.txt"));
+  const projectText = readManifest(path.join(owner, "pyproject.toml"));
   if (projectText !== undefined) {
     const project = toml(projectText);
     const arrays = [project.project?.dependencies, ...Object.values(project.project?.["optional-dependencies"] ?? {}),
@@ -53,7 +66,7 @@ function declaredDependencies(io: ResolutionIO, owner: string): { packages: Set<
       }
     }
   }
-  const pipfile = io.read(path.join(owner, "Pipfile"));
+  const pipfile = readManifest(path.join(owner, "Pipfile"));
   if (pipfile !== undefined) {
     const parsed = toml(pipfile);
     for (const group of [parsed.packages, parsed["dev-packages"]]) for (const [name, value] of Object.entries(group ?? {})) {
@@ -61,7 +74,7 @@ function declaredDependencies(io: ResolutionIO, owner: string): { packages: Set<
     }
   }
   for (const name of ["poetry.lock", "uv.lock"]) {
-    const text = io.read(path.join(owner, name));
+    const text = readManifest(path.join(owner, name));
     if (text === undefined) continue;
     const locked = toml(text).package;
     if (!Array.isArray(locked)) throw new Error("malformed_python_lockfile");
@@ -72,14 +85,16 @@ function declaredDependencies(io: ResolutionIO, owner: string): { packages: Set<
       if (typeof location === "string") local.set(normalize(pkg.name), path.resolve(owner, location));
     }
   }
-  const piplock = io.read(path.join(owner, "Pipfile.lock"));
+  const piplock = readManifest(path.join(owner, "Pipfile.lock"));
   if (piplock !== undefined) {
     const parsed = JSON.parse(piplock);
     for (const group of [parsed.default, parsed.develop]) for (const [name, value] of Object.entries(group ?? {})) {
       add(name); if (typeof (value as any)?.path === "string") local.set(normalize(name), path.resolve(owner, (value as any).path));
     }
   }
-  return { packages, local };
+  const result = { packages, local, files: [...new Set(observedFiles)] };
+  io.cache?.set(cacheKey, result);
+  return result;
 }
 
 export function resolvePython(io: ResolutionIO, target: string, source: string, roots: string[], stdlib: ReadonlySet<string>) {
@@ -96,20 +111,23 @@ export function resolvePython(io: ResolutionIO, target: string, source: string, 
     const present = manifests.map(file => io.read(path.join(dir, file)) !== undefined);
     if (present.some(Boolean)) { owner = dir; break; }
   }
-  const search = [...new Set([path.join(owner, "src"), owner, dirs[0]!, ...roots.map(root => path.resolve(io.root, root))])];
-  const subpath = target.replace(/\./g, path.sep);
-  const local = existingFiles(io, search.flatMap(root => [path.join(root, subpath + ".py"), path.join(root, subpath, "__init__.py")]));
-  if (local.length) return fileResult(io, local, local.length === 1 ? "python_local_module" : "multiple_python_candidates");
   const top = target.split(".")[0]!;
   if (stdlib.has(top)) return io.finish("external", "python_standard_library");
   const { packages, local: dependencyPaths } = declaredDependencies(io, owner);
   const normalized = normalize(top);
   for (const [name, directory] of dependencyPaths) {
     if (name !== normalized && !DIST_MODULES[name]?.includes(normalized)) continue;
+    const subpath = target.replace(/\./g, path.sep);
     return fileResult(io, existingFiles(io, [directory, path.join(directory, "src")].flatMap(base =>
       [path.join(base, subpath + ".py"), path.join(base, subpath, "__init__.py")])), "python_local_path_dependency");
   }
-  if (packages.has(normalized) || Object.entries(DIST_MODULES).some(([dist, modules]) => packages.has(dist) && modules.includes(normalized)))
-    return io.finish("external", "python_manifest_dependency");
+  const isManifestDep = packages.has(normalized) || Object.entries(DIST_MODULES).some(([dist, modules]) => packages.has(dist) && modules.includes(normalized));
+  if (isManifestDep) return io.finish("external", "python_manifest_dependency");
+
+  const search = [...new Set([path.join(owner, "src"), owner, dirs[0]!, ...roots.map(root => path.resolve(io.root, root))])];
+  const subpath = target.replace(/\./g, path.sep);
+  const local = existingFiles(io, search.flatMap(root => [path.join(root, subpath + ".py"), path.join(root, subpath, "__init__.py")]));
+  if (local.length) return fileResult(io, local, local.length === 1 ? "python_local_module" : "multiple_python_candidates");
+
   return io.finish("unresolved", "python_module_not_declared");
 }

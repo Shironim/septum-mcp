@@ -41,7 +41,8 @@ export function selectSliceTarget(
       const method = s.http_method.toUpperCase();
       return (method === httpMethod || method === "ANY") && urisMatch(s.route_uri, uri);
     });
-    const literal = candidates.filter(s => s.route_uri === uri);
+    const normUri = stripTrailingSlash(uri);
+    const literal = candidates.filter(s => stripTrailingSlash(s.route_uri) === normUri);
     if (literal.length === 1) {
       const confidence = literal[0].http_method.toUpperCase() === httpMethod ? "exact" : "inferred";
       return match(trimmed, literal[0], confidence, undefined);
@@ -208,13 +209,21 @@ function ambiguousResponse(query: string, candidates: VerticalSliceRecord[], max
     message: "Multiple catalog targets match; no entrypoint or chain was selected." };
 }
 
+function stripTrailingSlash(uri: string): string {
+  return uri.length > 1 ? uri.replace(/\/+$/, "") : uri;
+}
+
 function urisMatch(uriA: string, uriB: string): boolean {
-  const normA = uriA
-    .replace(/\{[^}]+\}/g, ":param")
-    .replace(/:[a-zA-Z0-9_]+/g, ":param");
-  const normB = uriB
-    .replace(/\{[^}]+\}/g, ":param")
-    .replace(/:[a-zA-Z0-9_]+/g, ":param");
+  const normA = stripTrailingSlash(
+    uriA
+      .replace(/\{[^}]+\}/g, ":param")
+      .replace(/:[a-zA-Z0-9_]+/g, ":param")
+  );
+  const normB = stripTrailingSlash(
+    uriB
+      .replace(/\{[^}]+\}/g, ":param")
+      .replace(/:[a-zA-Z0-9_]+/g, ":param")
+  );
   return normA === normB;
 }
 

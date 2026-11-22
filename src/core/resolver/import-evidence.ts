@@ -31,7 +31,13 @@ export function collectImportEvidence({
   hasAdditionalIndexedFile?: (file: string) => boolean;
   verifyFile?: (file: string) => boolean;
 }): ImportEvidence {
-  const resolver = new ImportResolver(root, domains.map(domain => domain.root_path));
+  const resolver = new ImportResolver(root, domains.map(domain => domain.root_path), { batchCache: true });
+  const resolvedDomains = domains
+    .map(domain => {
+      const domainPath = resolve(root, domain.root_path);
+      return { name: domain.name, path: domainPath, prefix: domainPath.endsWith(sep) ? domainPath : domainPath + sep };
+    })
+    .sort((a, b) => b.path.length - a.path.length);
   const freshness = new Map<string, ImportRelationship["freshness"]>();
   const hashes = new Map(files.map(file => [file.path, file.content_hash]));
   const verifyFreshness = (file: string): ImportRelationship["freshness"] => {
@@ -55,11 +61,10 @@ export function collectImportEvidence({
       resolution.reason = `source_${current}`;
       resolution.targets = [];
     }
-    const targetDomains = resolution.targets.flatMap(target => target.files.map(file => domains.find(domain => {
+    const targetDomains = resolution.targets.flatMap(target => target.files.map(file => {
       const targetPath = resolve(root, file);
-      const domainPath = resolve(root, domain.root_path);
-      return targetPath === domainPath || targetPath.startsWith(domainPath + sep);
-    })?.name).filter((name): name is string => !!name));
+      return resolvedDomains.find(domain => targetPath === domain.path || targetPath.startsWith(domain.prefix))?.name;
+    }).filter((name): name is string => !!name));
     return {
       kind: "imports", derivation: "source",
       source: { file: dep.source_file, line: dep.line_number, statement: dep.statement, indexed_content_hash: hashes.get(dep.source_file) ?? "" },

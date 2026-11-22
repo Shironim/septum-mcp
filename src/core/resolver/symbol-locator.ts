@@ -170,26 +170,62 @@ export class SymbolLocator {
       .filter(s => ["class", "interface", "trait", "struct", "enum"].includes(s.kind)) : [];
     const owner = owners.length === 1 ? owners[0] : undefined;
     const siblings = owner ? this.repo.getSymbolDetails(owner.name, { ...selection, reference: owner.symbol_ref, includeDependencies: false })?.sibling_methods : undefined;
+    const domainId = selection.domain ? this.repo.getAllDomains().find(d => d.name.toLowerCase() === selection.domain!.toLowerCase())?.id : undefined;
     const searchable = owner ? this.repo.getSymbolsByFileId(owner.file_id)
       .filter(s => s.kind === "method" && symbolReference({ ...s, file_path: owner.file_path, indexed_content_hash: owner.indexed_content_hash }).container === owner.name)
-      .map(s => ({ ...s, file_path: owner.file_path })) : this.repo.getAllSymbolsWithFiles();
-    const domainId = selection.domain ? this.repo.getAllDomains().find(d => d.name.toLowerCase() === selection.domain!.toLowerCase())?.id : undefined;
+      .map(s => ({ ...s, file_path: owner.file_path }))
+      : selection.domain && domainId === undefined
+        ? []
+        : this.repo.getAllSymbolsWithFiles({
+            ...(selection.filePath ? { filePath: selection.filePath } : {}),
+            ...(domainId !== undefined ? { domainId } : {}),
+          });
+    const charBitmask = (str: string): number => {
+      let mask = 0;
+      for (let i = 0; i < str.length; i++) {
+        const c = str.charCodeAt(i) | 32;
+        if (c >= 97 && c <= 122) mask |= 1 << (c - 97);
+      }
+      return mask;
+    };
+    const popcount = (n: number): number => {
+      let x = n;
+      let count = 0;
+      while (x) { x &= x - 1; count++; }
+      return count;
+    };
+    const targetMask = charBitmask(target);
+    const rawMask = charBitmask(parsed.raw);
+    const minOverlap = target.length >= 4 && searchable.length > 500 ? Math.min(2, popcount(targetMask)) : 0;
     const seenNames = new Set<string>();
-    const suggestions = searchable
-      .filter(s => !selection.filePath || s.file_path === selection.filePath)
-      .filter(s => !selection.domain || this.repo.getFileByPath(s.file_path)?.domain_id === domainId)
-      .map(s => ({
-        name: owner ? s.name.split(/::|[.#]/).pop()! : s.name, kind: s.kind, signature: s.signature, line_start: s.line_start, line_end: s.line_end, start_line: s.line_start, end_line: s.line_end, file_path: s.file_path,
-        similarity_score: Math.round(Math.max(calculateSimilarity(target, s.name.split(/::|[.#]/).pop()!), calculateSimilarity(parsed.raw, s.name)) * 100) / 100,
-      }))
-      .filter(s => s.similarity_score >= 0.3)
-      .sort((a, b) => b.similarity_score - a.similarity_score)
-      .filter(s => {
-        if (seenNames.has(s.name)) return false;
-        seenNames.add(s.name);
-        return true;
-      })
-      .slice(0, 10);
+    const scored: Array<{
+      name: string; kind: (typeof searchable)[number]["kind"]; signature: string;
+      line_start: number; line_end: number; start_line: number; end_line: number;
+      file_path: string; similarity_score: number;
+    }> = [];
+    for (const s of searchable) {
+      if (selection.filePath && s.file_path !== selection.filePath) continue;
+      if (minOverlap > 0) {
+        const candMask = charBitmask(s.name);
+        if (popcount(targetMask & candMask) < minOverlap && popcount(rawMask & candMask) < minOverlap) continue;
+      }
+      const leaf = s.name.split(/::|[.#]/).pop()!;
+      const score = Math.round(Math.max(calculateSimilarity(target, leaf), calculateSimilarity(parsed.raw, s.name)) * 100) / 100;
+      if (score < 0.3) continue;
+      scored.push({
+        name: owner ? leaf : s.name, kind: s.kind, signature: s.signature,
+        line_start: s.line_start, line_end: s.line_end, start_line: s.line_start, end_line: s.line_end,
+        file_path: s.file_path, similarity_score: score,
+      });
+    }
+    scored.sort((a, b) => b.similarity_score - a.similarity_score);
+    const suggestions = [];
+    for (const s of scored) {
+      if (seenNames.has(s.name)) continue;
+      seenNames.add(s.name);
+      suggestions.push(s);
+      if (suggestions.length >= 10) break;
+    }
     return { ...base, file_path: owner?.file_path, container_name: owner?.name, sibling_methods: siblings, suggestions, message: `Symbol '${parsed.raw}' not found.${suggestions.length ? ` Did you mean '${suggestions[0]!.name}'?` : ""}` };
   }
 

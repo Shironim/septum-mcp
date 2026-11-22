@@ -8,12 +8,14 @@ import { scanSourceFiles, type SourceInventory } from "../resources/source-inven
 import { collectSourceSkips, readSourceFile, SOURCE_READ_REVISION, sourceObservationsCurrent } from "../resources/source-files.ts";
 import { assertPathContained } from "./path-resolver.ts";
 import { CallGraphTracer } from "./call-graph-tracer.ts";
+import { normalizeGraphQLEntrypoints } from "../parser/extractors/graphql-entrypoint.ts";
 
 interface CatalogOptions {
   ignorePatterns: string[];
   signal?: AbortSignal;
   semanticRevision?: string;
   inventoryRevision?: string;
+  inventory?: SourceInventory;
 }
 
 export function sliceInputsCurrent(repo: SeptumRepository, root: string, signal?: AbortSignal): boolean {
@@ -51,7 +53,7 @@ export async function rebuildSliceCatalog(repo: SeptumRepository, root: string, 
     const reports: AdapterExtractionResult[] = [];
     let inventory: SourceInventory;
     const extracted = await collectSourceSkips(root, async () => {
-      inventory = scanSourceFiles(root, { ignorePatterns: options.ignorePatterns, signal: options.signal });
+      inventory = options.inventory ?? scanSourceFiles(root, { ignorePatterns: options.ignorePatterns, signal: options.signal });
       const topology = TopologyDetector.detect(root);
       const slices = await SemanticSliceExtractorRegistry.extractAllSlices(root, topology.framework, undefined, options.signal, {
         ignorePatterns: options.ignorePatterns, inventory, onResult: result => reports.push(result),
@@ -65,7 +67,7 @@ export async function rebuildSliceCatalog(repo: SeptumRepository, root: string, 
         for (const node of chain) if (node.stage === "ingress" && node.file) coveredFiles.add(node.file);
       }
       const fallback = new CallGraphTracer(repo, root).traceAllSlices(8, { excludeEntrypointFiles: coveredFiles });
-      return [...slices, ...fallback];
+      return normalizeGraphQLEntrypoints([...slices, ...fallback]);
     });
     options.signal?.throwIfAborted();
     if (extracted.skipped.length) {
@@ -76,7 +78,7 @@ export async function rebuildSliceCatalog(repo: SeptumRepository, root: string, 
     }
     repo.runInTransaction(() => {
       repo.clearVerticalSlices();
-      for (const slice of extracted.value) repo.insertVerticalSlice(slice);
+      repo.insertVerticalSlices(extracted.value);
       repo.setMeta("slices_dirty", "");
       repo.setMeta("semantic_extractor_revision", SEMANTIC_FINGERPRINT);
       repo.setMeta("semantic_inputs", JSON.stringify(extracted.inputs));

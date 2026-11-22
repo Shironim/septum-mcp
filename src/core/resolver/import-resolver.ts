@@ -32,10 +32,19 @@ const PHP_STDLIB = new Set([
   "BadFunctionCallException", "BadMethodCallException", "Attribute"
 ]);
 
-/** Static, workspace-contained resolution. No manifest scripts, downloads or retained cache. */
+/** Static, workspace-contained resolution. No manifest scripts, downloads or retained cache across calls. */
 export class ImportResolver {
   private root: string;
-  constructor(root: string, private packageRoots: string[] = []) { this.root = path.resolve(root); }
+  private readonly batchCache: boolean;
+  private readonly batchReads = new Map<string, { text: string; hash: string } | null>();
+  private readonly batchProbes = new Map<string, ReturnType<typeof probeSourcePath>>();
+  private readonly batchJson = new Map<string, any>();
+  private readonly batchDerived = new Map<string, unknown>();
+
+  constructor(root: string, private packageRoots: string[] = [], options: { batchCache?: boolean } = {}) {
+    this.root = path.resolve(root);
+    this.batchCache = Boolean(options.batchCache);
+  }
 
   public resolve(target: string, sourceFile: string, statement?: string): ImportResolution {
     const manifests: Record<string, string> = {};
@@ -49,22 +58,52 @@ export class ImportResolver {
       ...result, status, reason, targets,
       config_revision: computeContentHash(JSON.stringify({ root: this.root, revision: RESOLVER_REVISION, manifests })),
     });
+    const probeCached = (file: string): ReturnType<typeof probeSourcePath> => {
+      if (this.batchCache) {
+        const cached = this.batchProbes.get(file);
+        if (cached !== undefined) return cached;
+        const kind = probeSourcePath(file);
+        this.batchProbes.set(file, kind);
+        return kind;
+      }
+      return probeSourcePath(file);
+    };
     const read = (file: string): string | undefined => {
       this.assertContained(file);
       if (contents.has(file)) return contents.get(file);
-      if (probeSourcePath(file) === "missing") { manifests[path.relative(this.root, file)] = "missing"; return undefined; }
+      if (this.batchCache && this.batchReads.has(file)) {
+        const cached = this.batchReads.get(file);
+        if (cached === null || cached === undefined) {
+          manifests[path.relative(this.root, file)] = "missing";
+          contents.set(file, undefined);
+          return undefined;
+        }
+        contents.set(file, cached.text);
+        manifests[path.relative(this.root, file)] = cached.hash;
+        return cached.text;
+      }
+      if (probeCached(file) === "missing") {
+        manifests[path.relative(this.root, file)] = "missing";
+        if (this.batchCache) this.batchReads.set(file, null);
+        return undefined;
+      }
       const text = readSourceFile(file);
       bytesRead += Buffer.byteLength(text, "utf8");
       if (bytesRead > 16 * 1024 * 1024) throw new Error("resolution_source_byte_limit");
+      const hash = computeContentHash(text);
       contents.set(file, text);
-      manifests[path.relative(this.root, file)] = computeContentHash(text); return text;
+      if (this.batchCache) this.batchReads.set(file, { text, hash });
+      manifests[path.relative(this.root, file)] = hash;
+      return text;
     };
     const json = (file: string): any => {
       const raw = read(file); if (raw === undefined) return {};
+      if (this.batchCache && this.batchJson.has(file)) return this.batchJson.get(file);
       const clean = raw.replace(/"(?:\\.|[^"\\])*"|\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g, token => token.startsWith('"') ? token : " ")
         .replace(/"(?:\\.|[^"\\])*"|,\s*[}\]]/g, token => token.startsWith('"') ? token : token.slice(1));
       const parsed = JSON.parse(clean);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("malformed_manifest");
+      if (this.batchCache) this.batchJson.set(file, parsed);
       return parsed;
     };
     const filesAt = (base: string, extensions: string[]): string[] => {
@@ -86,7 +125,7 @@ export class ImportResolver {
       const candidates = [base, ...extraCandidates, ...extensions.map(ext => base + ext), ...extensions.map(ext => path.join(base, "index" + ext))];
       return [...new Set(candidates.filter(file => {
         this.assertContained(file);
-        return probeSourcePath(file) === "file";
+        return probeCached(file) === "file";
       }).map(file => path.relative(this.root, file).replace(/\\/g, "/")))];
     };
     const resolvedFiles = (files: string[], reason: string) => {
@@ -98,7 +137,14 @@ export class ImportResolver {
       if (target.startsWith("dynamic:")) return finish("unresolved", "dynamic_target");
       const source = path.resolve(this.root, sourceFile); this.assertContained(source);
       const ext = path.extname(source).toLowerCase();
-      const io: ResolutionIO = { root: this.root, read, check: file => this.assertContained(file), finish };
+      const io: ResolutionIO = {
+        root: this.root,
+        read,
+        probe: probeCached,
+        cache: this.batchCache ? this.batchDerived : undefined,
+        check: file => this.assertContained(file),
+        finish,
+      };
       if (ext === ".go") return resolveGo(io, target, sourceFile, GO_STDLIB);
       if (ext === ".py") return resolvePython(io, target, sourceFile, this.packageRoots, PYTHON_STDLIB);
       if (ext === ".rb") return resolveRuby(io, target, sourceFile, statement);

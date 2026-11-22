@@ -11,7 +11,7 @@ interface ImpactFacts {
   container: string;
   method: string;
   targets: SymbolSpan[];
-  dependencies: Array<{ file: string; line_number: number; domain_name?: string | null }>;
+  dependencies: Array<{ file: string; line_number: number; domain_name?: string | null; import_statement?: string }>;
   samePackageFiles: Set<string>;
   symbolsByFile: Map<string, Array<{ name: string; kind: string; signature: string; line_start: number; line_end: number }>>;
   domainsByFile: Map<string, string>;
@@ -154,17 +154,100 @@ export function analyzeSymbolImpact(facts: ImpactFacts): GetSymbolImpactResponse
             })::${escapeRegExp(effectiveMethod)}\\s*\\(`
           )
         : null;
-    const nonTsFnCallRegex =
-      !effectiveMethod && targetSymRows.some((r) => r.kind === "function")
-        ? new RegExp(`(?:^|[^.\\w$:]|\\.)\\b${escapeRegExp(targetContainer)}\\s*\\(`)
-        : null;
+    // For standalone functions, match unqualified calls (`fn(...)`) and only allow qualified calls
+    // (`alias.fn(...)`) when `alias` is a module/namespace import binding (never `cls.fn`, `self.fn`, etc.).
+    const isFunctionTarget = !effectiveMethod && targetSymRows.some((r) => r.kind === "function");
+    const nonTsFnCallRegex = isFunctionTarget
+      ? new RegExp(`(?:^|[^.\\w$:])\\b${escapeRegExp(targetContainer)}\\s*\\(`)
+      : null;
     const nonTsFnDeclRegex = nonTsFnCallRegex
       ? new RegExp(`\\b(?:function|func|def|fn)\\s+${escapeRegExp(targetContainer)}\\b`)
       : null;
 
+    const definingStems = new Set(
+      Array.from(definingFiles).flatMap((df) => {
+        const stem = df.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
+        const dir = df.split("/").slice(-2, -1)[0] ?? "";
+        return /\.go$/i.test(df) ? [stem, dir] : [stem];
+      }).filter(Boolean)
+    );
+    const moduleAliasesByFile = new Map<string, Set<string>>();
+    const directAliasesByFile = new Map<string, Set<string>>();
+    const filesWithImportStmts = new Set<string>();
+    if (isFunctionTarget) {
+      for (const row of depRows) {
+        const stmt = String(row.import_statement || "");
+        if (!stmt) continue;
+        filesWithImportStmts.add(row.file);
+        // Python: `from pkg import stem as alias` or `from pkg import stem`
+        const fromMatch = stmt.match(/^\s*from\s+([^\s]+)\s+import\s+([\s\S]+)$/);
+        if (fromMatch) {
+          const items = fromMatch[2]!.replace(/[()]/g, "").split(",");
+          for (const rawItem of items) {
+            const item = rawItem.trim();
+            if (!item) continue;
+            const asMatch = item.match(/^([A-Za-z_]\w*)\s+as\s+([A-Za-z_]\w*)$/);
+            const orig = asMatch ? asMatch[1]! : item.split(/\s+/)[0]!;
+            const bound = asMatch ? asMatch[2]! : orig;
+            if (orig === targetContainer && bound !== targetContainer) {
+              const set = directAliasesByFile.get(row.file) ?? new Set<string>();
+              set.add(bound);
+              directAliasesByFile.set(row.file, set);
+            } else if (definingStems.has(orig) && !["cls", "self", "this", "super"].includes(bound)) {
+              const set = moduleAliasesByFile.get(row.file) ?? new Set<string>();
+              set.add(bound);
+              moduleAliasesByFile.set(row.file, set);
+            }
+          }
+          continue;
+        }
+        // Python: `import pkg.stem as alias` or `import pkg.stem`
+        const pyImportAs = stmt.match(/^\s*import\s+([A-Za-z0-9_.]+)(?:\s+as\s+([A-Za-z_]\w*))?/);
+        if (pyImportAs) {
+          const modTail = pyImportAs[1]!.split(".").pop() ?? "";
+          const bound = pyImportAs[2] ?? modTail;
+          if (definingStems.has(modTail) && !["cls", "self", "this", "super"].includes(bound)) {
+            const set = moduleAliasesByFile.get(row.file) ?? new Set<string>();
+            set.add(bound);
+            moduleAliasesByFile.set(row.file, set);
+          }
+          continue;
+        }
+        // Go: `import "pkg/dir"` or `import alias "pkg/dir"`
+        const goImport = stmt.match(/^\s*(?:import\s+)?(?:([A-Za-z_]\w*)\s+)?"([^"]+)"/);
+        if (goImport) {
+          const pkgTail = goImport[2]!.split("/").pop() ?? "";
+          const bound = goImport[1] ?? pkgTail;
+          if (definingStems.has(pkgTail)) {
+            const set = moduleAliasesByFile.get(row.file) ?? new Set<string>();
+            set.add(bound);
+            moduleAliasesByFile.set(row.file, set);
+          }
+        }
+      }
+    }
+
     if (effectiveMethod || nonTsFnCallRegex) {
       for (const filePath of uniqueCallerFiles) {
         if (nonTsFnCallRegex && /\.[cm]?[jt]sx?$/.test(filePath)) continue;
+        const moduleAliases = moduleAliasesByFile.get(filePath);
+        const directAliases = directAliasesByFile.get(filePath);
+        const fallbackPkgAliases = !filesWithImportStmts.has(filePath) && definingStems.size > 0
+          ? definingStems
+          : undefined;
+        const effectiveModuleAliases = moduleAliases && moduleAliases.size > 0 ? moduleAliases : fallbackPkgAliases;
+        const qualifiedFnRegex =
+          effectiveModuleAliases && effectiveModuleAliases.size > 0
+            ? new RegExp(
+                `\\b(?:${Array.from(effectiveModuleAliases).map(escapeRegExp).join("|")})\\.${escapeRegExp(targetContainer)}\\s*\\(`
+              )
+            : null;
+        const aliasedDirectFnRegex =
+          directAliases && directAliases.size > 0
+            ? new RegExp(
+                `(?:^|[^.\\w$:])\\b(?:${Array.from(directAliases).map(escapeRegExp).join("|")})\\s*\\(`
+              )
+            : null;
         try {
           const fullPath = options.workspaceRoot ? resolve(options.workspaceRoot, filePath) : filePath;
           if (options.workspaceRoot) assertPathContained(fullPath, options.workspaceRoot, "Inbound caller source");
@@ -185,7 +268,12 @@ export function analyzeSymbolImpact(facts: ImpactFacts): GetSymbolImpactResponse
                     ? staticOwnerCallRegex.test(line)
                     : line.includes(`::${effectiveMethod}(`)) ||
                   (!isStaticPhpMethod && line.includes(`.${effectiveMethod}(`))
-                : Boolean(nonTsFnCallRegex?.test(line) && !nonTsFnDeclRegex?.test(line));
+                : Boolean(
+                    !nonTsFnDeclRegex?.test(line) &&
+                      (nonTsFnCallRegex?.test(line) ||
+                        qualifiedFnRegex?.test(line) ||
+                        aliasedDirectFnRegex?.test(line))
+                  );
               if (matched) {
                 const lineNum = i + 1;
                 const enclosing = findEnclosingSymbol(filePath, lineNum);

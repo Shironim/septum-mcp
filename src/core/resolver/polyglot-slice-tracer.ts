@@ -24,6 +24,15 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function isIdentifierReferencedInScope(scopeText: string, name: string): boolean {
+  if (!name) return false;
+  const check = (candidate: string) =>
+    new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(candidate)}(?![A-Za-z0-9_$])`).test(scopeText);
+  if (check(name)) return true;
+  const camel = name.charAt(0).toLowerCase() + name.slice(1);
+  return camel !== name && check(camel);
+}
+
 function readLinesSafe(projectRoot: string, filePath: string): string[] | undefined {
   const fullPath = resolve(projectRoot, filePath);
   if (!existsSync(fullPath)) return undefined;
@@ -105,21 +114,18 @@ export function traversePolyglotMethodDependencies(
 
   // 2. Match imported collaborators referenced in the method (and its bridged local helpers)
   const deps = ctx.fileDependencies(startFile.id);
+  const emittedFileSymbols = new Set<string>();
   for (const dep of deps) {
     if (/^\s*(?:import|export)\s+type\b/.test(dep.statement)) continue;
     if (chain.length >= ctx.maxChainNodes) break;
     const importedNames = ctx.extractImportedSymbolNames(dep.statement);
     const baseTarget = dep.target.split(/[\/\\]/).pop()?.replace(/\.[^.]+$/, "") || "";
 
+    const referencedNames = importedNames.filter((name) => isIdentifierReferencedInScope(scopeText, name));
     const isReferenced =
-      (importedNames.length > 0 &&
-        importedNames.some((name) => {
-          const camel = name.charAt(0).toLowerCase() + name.slice(1);
-          return scopeText.includes(name) || scopeText.includes(camel);
-        })) ||
-      (baseTarget.length > 0 &&
-        (scopeText.includes(baseTarget) ||
-          scopeText.includes(baseTarget.charAt(0).toLowerCase() + baseTarget.slice(1))));
+      importedNames.length > 0
+        ? referencedNames.length > 0
+        : baseTarget.length > 0 && isIdentifierReferencedInScope(scopeText, baseTarget);
 
     if (!isReferenced) continue;
 
@@ -130,37 +136,61 @@ export function traversePolyglotMethodDependencies(
       : [ctx.resolveImportToFile(startFile.path, dep.target)].filter((file): file is FileRecord => !!file);
 
     for (const resolvedFile of resolvedFiles) {
-      if (!resolvedFile || visitedFiles.has(resolvedFile.path)) continue;
-      visitedFiles.add(resolvedFile.path);
+      if (!resolvedFile || resolvedFile.path === startFile.path) continue;
 
       const stage = ctx.detectStage(resolvedFile.path, resolvedFile.archetype);
       const fileSymbols = ctx.fileSymbols(resolvedFile.id);
-      const mainSymbol = ctx.resolveExecutableSymbol(fileSymbols, importedNames);
-      if (!mainSymbol) continue;
+      const matchedSymbols: SymbolRecord[] = [];
+      if (referencedNames.length > 0) {
+        for (const refName of referencedNames) {
+          const direct = fileSymbols.find(
+            (s) =>
+              ctx.isExecutableSymbol(s) &&
+              (s.name === refName ||
+                s.name.endsWith(`::${refName}`) ||
+                s.name.endsWith(`@${refName}`) ||
+                s.name.endsWith(`.${refName}`))
+          );
+          const resolved = direct ?? ctx.resolveExecutableSymbol(fileSymbols, [refName]);
+          if (resolved && !matchedSymbols.some((m) => m.name === resolved.name && m.line_start === resolved.line_start)) {
+            matchedSymbols.push(resolved);
+          }
+        }
+      } else if (!visitedFiles.has(resolvedFile.path)) {
+        visitedFiles.add(resolvedFile.path);
+        const fallback = ctx.resolveExecutableSymbol(fileSymbols, []);
+        if (fallback) matchedSymbols.push(fallback);
+      }
 
-      const symbolDisplay = mainSymbol.name;
-      const shortSymbolDisplay = symbolDisplay.split(/[\\:]/).pop();
-      const existingNode = chain.find(
-        (c) =>
-          (c.file && c.file === resolvedFile.path) ||
-          (c.stage === stage &&
-            (c.symbol === symbolDisplay || c.symbol.split(/[\\:]/).pop() === shortSymbolDisplay))
-      );
+      for (const mainSymbol of matchedSymbols) {
+        if (chain.length >= ctx.maxChainNodes) break;
+        const emitKey = `${resolvedFile.path}\0${mainSymbol.name}`;
+        if (emittedFileSymbols.has(emitKey)) continue;
+        emittedFileSymbols.add(emitKey);
 
-      if (!existingNode) {
-        chain.push({
-          stage,
-          symbol: symbolDisplay,
-          file: resolvedFile.path,
-          line: mainSymbol.line_start || 1,
-          description: `${stage.toUpperCase()} (referenced import): ${symbolDisplay}`,
-          relationship: {
-            kind: "imports",
-            derivation: "source",
-            source: { file: startFile.path, line: dep.line_number, statement: dep.statement },
-            reason: "import referenced in method scope; not proof of a call",
-          },
-        });
+        const symbolDisplay = mainSymbol.name;
+        const shortSymbolDisplay = symbolDisplay.split(/[\\:]/).pop();
+        const existingNode = chain.find(
+          (c) =>
+            c.file === resolvedFile.path &&
+            (c.symbol === symbolDisplay || c.symbol.split(/[\\:]/).pop() === shortSymbolDisplay)
+        );
+
+        if (!existingNode) {
+          chain.push({
+            stage,
+            symbol: symbolDisplay,
+            file: resolvedFile.path,
+            line: mainSymbol.line_start || 1,
+            description: `${stage.toUpperCase()} (referenced import): ${symbolDisplay}`,
+            relationship: {
+              kind: "imports",
+              derivation: "source",
+              source: { file: startFile.path, line: dep.line_number, statement: dep.statement },
+              reason: "import referenced in method scope; not proof of a call",
+            },
+          });
+        }
       }
     }
   }
