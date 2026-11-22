@@ -9,7 +9,7 @@ import { readSourceFile } from "../resources/source-files.ts";
 import type { GetSymbolArgs, SymbolReference } from "../../types/index.ts";
 
 export interface SymbolContextModeSelection {
-  mode: "deep" | "invalid_options" | "source";
+  mode: "deep" | "invalid_options" | "invalid_query" | "source";
   symbol: string;
 }
 
@@ -30,7 +30,10 @@ export function selectSymbolContextMode(
     max_depth?: number;
   }
 ): SymbolContextModeSelection {
-  const symbol = args.symbol_ref?.name || args.symbol || args.query || "";
+  const symbol = (args.symbol_ref?.name || args.symbol || args.query || "").toString().trim();
+  if (!symbol) {
+    return { mode: "invalid_query", symbol: "" };
+  }
   const candidates = repo.findSymbolsByName(symbol, {
     domain: args.domain,
     filePath: args.file_path,

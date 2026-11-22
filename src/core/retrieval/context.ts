@@ -1,4 +1,5 @@
 import { pageContext, response, budgetedResponse, type ContextItem, type SourceItem } from "./context-page.ts";
+import { retrieveUniversalContext } from "./universal-context.ts";
 import ts from "typescript";
 import { bindContextFile, type ContextValue } from "./typescript-references.ts";
 import { resolve } from "node:path";
@@ -48,7 +49,7 @@ interface ContextWalkState {
   signal?: AbortSignal;
   targetFilePath: string;
   targetSource: string;
-  relationships: ImportRelationship[];
+  relationshipsByFile: Map<string, ImportRelationship[]>;
   referencedEdges: Set<ImportRelationship>;
   visited: Set<string>;
   emitted: Set<string>;
@@ -62,6 +63,15 @@ interface ContextWalkState {
   capacityOmissions: number;
   unexpandedFiles: number;
   sourceBytes: number;
+}
+
+function getFileRelationships(state: ContextWalkState, filePath: string): ImportRelationship[] {
+  let rels = state.relationshipsByFile.get(filePath);
+  if (!rels) {
+    rels = state.repo.getImportRelationships(state.root, filePath);
+    state.relationshipsByFile.set(filePath, rels);
+  }
+  return rels;
 }
 
 function addContextItem(state: ContextWalkState, item: ContextItem) {
@@ -226,7 +236,8 @@ async function expandSymbolReferences(state: ContextWalkState, entry: QueuedNode
   if (!file) return;
   const startLine = file.bound.source.getLineAndCharacterOfPosition(entry.node.getStart()).line + 1;
   const endLine = file.bound.source.getLineAndCharacterOfPosition(entry.node.end).line + 1;
-  for (const edge of state.relationships.filter(e => !entry.typeOnlyClass && e.source.file === entry.path &&
+  const fileRels = getFileRelationships(state, entry.path);
+  for (const edge of fileRels.filter(e => !entry.typeOnlyClass && e.source.file === entry.path &&
     e.source.line >= startLine && e.source.line <= endLine)) {
     if (entry.path === state.targetFilePath) state.referencedEdges.add(edge);
     if (edge.freshness !== "current" || (edge.resolution.status !== "resolved" && edge.resolution.status !== "external") || edge.resolution.coverage === "conditional") {
@@ -256,7 +267,7 @@ async function expandSymbolReferences(state: ContextWalkState, entry: QueuedNode
     for (const n of sortedNames) typeOnlyByName.set(n, entry.typeOnlyClass || isTypeOnlyImportBinding(declaration, n));
     const line = file.bound.source.getLineAndCharacterOfPosition(declaration.getStart()).line + 1;
     const moduleName = ts.isStringLiteral(declaration.moduleSpecifier) ? declaration.moduleSpecifier.text : undefined;
-    const edge = state.relationships.find(e => e.source.file === entry.path && e.source.line === line && e.resolution.source.target === moduleName);
+    const edge = fileRels.find(e => e.source.file === entry.path && e.source.line === line && e.resolution.source.target === moduleName);
     if (edge && entry.path === state.targetFilePath) state.referencedEdges.add(edge);
     if (!edge || edge.freshness !== "current" || edge.resolution.status !== "resolved" || edge.resolution.coverage === "conditional") {
       addContextDiagnostic(state, "referenced_import_not_expanded", entry.path, `${declaration.getText()}: ${edge?.resolution.reason ?? "relationship_not_found"}`);
@@ -339,7 +350,7 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
   }
   const target = candidates[0]!;
   if (!/\.(?:ts|mts|cts|tsx)$/.test(target.file_path)) {
-    return response({ status: "unsupported", capability: "TypeScript static imports and indexed declarations", message: "Use locate/inspect/impact for other languages." });
+    return retrieveUniversalContext(repo, config, query, target, root, signal);
   }
   const queryId = digest({ root, target: target.symbol_ref, policy: CONTEXT_POLICY, domain: query.domain ?? null,
     budget, max_depth: maxDepth, parser: PARSER_FINGERPRINT, resolver: RESOLVER_REVISION, reads: SOURCE_READ_REVISION, config });
@@ -359,7 +370,7 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
     signal,
     targetFilePath: target.file_path,
     targetSource: "",
-    relationships: [],
+    relationshipsByFile: new Map<string, ImportRelationship[]>(),
     referencedEdges: new Set<ImportRelationship>(),
     visited: new Set<string>(),
     emitted: new Set<string>(),
@@ -379,7 +390,6 @@ export async function retrieveContext(repo: SeptumRepository, config: ValidatedS
     const source = readIndexedSource(state, target.file_path);
     if (source === undefined) return state.items;
     state.targetSource = source;
-    state.relationships = repo.getImportRelationships(root);
     addSymbolSourceItem(state, target.file_path, source, target, "target_implementation", 0);
     const targetFile = loadBoundTsFile(state, target.file_path);
     const declaration = targetFile?.bound.declaration(target.line_start, target.line_end);

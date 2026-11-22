@@ -273,6 +273,26 @@ export function buildSymbolDetails(
           }
         }
 
+        const isPython = row.file_path.endsWith(".py");
+        const className = row.name.includes("::") ? row.name.split("::")[0] : undefined;
+
+        if (isPython) {
+          for (const m of sanitizedSlice.matchAll(/\bself\.([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g)) {
+            const propName = m[1];
+            const methodName = m[2];
+            const mappedType = varTypes.get(propName) || propName.charAt(0).toUpperCase() + propName.slice(1);
+            outboundCalls.add(`${mappedType}::${methodName}`);
+          }
+          for (const m of sanitizedSlice.matchAll(/\bself\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g)) {
+            const methodName = m[1];
+            if (className) {
+              outboundCalls.add(`${className}::${methodName}`);
+            } else {
+              outboundCalls.add(methodName);
+            }
+          }
+        }
+
         const sameFileSymbols = store.getSymbolsByFileId(row.file_id);
         const knownDirectCallables = new Set<string>();
         const knownStaticReceivers = new Set<string>();
@@ -301,6 +321,25 @@ export function buildSymbolDetails(
             if (/^[a-z_$]/.test(localName)) knownDirectCallables.add(localName);
             else knownStaticReceivers.add(localName);
           }
+          // Python: from x import a, B as C
+          const pyFromMatch = stmt.match(/^\s*from\s+[\w.]+\s+import\s+(.+)$/);
+          if (pyFromMatch) {
+            for (const item of pyFromMatch[1].replace(/[()]/g, "").split(",")) {
+              const trimmed = item.trim();
+              if (!trimmed) continue;
+              const aliasParts = trimmed.split(/\s+as\s+/);
+              const localName = (aliasParts[1] || aliasParts[0] || "").trim();
+              if (/^[a-z_][a-zA-Z0-9_]*$/.test(localName)) knownDirectCallables.add(localName);
+              else if (/^[A-Z][a-zA-Z0-9_]*$/.test(localName)) knownStaticReceivers.add(localName);
+            }
+          }
+          // Python: import foo as bar
+          const pyImportMatch = stmt.match(/^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?/);
+          if (pyImportMatch) {
+            const localName = pyImportMatch[2] || pyImportMatch[1].split(".").pop() || "";
+            if (/^[a-z_][a-zA-Z0-9_]*$/.test(localName)) knownDirectCallables.add(localName);
+            else if (/^[A-Z][a-zA-Z0-9_]*$/.test(localName)) knownStaticReceivers.add(localName);
+          }
         }
 
         for (const m of sanitizedSlice.matchAll(/\b([a-zA-Z_$][a-zA-Z0-9_$]*)\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g)) {
@@ -322,8 +361,14 @@ export function buildSymbolDetails(
           if (mappedType) outboundCalls.add(`${mappedType}::${m[2]}`);
         }
 
-        const bodyStartIdx = sanitizedSlice.indexOf("{");
-        const bodySlice = bodyStartIdx !== -1 ? sanitizedSlice.slice(bodyStartIdx + 1) : "";
+        let bodySlice = "";
+        if (isPython) {
+          const colonIdx = sanitizedSlice.indexOf(":");
+          bodySlice = colonIdx !== -1 ? sanitizedSlice.slice(colonIdx + 1) : sanitizedSlice;
+        } else {
+          const bodyStartIdx = sanitizedSlice.indexOf("{");
+          bodySlice = bodyStartIdx !== -1 ? sanitizedSlice.slice(bodyStartIdx + 1) : "";
+        }
         if (bodySlice && knownDirectCallables.size > 0) {
           for (const m of bodySlice.matchAll(/(?:^|[^.\w$:])([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g)) {
             const fnName = m[1];
@@ -400,7 +445,7 @@ export function buildSymbolDetails(
     ...(options.includeDependencies === true
       ? {
           relationships: store
-            .getImportRelationships(options.workspaceRoot)
+            .getImportRelationships(options.workspaceRoot, row.file_path)
             .filter((edge) => edge.source.file === row.file_path),
         }
       : {}),
