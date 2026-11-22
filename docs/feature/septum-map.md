@@ -16,7 +16,7 @@ With no domain, file or archetype filter, the workspace view returns domain root
 
 A scoped view returns indexed file records with path, domain, archetype, symbol count and an anchor for subsequent symbol lookup. Domain matching is case-insensitive. `file_filter` is a case-insensitive path substring; `archetype_filter` is an exact archetype match.
 
-Files are sorted by static entrypoint membership, connection degree and path. Scoped dependencies use file paths and can include incoming/outgoing edges to neighboring domains. A compact domain view without file/archetype filters omits intra-domain edges; full detail or narrower filters can expose them.
+Files are sorted by static entrypoint membership, connection degree and path. Scoped dependencies use file paths, pre-filter candidate edges via `getScopedImportRelationships` before running `ImportResolver`, and can include incoming/outgoing edges to neighboring domains. A compact domain view without file/archetype filters omits intra-domain edges; full detail or narrower filters can expose them.
 
 | Input | Behavior |
 | --- | --- |

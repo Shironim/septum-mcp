@@ -25,7 +25,7 @@ Boundary decisions use the [language resolver](import-resolution.md), not the ex
 {"scope":"file","file_path":"src/orders/service.ts","proposed_imports":["../billing/service"]}
 ```
 
-File scope evaluates supplied candidate imports and simulated cycles using available indexed relationships. `file_paths` supports multiple sources. Use either `file_path` or `file_paths`, not both.
+File scope evaluates supplied candidate imports and simulated cycles using available indexed relationships. It reuses a single precomputed `ImportEvidence` snapshot across incomplete-evidence checks, `BoundaryEvaluator.evaluate` and `getFileInboundImpact`, and computes full-graph baseline cycles only when a candidate cycle is detected on the target file. `file_paths` supports multiple sources. Use either `file_path` or `file_paths`, not both.
 
 The response records proposal scope and `existing_imports_checked: false` where supplied. Omitting imports or supplying an empty list does not audit the existing file. Proposal success must not be interpreted as an existing-file clean bill. Freshness/incomplete-evidence guards can also surface known existing violations before proposal evaluation.
 
@@ -41,7 +41,7 @@ When the loaded configuration declares no domains, MCP boundary checks use the i
 {"scope":"staged"}
 ```
 
-Staged scope freezes the Git index using `git write-tree`. Source and interpretation files are materialized from the resulting tree, including unchanged source needed for import/cycle resolution. Unstaged source does not replace staged bytes. Manifest/interpretation changes can widen the affected scope.
+Staged scope freezes the Git index using `git write-tree`. When no interpretation inputs (`tsconfig.json`, `package.json`, `go.mod`, etc.) are staged and the workspace index is current (`sync_state: "complete"` with matching `parser_revision`), the auditor runs an incremental fast path: it materializes bytes via `git cat-file --batch` only for staged (`ACMR`), resolution-input, unindexed and unstaged-modified (`git diff-files`) files, creates empty placeholder files in the snapshot tree for unchanged indexed files so path resolution stays intact, and reuses indexed dependencies from SQLite. When an interpretation input is staged or the index is not current, it materializes and parses the full source snapshot. Unstaged source does not replace staged bytes.
 
 Staged analysis rejects snapshots containing symlinks or submodules. Snapshot entry-count, source-size and total-source-byte limits apply. Non-source binary entries are inventoried without materializing their contents or applying the source-size cap. Unmapped source files are skipped by the staged source loop; staged approval does not establish domain ownership for every file.
 

@@ -21,8 +21,8 @@ Septum is a local static-analysis MCP server and CLI that keeps AI coding agents
 
 ### Language Support & Analysis Scope
 
-- **AST & Declarations (`web-tree-sitter`):** Partial declaration extraction for TypeScript, JavaScript, PHP, Python, Go, Rust, Java, C#, Ruby, Blade, and embedded scripts in Vue, Astro, and Svelte. Deep context (`context_mode: "deep"`) targets `.ts`, `.tsx`, `.mts`, and `.cts` files.
-- **Entrypoint Adapters:** Selected patterns in Laravel, Symfony, MCP/CLI, NestJS, Express, Fastify, Hono, Elysia, FastAPI, Django, Flask, and Go.
+- **AST & Declarations (`web-tree-sitter` + TypeScript compiler fallback):** Partial declaration extraction for TypeScript, JavaScript, PHP, Python, Go, Rust, Java, C#, Ruby, Blade, and embedded scripts in Vue, Astro, and Svelte. TypeScript and TSX files automatically fall back to the TypeScript compiler parser when `tree-sitter-wasms` hits syntax recovery on newer syntax. Deep context (`context_mode: "deep"`) targets `.ts`, `.tsx`, `.mts`, and `.cts` files.
+- **Entrypoint Adapters:** Selected patterns in Laravel, Symfony, MCP/CLI, NestJS, Express, Fastify, Hono, Elysia, Next.js App Router, FastAPI, Django, Flask, and Go.
 - **Import Resolution:** Supported patterns across JS/TS, PHP, Python manifests/lockfiles, Go workspaces/replacements, Rust Cargo/modules, Ruby literal requires/gems, Java source projects, and C# namespaces/project references.
 
 > **Static Analysis Scope:** Septum evaluates source files and dependency policies statically—it does not execute the target application or establish complete runtime call graphs. Application behavior still requires application tests. See [implemented features](docs/feature/README.md) and [import resolution](docs/feature/import-resolution.md) for full tool contracts and known limits.
@@ -107,6 +107,7 @@ If your MCP client is not configured via `septum init`, add Septum to `.mcp.json
 | `septum init [--force]` | Scaffold agent integrations and build the initial symbol catalog. `--force` regenerates Septum-managed configs while preserving the existing database and user git hooks |
 | `septum sync [--json]` | Synchronize AST and update the symbol catalog in `.septum/septum.db` (full or incremental) |
 | `septum check [--strict] [--staged] [--json]` | Verify boundary rules and detect cross-domain or circular dependency violations |
+| `septum stats [workspace] [--json]` | Summarize recent MCP tool calls, error rates, and latency/size percentiles from `.septum/septum.log` |
 | `septum hook pre-write` | Reconstruct supported candidate edits from stdin and evaluate their imports (interception depends on client hook configuration) |
 | `septum serve` | Start the stdio Model Context Protocol (MCP) server |
 

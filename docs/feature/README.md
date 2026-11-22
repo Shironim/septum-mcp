@@ -2,7 +2,7 @@
 
 This directory documents implemented behavior, tool contracts, and known limitations for version `0.5.0` ([package.json](../../package.json)). Installed binaries or running MCP processes may differ if built from another revision.
 
-Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. The stdio server exposes four MCP tools, three resources and two prompts. CLI commands initialize and synchronize the index, audit boundaries and run hooks. The index describes static source evidence.
+Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. The stdio server exposes four MCP tools, five resources (plus one domain resource template) and five workflow prompts. CLI commands initialize and synchronize the index, summarize telemetry, audit boundaries and run hooks. The index describes static source evidence.
 
 ## Feature documents
 
@@ -48,7 +48,7 @@ Pass `workspace_path` when calling tools across repositories. The server resolve
 
 ## Language coverage
 
-[language-capabilities.ts](../../src/core/parser/language-capabilities.ts) registers partial declaration extraction for TypeScript, JavaScript, PHP, Python, Go, Rust, Java, C#, Ruby, Blade and embedded scripts in Vue/Astro/Svelte. Declaration support, import resolution, deep context and caller analysis have different coverage.
+[language-capabilities.ts](../../src/core/parser/language-capabilities.ts) registers partial declaration extraction for TypeScript, JavaScript, PHP, Python, Go, Rust, Java, C#, Ruby, Blade and embedded scripts in Vue/Astro/Svelte. For TypeScript and JavaScript files, [typescript.ts](../../src/core/parser/extractors/typescript.ts) falls back to the official TypeScript compiler AST ([typescript-compiler-fallback.ts](../../src/core/parser/extractors/typescript-compiler-fallback.ts)) when `tree-sitter-wasms` reports `syntax_recovery` on valid modern syntax. Declaration support, import resolution, deep context and caller analysis have different coverage.
 
 Kotlin, Scala and Zig are recognized for unsupported-file diagnostics, with no registered extractor. Rust, Ruby, Java and C# have bounded import resolvers with language-specific limitations; see [import resolution](import-resolution.md). Extractor `is_external` flags do not override the resolver's final relationship evidence. Deep context accepts `.ts`, `.tsx`, `.mts` and `.cts` targets.
 

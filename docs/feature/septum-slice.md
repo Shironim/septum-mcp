@@ -16,7 +16,7 @@ This tool matches a query against a stored static entrypoint catalog and returns
 
 ## Query matching
 
-The tracer first attempts an exact indexed SQL lookup (`findExactVerticalSlices`) for literal `METHOD /uri`, `/uri`, `Controller@action`, `Controller::action` and named-route queries before falling back to full catalog scoring for parameterized URIs, omni-triggers, symbol matches and token-scored task intent. Supported examples include:
+The tracer first attempts an exact indexed SQL lookup (`findExactVerticalSlices`) for literal `METHOD /uri`, `/uri`, `Controller@action`, `Controller::action` and named-route queries, then checks metadata columns via `findVerticalSlices` (`route_uri`, `route_name`, `controller_class`, `action_name`, `feature_key` before `execution_chain_json`), and falls back to full catalog scoring (`getAllVerticalSlices`) only for parameterized URIs, omni-triggers, symbol matches or token-scored task intent. Supported examples include:
 
 - `POST /orders`, `/orders/{id}` and named routes.
 - `OrderController@store`, `OrderController::store` or a controller name.
@@ -34,12 +34,12 @@ An explicit method such as `PURGE` stays part of the lookup even when the catalo
 
 ## Catalog construction
 
-The registry contains 12 semantic adapters:
+The registry contains 13 semantic adapters:
 
 | Adapter group | Registered adapters |
 | --- | --- |
 | PHP | Laravel, Symfony |
-| TypeScript/JavaScript | NestJS, Express, Fastify, Hono, Elysia, MCP/CLI |
+| TypeScript/JavaScript | NestJS, Express, Fastify, Hono, Elysia, Next.js App Router, MCP/CLI |
 | Python | FastAPI, Django, Flask |
 | Go | One Go HTTP adapter covering selected standard HTTP/Gin/Echo/Chi/Fiber patterns |
 
@@ -47,7 +47,7 @@ Registration does not mean an adapter applies to every repository, nor that all 
 
 Generic extraction complements uncovered route files. Files already represented by an adapter are excluded from generic declarative-route extraction to avoid duplicate/unprefixed mounted routes. Uncovered controller files retain convention-based entrypoints when another file gains an adapter route. Generic TypeScript/JavaScript route discovery recognizes literal calls on unbound conventional router names in route modules. These calls and controller conventions carry inferred ingress evidence. Locally declared receivers require adapter recognition. The shared source inventory applies containment and ignore rules; semantic files can be outside registered domain roots.
 
-Both ingestion and query refresh use the shared slice-catalog publisher with bulk prepared SQLite inserts. All 12 semantic adapters use entrypoint-first discovery or fast text pre-filters (such as two-pass URLconf-to-view parsing in Django, route-call/decorator pre-filters in Express, NestJS, Fastify, Hono, Elysia, FastAPI, Flask, Symfony and Go) so non-routing files are not redundantly re-parsed. `CallGraphTracer` and `ImportCandidateResolver` load symbols, dependencies and import evidence lazily per visited file and compute outbound controller dependencies once per controller file rather than repeating BFS per method. Catalog inputs, filesystem observations, membership and adapter counts are tracked. Dirty/changed catalogs can be refreshed; extraction failure is surfaced rather than certifying a complete empty catalog. Stored generic chains are constructed to the supported maximum depth; query depth limits returned expansion.
+Both ingestion and query refresh use the shared slice-catalog publisher with bulk prepared SQLite inserts. All 13 semantic adapters use entrypoint-first discovery or fast text pre-filters (such as two-pass URLconf-to-view parsing in Django, file-based `app/**/route.*` scanning in Next.js, and route-call/decorator pre-filters in Express, NestJS, Fastify, Hono, Elysia, FastAPI, Flask, Symfony and Go) so non-routing files are not redundantly re-parsed. `CallGraphTracer` and `ImportCandidateResolver` load symbols, dependencies and import evidence lazily per visited file and compute outbound controller dependencies once per controller file rather than repeating BFS per method. Catalog inputs, filesystem observations, membership and adapter counts are tracked. Dirty/changed catalogs can be refreshed; extraction failure is surfaced rather than certifying a complete empty catalog. Stored generic chains are constructed to the supported maximum depth; query depth limits returned expansion.
 
 SQLite stores convention-based entries as `inferred_http_route`. The framework registration probe compares the remaining entries with its expected registrations. TypeScript handler binding uses the workspace import resolver, including supported `tsconfig.json` path aliases that resolve to one indexed source file.
 
@@ -101,6 +101,10 @@ Computed route fields and localized path arrays can leave routes absent. YAML an
 The adapter recognizes decorators bound to `@nestjs/common`, including named aliases and namespace imports. It combines literal controller and method paths, including path arrays and the `path` field of a controller options object. It recognizes verb decorators and supported `RequestMapping` options using `RequestMethod`. `All` and `RequestMethod.ALL` produce `ANY` catalog rows. Controller coordinates point to the method declaration in its own file.
 
 The catalog represents decorator declarations. Runtime module registration, global prefixes, versioning and inherited handlers are outside the adapter's static evidence. Computed paths or methods and unresolved decorator bindings can leave entries absent.
+
+## Next.js App Router routes
+
+The Next.js adapter inspects `app/**/route.{ts,tsx,js,jsx,mjs,cjs}` files when `next` is declared in the root or workspace `package.json`. It normalizes directory segments into route URIs—omitting route groups `(group)`, converting dynamic segments `[id]` to `:id`, and converting catch-all segments `[...slug]` or `[[...slug]]` to `*slug`. Exported HTTP method functions (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD`), including `export async function` and exported variable handlers, become catalog entrypoints with local and imported call-chain hints.
 
 ## Python HTTP routes
 

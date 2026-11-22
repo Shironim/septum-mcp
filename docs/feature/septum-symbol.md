@@ -10,7 +10,7 @@ Common selectors are `query` (alias `symbol`), `domain`, `file_path`, `symbol_re
 {"action":"locate","query":"OrderController::store"}
 ```
 
-The locator parses supported PHP-style undefined-method errors, Python missing-attribute errors, class/member syntax (`::`, `->`, `.`) and bare names. On fuzzy misses, `domain` and `file_path` filters are pushed down to SQLite and large candidate sets apply a 32-bit character-overlap bitmask prefilter before Damerau-Levenshtein scoring. Fuzzy suggestions prioritize exact camelCase/snake_case word-boundary token matches ahead of Damerau-Levenshtein edit similarity, combined with prefix/substring signals. Suggestions are candidates, not confirmed declarations.
+The locator parses supported PHP-style undefined-method errors, Python missing-attribute errors, class/member syntax (`::`, `->`, `.`) and bare names. Exact and suffix lookups (`findSymbolsByName`) query `WHERE (s.name = ? OR s.leaf_name = ?)` against the indexed `name` and `leaf_name` columns (`idx_symbols_name`, `idx_symbols_leaf_name`). On fuzzy misses, `findFuzzySymbolCandidates` pushes `domain`, `file_path`, `leaf_name` length bounds and distinct-character overlap filters down to SQLite (capped at 500 rows) before applying a 32-bit character-overlap bitmask and Damerau-Levenshtein scoring in memory. Fuzzy suggestions prioritize exact camelCase/snake_case word-boundary token matches ahead of edit similarity, combined with prefix/substring signals. Suggestions are candidates, not confirmed declarations.
 
 A successful response includes `found`, `file_path`, `container_name`, `exact_symbol`, `symbol_ref`, suggestions and sibling methods. The nested coordinates are:
 
@@ -58,7 +58,7 @@ For slices of at most 15 lines, or with `semantic_depth: 2`, the handler attempt
 {"action":"impact","query":"cancelOrder","file_path":"src/orders/service.ts"}
 ```
 
-Impact combines indexed declarations/import dependents, supported import-bound TypeScript/JavaScript call sites and legacy lexical caller hints. Candidate traversal includes importing files, same-file callers and selected same-package/namespace candidates. It does not establish complete dynamic dispatch.
+Impact combines indexed declarations/import dependents, supported import-bound TypeScript/JavaScript call sites and legacy lexical caller hints. Import-relationship resolution is scoped to candidate target files and inbound importers (`getScopedImportRelationships`) rather than resolving every edge in the workspace. Candidate traversal includes importing files, same-file callers and selected same-package/namespace candidates. It does not establish complete dynamic dispatch.
 
 The response separates `call_sites`, `runtime_imports`, `type_only_imports`, `import_dependents`, legacy `inbound_callers` and resolution warnings, with `call_sites_count`, `runtime_imports_count` and `type_only_imports_count` in `impact_summary`. Default `format: "text"` renders a grouped summary (`Call Sites`, `Runtime Imports`, `Type-Only Imports`, and warnings) without duplicating file entries. It reports `coverage: "partial"`, `inbound_callers_complete: false` and an advisory risk scope. Risk uses distinct caller files/domains:
 
