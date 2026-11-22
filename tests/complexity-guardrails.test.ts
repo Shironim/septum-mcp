@@ -11,6 +11,8 @@ import { BoundaryEvaluator } from "../src/core/boundary/evaluator.ts";
 import { ModuleResolver } from "../src/core/resolver/module-resolver.ts";
 import { handleCheckBoundary } from "../src/mcp/tools/boundary.ts";
 import { auditStagedFiles } from "../src/core/boundary/staged-auditor.ts";
+import { WorkspaceManager } from "../src/mcp/workspace-manager.ts";
+import { ReadWriteWorkQueue } from "../src/core/resources/work-queue.ts";
 
 describe("Big-O Complexity & Concurrency Guardrails", () => {
   it("uses idx_symbols_name and idx_symbols_leaf_name in findSymbolsByName (no SCAN symbols)", () => {
@@ -97,6 +99,80 @@ describe("Big-O Complexity & Concurrency Guardrails", () => {
     } finally {
       db.close();
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("allows concurrent read-only work across workspaces and within a workspace without serialization", async () => {
+    const rw = new ReadWriteWorkQueue();
+    const events: string[] = [];
+    let releaseReader1!: () => void;
+    const reader1Started = new Promise<void>((resolve) => {
+      void rw.runRead(async () => {
+        events.push("r1-start");
+        resolve();
+        await new Promise<void>((r) => {
+          releaseReader1 = r;
+        });
+        events.push("r1-end");
+      });
+    });
+    await reader1Started;
+
+    // Second reader must start and finish while reader 1 is still active
+    await rw.runRead(async () => {
+      events.push("r2-start");
+      events.push("r2-end");
+    });
+    expect(events).toEqual(["r1-start", "r2-start", "r2-end"]);
+    releaseReader1();
+    await rw.drain();
+
+    // Cross-workspace isolation in WorkspaceManager
+    const rootA = mkdtempSync(join(tmpdir(), "septum-ws-a-"));
+    const rootB = mkdtempSync(join(tmpdir(), "septum-ws-b-"));
+    const manager = new WorkspaceManager();
+    try {
+      for (const [r, name] of [
+        [rootA, "a"],
+        [rootB, "b"],
+      ] as const) {
+        mkdirSync(join(r, "src"), { recursive: true });
+        writeFileSync(join(r, "package.json"), JSON.stringify({ name }));
+        writeFileSync(join(r, "septum.config.json"), JSON.stringify({ domains: { src: { root: "src" } } }));
+        writeFileSync(join(r, "src/index.ts"), `export const ${name} = 1;\n`);
+      }
+
+      const leaseA = manager.acquire(rootA);
+      const leaseB = manager.acquire(rootB);
+      try {
+        let releaseA!: () => void;
+        let aEntered!: () => void;
+        const aEnteredPromise = new Promise<void>((r) => {
+          aEntered = r;
+        });
+        const taskA = manager.runInWorkspace(leaseA.context, async () => {
+          aEntered();
+          await new Promise<void>((r) => {
+            releaseA = r;
+          });
+          return "A";
+        });
+
+        await aEnteredPromise;
+        // Workspace B must complete immediately without waiting for Workspace A
+        const resultB = await manager.runInWorkspace(leaseB.context, async () => "B");
+        expect(resultB).toBe("B");
+
+        releaseA();
+        expect(await taskA).toBe("A");
+      } finally {
+        leaseA.release();
+        leaseB.release();
+      }
+    } finally {
+      await manager.close();
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
     }
   });
 

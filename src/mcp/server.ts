@@ -314,7 +314,14 @@ export function createMcpServer(manager: WorkspaceManager): Server {
         : await manager.runInWorkspace(lease.context, prepared => {
           onAudit();
           return parsed.execute(prepared, signal);
-        }, { signal, isDomainRegistration, onSync });
+        }, {
+          signal,
+          isDomainRegistration,
+          mode: isDomainRegistration || (parsed.name === "septum_slice" && lease.context.repo.getMeta("slices_dirty") === "1")
+            ? "write"
+            : "read",
+          onSync,
+        });
       return finish(response);
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
@@ -384,7 +391,20 @@ export async function runMCPServer(): Promise<void> {
     await server.connect(transport);
     if (isWorkspaceInitialized(initialRoot)) {
       const initial = manager.acquire(initialRoot);
-      try { await initial.context.ready; } finally { initial.release(); }
+      try {
+        await initial.context.ready;
+      } catch (err) {
+        SeptumTelemetry.recordSystemEvent({
+          level: "WARN",
+          component: "mcp_server",
+          event: "initial_workspace_sync_failed",
+          fields: { message: (err instanceof Error ? err.message : String(err)).slice(0, 256) },
+          workspaceRoot: initialRoot,
+          emitStderr: false,
+        });
+      } finally {
+        initial.release();
+      }
     }
     if (stopping) return;
     if (process.env.SEPTUM_MEMORY_DIAGNOSTICS === "1") {

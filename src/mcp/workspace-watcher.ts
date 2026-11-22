@@ -9,7 +9,7 @@ import { isResolutionInput } from '../core/resolver/interpretation-inputs.ts';
 import { rebuildSliceCatalog } from '../core/resolver/slice-catalog.ts';
 import { shouldIgnoreSourcePath } from '../core/resources/ignore.ts';
 import { RESOURCE_LIMITS } from '../core/resources/limits.ts';
-import { SerialWorkQueue } from '../core/resources/work-queue.ts';
+import type { WorkQueue } from '../core/resources/work-queue.ts';
 
 export class WatchBudget {
   count = 0;
@@ -38,7 +38,7 @@ export class WorkspaceWatcher {
     private readonly repo: SeptumRepository,
     private readonly pipeline: IngestionPipeline,
     private readonly ready: Promise<void>,
-    private readonly queue: SerialWorkQueue,
+    private readonly queue: WorkQueue,
     private readonly budget: WatchBudget,
     private readonly loadConfig: () => ValidatedSeptumConfig,
   ) {

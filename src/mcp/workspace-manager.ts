@@ -10,7 +10,7 @@ import { ModuleResolver } from '../core/resolver/module-resolver.ts';
 import { findProjectRoot, isAppHostDirectory, isPathContained, PROJECT_ROOT_MARKERS } from '../core/resolver/path-resolver.ts';
 import { IngestionPipeline } from '../core/ingestion/pipeline.ts';
 import { RESOURCE_LIMITS } from '../core/resources/limits.ts';
-import { SerialWorkQueue, waitForSharedWork } from '../core/resources/work-queue.ts';
+import { ReadWriteWorkQueue, waitForSharedWork } from '../core/resources/work-queue.ts';
 import { WatchBudget, WorkspaceWatcher } from './workspace-watcher.ts';
 import { DomainRootConflictError } from '../core/config/domain-ownership.ts';
 import { WorkspaceBusyError } from '../core/errors.ts';
@@ -69,13 +69,13 @@ export interface WorkspaceContext {
   pipeline: IngestionPipeline;
   ready: Promise<void>;
   watcher: WorkspaceWatcher;
+  queue: ReadWriteWorkQueue;
 }
 interface Entry { context: WorkspaceContext; leases: number; lastUsed: number; initializing: boolean; abort: AbortController; disposal?: Promise<void> }
 export interface WorkspaceLease { context: WorkspaceContext; release(): void }
 
 export class WorkspaceManager {
   private contexts = new Map<string, Entry>();
-  private queue = new SerialWorkQueue();
   private budget = new WatchBudget();
   private disposals = new Set<Promise<void>>();
   private closed = false;
@@ -112,7 +112,12 @@ export class WorkspaceManager {
   async runInWorkspace<T>(
     ctx: WorkspaceContext,
     work: (prepared: WorkspaceContext) => Promise<T>,
-    { signal, isDomainRegistration = false, onSync }: { signal?: AbortSignal; isDomainRegistration?: boolean; onSync?: () => void } = {},
+    {
+      signal,
+      isDomainRegistration = false,
+      mode = "read",
+      onSync,
+    }: { signal?: AbortSignal; isDomainRegistration?: boolean; mode?: "read" | "write"; onSync?: () => void } = {},
   ): Promise<T> {
     signal?.throwIfAborted();
     if (this.closed) throw new Error("Septum server is shutting down");
@@ -136,7 +141,10 @@ export class WorkspaceManager {
       }
       // Flush can enqueue work on the same lane. Reload and use policy only after
       // admission, so another queued request cannot change the policy mid-call.
-      return await this.queue.run(async () => {
+      const runQueued = mode === "write" || isDomainRegistration
+        ? ctx.queue.runWrite.bind(ctx.queue)
+        : ctx.queue.runRead.bind(ctx.queue);
+      return await runQueued(async () => {
         if (this.closed) throw new Error("Septum server is shutting down");
         const syncError = ctx.repo.getMeta("sync_error");
         if (syncError && !(isDomainRegistration && ctx.repo.getMeta("sync_error_code") === "DOMAIN_ROOT_CONFLICT")) {
@@ -169,7 +177,8 @@ export class WorkspaceManager {
         const pipeline = new IngestionPipeline(repo, root);
         const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(root, repo));
         const abort = new AbortController();
-        const ready = this.queue.run(async () => {
+        const queue = new ReadWriteWorkQueue();
+        const ready = queue.runWrite(async () => {
           abort.signal.throwIfAborted();
           // An explicit first registration chooses ownership before discovery.
           if (options.deferDiscovery && Object.keys(config.domains).length === 0 && repo.getAllDomains().length === 0) return;
@@ -180,8 +189,8 @@ export class WorkspaceManager {
             if (!(error instanceof DomainRootConflictError)) throw error;
           }
         });
-        const watcher = new WorkspaceWatcher(root, repo, pipeline, ready, this.queue, this.budget, () => ConfigLoader.load(undefined, root));
-        entry = {context:{root,config,db,repo,evaluator,pipeline,ready,watcher},leases:0,lastUsed:this.now(),initializing:true,abort};
+        const watcher = new WorkspaceWatcher(root, repo, pipeline, ready, queue, this.budget, () => ConfigLoader.load(undefined, root));
+        entry = {context:{root,config,db,repo,evaluator,pipeline,ready,watcher,queue},leases:0,lastUsed:this.now(),initializing:true,abort};
         this.contexts.set(root, entry);
         const initialized = entry;
         void ready.then(() => { initialized.initializing = false; }, () => { initialized.initializing = false; this.dispose(initialized); });
@@ -201,7 +210,7 @@ export class WorkspaceManager {
     const stop = entry.context.watcher.close();
     // Eviction of an idle context closes its database before admitting another.
     if (idle) entry.context.db.close();
-    const disposal = stop.then(async () => { if (!idle) { await this.queue.drain(); entry.context.db.close(); } });
+    const disposal = stop.then(async () => { if (!idle) { await entry.context.queue.drain(); entry.context.db.close(); } });
     entry.disposal = disposal;
     this.disposals.add(disposal);
     void disposal.finally(() => this.disposals.delete(disposal)).catch(error =>
@@ -225,7 +234,7 @@ export class WorkspaceManager {
     if (this.closing) return this.closing;
     this.closed = true; clearInterval(this.idleTimer);
     const pending = [...this.contexts.values()].map(entry => this.dispose(entry));
-    this.closing = Promise.allSettled([...pending, ...this.disposals, this.queue.drain()]).then(results => {
+    this.closing = Promise.allSettled([...pending, ...this.disposals]).then(results => {
       const failed = results.find(result => result.status === 'rejected');
       if (failed?.status === 'rejected') throw failed.reason;
     });
