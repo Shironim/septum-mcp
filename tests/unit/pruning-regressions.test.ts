@@ -182,7 +182,7 @@ describe("refactoring preserves capabilities with bounded work", () => {
 
   it("retains all twelve semantic adapters alongside language extraction", async () => {
     expect(SemanticSliceExtractorRegistry.getCapabilities().map(adapter => adapter.id).sort()).toEqual([
-      "django", "elysia", "express", "fastapi", "fastify", "flask", "golang", "hono", "laravel", "mcp-cli", "nestjs", "symfony",
+      "django", "elysia", "express", "fastapi", "fastify", "flask", "golang", "hono", "laravel", "mcp-cli", "nestjs", "nextjs", "symfony",
     ]);
     put("src/example.py", "def entry():\n    return 1\n");
     put("src/example.go", "package example\nfunc Run() {}\n");

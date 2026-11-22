@@ -28,6 +28,11 @@ function stripCommentsAndStrings(source: string): string {
     .replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g, '""');
 }
 
+export function computeSymbolLeafName(name: string): string {
+  const trimmed = name.trim().replace(/\(\)$/, "");
+  return trimmed.split(/::|->|[.#/\\]/).pop() ?? trimmed;
+}
+
 export class SymbolRepository {
   constructor(private db: Database) {}
 
@@ -36,8 +41,8 @@ export class SymbolRepository {
     if (symbols.length === 0) return;
 
     const stmt = this.db.query(
-      `INSERT INTO symbols (file_id, name, kind, signature, visibility, line_start, line_end, line_count, nesting_depth) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO symbols (file_id, name, leaf_name, kind, signature, visibility, line_start, line_end, line_count, nesting_depth)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
     for (const sym of symbols) {
@@ -46,6 +51,7 @@ export class SymbolRepository {
       stmt.run(
         fileId,
         sym.name,
+        computeSymbolLeafName(sym.name),
         sym.kind,
         sym.signature,
         sym.visibility,
@@ -71,11 +77,11 @@ export class SymbolRepository {
   ): SymbolCandidate[] {
     const target = name.trim().replace(/\(\)$/, "");
     if (!target) return [];
-    const leaf = target.split(/::|->|[.#\\]/).pop() ?? target;
+    const leaf = computeSymbolLeafName(target);
     let query = `SELECT s.*, f.path AS file_path, f.content_hash AS indexed_content_hash, d.name AS domain_name
       FROM symbols s JOIN files f ON s.file_id = f.id JOIN domains d ON f.domain_id = d.id
-      WHERE (s.name = ? OR substr(s.name, -length(?)) = ?)`;
-    const params: string[] = [target, leaf, leaf];
+      WHERE (s.name = ? OR s.leaf_name = ?)`;
+    const params: string[] = [target, leaf];
     if (options.domain) { query += " AND d.name = ?"; params.push(options.domain); }
     const filePath = options.filePath ?? options.reference?.file_path;
     if (filePath) { query += " AND f.path = ?"; params.push(filePath); }
@@ -142,6 +148,57 @@ export class SymbolRepository {
       .all(`%/${containerName}.%`, `%\\${containerName}.%`);
 
     return files.map((file) => ({ file }));
+  }
+
+  public findFuzzySymbolCandidates(
+    queryStr: string,
+    options?: { domainId?: number; filePath?: string; limit?: number }
+  ): Array<SymbolRecord & { file_path: string }> {
+    const targetLeaf = computeSymbolLeafName(queryStr);
+    const clauses = [
+      "s.kind IN ('class', 'interface', 'trait', 'struct', 'enum', 'type', 'method', 'function', 'constant')",
+    ];
+    const params: Array<string | number> = [];
+    if (options?.filePath) {
+      clauses.push("f.path = ?");
+      params.push(options.filePath);
+    }
+    if (options?.domainId !== undefined) {
+      clauses.push("f.domain_id = ?");
+      params.push(options.domainId);
+    }
+    if (targetLeaf.length >= 2) {
+      const minLen = Math.max(1, Math.floor(targetLeaf.length * 0.4));
+      const maxLen = Math.max(targetLeaf.length + 12, Math.ceil(targetLeaf.length * 2.5));
+      clauses.push("length(s.leaf_name) BETWEEN ? AND ?");
+      params.push(minLen, maxLen);
+    }
+    if (targetLeaf.length >= 4) {
+      const lower = targetLeaf.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const distinct: string[] = [];
+      for (const ch of lower) {
+        if (!distinct.includes(ch)) {
+          distinct.push(ch);
+          if (distinct.length >= 4) break;
+        }
+      }
+      if (distinct.length > 0) {
+        const charClauses = distinct.map(() => "instr(lower(s.leaf_name), ?) > 0");
+        clauses.push(`(${charClauses.join(" OR ")})`);
+        params.push(...distinct);
+      }
+    }
+    const limit = Math.max(1, options?.limit ?? 500);
+    params.push(targetLeaf.length, limit);
+    const query = `
+      SELECT s.*, f.path AS file_path
+      FROM symbols s
+      JOIN files f ON s.file_id = f.id
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY abs(length(s.leaf_name) - ?) ASC, s.line_start ASC
+      LIMIT ?
+    `;
+    return this.db.query<SymbolRecord & { file_path: string }, Array<string | number>>(query).all(...params);
   }
 
   public getAllSymbolsWithFiles(filter?: { domainId?: number; filePath?: string }): Array<SymbolRecord & { file_path: string }> {

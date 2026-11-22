@@ -37,7 +37,8 @@ export class BoundaryEvaluator {
   public evaluate(
     filePath: string,
     proposedImports: string[] = [],
-    config?: ValidatedSeptumConfig
+    config?: ValidatedSeptumConfig,
+    snapshot?: ImportEvidence
   ): BoundaryViolation[] {
     let activeConfig = config;
     if (!activeConfig) {
@@ -57,14 +58,14 @@ export class BoundaryEvaluator {
         // Resolutions from import-evidence (requires workspace_root meta) — optional, used for
         // richer cycle detection. Falls back to raw indexed deps when unavailable (e.g. in tests).
         const indexed = this.repo?.getMeta?.("workspace_root");
-        const auditEvidence = (indexed && this.repo ? this.repo.getImportEvidence(this.resolver.getProjectRoot()) : undefined);
+        const auditEvidence = snapshot ?? (indexed && this.repo ? this.repo.getImportEvidence(this.resolver.getProjectRoot()) : undefined);
         const evidence = indexed ? auditEvidence?.relationships : undefined;
         const resolutions = evidence && new Map(evidence.filter(edge => edge.freshness === "current").map(edge => [
           dependencyKey(edge.source.file, edge.source.line, edge.resolution.source.target, edge.source.statement),
           edge.resolution,
         ]));
 
-        const allDeps = this.repo.getAllDependenciesWithDomains();
+        const allDeps = auditEvidence?.dependencies ?? this.repo.getAllDependenciesWithDomains();
         const existingDeps = allDeps.filter(
           (dep) => dep.source_file !== filePath
         );
@@ -77,27 +78,6 @@ export class BoundaryEvaluator {
           is_external: false,
         }));
 
-        // Baseline: detect cycles that already exist in the indexed graph, independent of
-        // workspace_root / import-evidence so the tagging works even in in-memory test repos.
-        // We detect against ALL deps (no filter) so we capture all existing cycles regardless
-        // of which file anchors the DFS traversal.
-        const baselineCycles = this.detectCircularDependencies(
-          activeConfig,
-          allDeps,
-          undefined, // no relevantFiles filter — capture all pre-existing cycles
-          resolutions
-        );
-        // Normalize cycle messages to a rotation-agnostic canonical form:
-        // extract the node list, sort it, then join. This handles DFS start-node differences.
-        const extractCycleNodeSet = (msg: string): string => {
-          const match = /detected: (.+)\.$/.exec(msg);
-          if (!match) return msg;
-          // "a -> b -> a" → split, dedupe, sort
-          const nodes = match[1]!.split(" -> ").filter((n, i, arr) => !(i === arr.length - 1 && n === arr[0]));
-          return nodes.sort().join(",");
-        };
-        const baselineCanonicals = new Set(baselineCycles.map((c) => extractCycleNodeSet(c.message)));
-
         const detectedCycles = this.detectCircularDependencies(
           activeConfig,
           [...existingDeps, ...proposedDeps],
@@ -105,11 +85,32 @@ export class BoundaryEvaluator {
           resolutions
         );
 
-        for (const cycle of detectedCycles) {
-          if (baselineCanonicals.has(extractCycleNodeSet(cycle.message))) {
-            cycle.pre_existing = true;
+        if (detectedCycles.length > 0) {
+          // Baseline: detect cycles that already exist in the indexed graph, independent of
+          // workspace_root / import-evidence so the tagging works even in in-memory test repos.
+          const baselineCycles = this.detectCircularDependencies(
+            activeConfig,
+            allDeps,
+            undefined, // no relevantFiles filter — capture all pre-existing cycles
+            resolutions
+          );
+          // Normalize cycle messages to a rotation-agnostic canonical form:
+          // extract the node list, sort it, then join. This handles DFS start-node differences.
+          const extractCycleNodeSet = (msg: string): string => {
+            const match = /detected: (.+)\.$/.exec(msg);
+            if (!match) return msg;
+            // "a -> b -> a" → split, dedupe, sort
+            const nodes = match[1]!.split(" -> ").filter((n, i, arr) => !(i === arr.length - 1 && n === arr[0]));
+            return nodes.sort().join(",");
+          };
+          const baselineCanonicals = new Set(baselineCycles.map((c) => extractCycleNodeSet(c.message)));
+
+          for (const cycle of detectedCycles) {
+            if (baselineCanonicals.has(extractCycleNodeSet(cycle.message))) {
+              cycle.pre_existing = true;
+            }
+            violations.push(cycle);
           }
-          violations.push(cycle);
         }
       }
     }

@@ -27,8 +27,16 @@ export function bindContextFile(path: string, text: string) {
     checker,
     hasErrors: program.getSyntacticDiagnostics(source).length > 0,
     declaration(start: number, end: number) {
-      return source.statements.find(node => source.getLineAndCharacterOfPosition(node.getStart()).line + 1 <= start &&
+      const stmt = source.statements.find(node => source.getLineAndCharacterOfPosition(node.getStart()).line + 1 <= start &&
         source.getLineAndCharacterOfPosition(node.end).line + 1 >= end);
+      if (stmt && ts.isClassDeclaration(stmt)) {
+        const member = stmt.members.find(m =>
+          source.getLineAndCharacterOfPosition(m.getStart()).line + 1 <= start &&
+          source.getLineAndCharacterOfPosition(m.end).line + 1 >= end
+        );
+        if (member) return member;
+      }
+      return stmt;
     },
     contract(node: ts.ClassDeclaration) {
       const printer = ts.createPrinter();
@@ -199,16 +207,38 @@ export function bindContextFile(path: string, text: string) {
           }
         }
         if (!signatureNodes && ts.isCallExpression(child)) {
+          const effectful = (arg: ts.Node): boolean => ts.isCallExpression(arg) || ts.isNewExpression(arg) ||
+            ts.isAwaitExpression(arg) || ts.isDeleteExpression(arg) ||
+            ts.isBinaryExpression(arg) && arg.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && arg.operatorToken.kind <= ts.SyntaxKind.LastAssignment ||
+            ts.isPostfixUnaryExpression(arg) || ts.forEachChild(arg, n => effectful(n) || undefined) === true;
+          const callArgs = () => child.arguments.length <= 16
+            ? child.arguments.map(arg => child.arguments.some(effectful) ? unknown : evaluate(arg))
+            : Array(16).fill(unknown);
+
           if (ts.isIdentifier(child.expression)) {
-            const effectful = (arg: ts.Node): boolean => ts.isCallExpression(arg) || ts.isNewExpression(arg) ||
-              ts.isAwaitExpression(arg) || ts.isDeleteExpression(arg) ||
-              ts.isBinaryExpression(arg) && arg.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && arg.operatorToken.kind <= ts.SyntaxKind.LastAssignment ||
-              ts.isPostfixUnaryExpression(arg) || ts.forEachChild(arg, n => effectful(n) || undefined) === true;
             for (const declaration of checker.getSymbolAtLocation(child.expression)?.declarations ?? []) {
               calls.push({ target: top(declaration),
                 name: ts.isImportSpecifier(declaration) ? (declaration.propertyName ?? declaration.name).text :
                   ts.isImportClause(declaration) ? "default" : undefined,
-                arguments: child.arguments.length <= 16 ? child.arguments.map(arg => child.arguments.some(effectful) ? unknown : evaluate(arg)) : Array(16).fill(unknown) });
+                arguments: callArgs() });
+            }
+          } else if (
+            ts.isPropertyAccessExpression(child.expression) &&
+            child.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+            ts.isClassDeclaration(node.parent)
+          ) {
+            const memberName = child.expression.name.text;
+            const sibling = node.parent.members.find(
+              (m) =>
+                m !== node &&
+                (ts.isMethodDeclaration(m) || ts.isGetAccessorDeclaration(m)) &&
+                m.name &&
+                (ts.isIdentifier(m.name) || ts.isStringLiteral(m.name)) &&
+                m.name.text === memberName
+            );
+            if (sibling) {
+              locals.add(sibling);
+              calls.push({ target: sibling, arguments: callArgs() });
             }
           }
           ts.forEachChild(child, visit);

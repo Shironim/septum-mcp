@@ -60,7 +60,6 @@ describe("Domain Detection & Ignore Standardization", () => {
         "temp",
         "deps",
         "_build",
-        "packages",
         ".bundle",
         ".cargo",
         ".gradle",
@@ -82,6 +81,8 @@ describe("Domain Detection & Ignore Standardization", () => {
         expect(shouldIgnoreSourcePath(`${dir}/some-file.ts`)).toBe(true);
         expect(shouldIgnoreSourcePath(`packages/app/${dir}/nested/file.js`)).toBe(true);
       }
+      expect(DEFAULT_IGNORED_DIRECTORIES.has("packages")).toBe(false);
+      expect(shouldIgnoreSourcePath("packages/ui/src/button.tsx")).toBe(false);
     });
 
     it("should automatically ignore ANY arbitrary hidden directory or dotfile as non-code/agent metadata", () => {

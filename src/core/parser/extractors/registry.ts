@@ -14,6 +14,7 @@ import { ExpressSemanticExtractor } from "./express-semantic.ts";
 import { FastifySemanticExtractor } from "./fastify-semantic.ts";
 import { HonoSemanticExtractor } from "./hono-semantic.ts";
 import { ElysiaSemanticExtractor } from "./elysia-semantic.ts";
+import { NextJsSemanticExtractor } from "./nextjs-semantic.ts";
 import { scanSourceFiles, type SourceInventory } from "../../resources/source-inventory.ts";
 import { shouldIgnoreSourcePath } from "../../resources/ignore.ts";
 
@@ -34,6 +35,7 @@ export class SemanticSliceExtractorRegistry {
     new FastifySemanticExtractor(),
     new HonoSemanticExtractor(),
     new ElysiaSemanticExtractor(),
+    new NextJsSemanticExtractor(),
     new FastApiSemanticExtractor(),
     new DjangoSemanticExtractor(),
     new FlaskSemanticExtractor(),

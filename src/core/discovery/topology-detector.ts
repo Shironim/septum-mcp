@@ -188,6 +188,21 @@ export class TopologyDetector {
           archetypes: this.inferDefaultArchetypes(path.join(projectRoot, item.relRoot)),
         };
       }
+
+      // Also include top-level monorepo workspace apps (e.g. Directus api/, app/, sdk/)
+      for (const topApp of ["api", "app", "server", "web", "sdk"]) {
+        const fullTop = path.join(projectRoot, topApp);
+        if (!domains[topApp] && fs.existsSync(fullTop) && fs.statSync(fullTop).isDirectory() && this.hasSourceFiles(fullTop)) {
+          const isSdk = topApp === "sdk";
+          domains[topApp] = {
+            root: topApp,
+            description: `Monorepo top-level workspace: ${topApp}`,
+            allowed_dependencies: isSdk ? [] : packageDomains,
+            forbidden_dependencies: isSdk ? appDomains : [],
+            archetypes: this.inferDefaultArchetypes(fullTop),
+          };
+        }
+      }
     }
 
     // 2. Modular DDD (app/Domain, src/modules, src/domains, domains/*, etc.)

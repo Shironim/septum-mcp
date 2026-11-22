@@ -47,6 +47,7 @@ import {
   buildFileInboundImpact,
   buildImportEvidence,
   buildImportRelationships,
+  buildScopedImportRelationships,
   buildSymbolImpact,
 } from "../resolver/dependency-analysis.ts";
 import { buildSymbolDetails } from "../retrieval/symbol-details.ts";
@@ -247,6 +248,13 @@ export class SeptumRepository {
     return this.symbols.findContainers(containerName);
   }
 
+  public findFuzzySymbolCandidates(
+    query: string,
+    options?: { domainId?: number; filePath?: string; limit?: number }
+  ): Array<SymbolRecord & { file_path: string }> {
+    return this.symbols.findFuzzySymbolCandidates(query, options);
+  }
+
   public getAllSymbolsWithFiles(filter?: { domainId?: number; filePath?: string }): Array<SymbolRecord & { file_path: string }> {
     return this.symbols.getAllSymbolsWithFiles(filter);
   }
@@ -296,6 +304,17 @@ export class SeptumRepository {
 
   public getImportRelationships(workspaceRoot?: string, sourceFile?: string) {
     return buildImportRelationships(this.dependencies, workspaceRoot, sourceFile);
+  }
+
+  public getScopedImportRelationships(
+    workspaceRoot?: string,
+    options: {
+      sourceFiles?: ReadonlySet<string>;
+      targetCandidateFiles?: ReadonlySet<string>;
+      sourceOrTargetPaths?: ReadonlySet<string>;
+    } = {}
+  ) {
+    return buildScopedImportRelationships(this.dependencies, workspaceRoot, options);
   }
 
   public getDomainFileConnections(domainId?: number, workspaceRoot?: string) {
@@ -370,13 +389,16 @@ export class SeptumRepository {
     return buildSymbolImpact(this.dependencies, symbolName, options);
   }
 
-  public getFileInboundImpact(filePath: string): {
+  public getFileInboundImpact(
+    filePath: string,
+    precomputedRelationships?: ReturnType<SeptumRepository["getImportRelationships"]>
+  ): {
     direct_dependents_count: number;
     top_consumers: string[];
     symbols_count: number;
     risk_level: "low" | "medium" | "high";
   } {
-    return buildFileInboundImpact(this.dependencies, filePath);
+    return buildFileInboundImpact(this.dependencies, filePath, precomputedRelationships);
   }
 
   // --- Metadata Methods ---

@@ -289,6 +289,7 @@ export class ImportResolver {
         if (foundTsConfig && foundPkg) break;
         if (dir === this.root) break;
       }
+      let extendsMissing = false;
       const loadTsConfig = (configPath: string, visited = new Set<string>()): any => {
         if (visited.has(configPath)) throw new Error("circular_tsconfig_extends");
         visited.add(configPath);
@@ -307,7 +308,10 @@ export class ImportResolver {
             parentPath = path.resolve(base, typeof pkg.tsconfig === "string" ? pkg.tsconfig : "tsconfig.json");
           }
           this.assertContained(parentPath);
-          if (probeSourcePath(parentPath) === "missing") throw new Error("tsconfig_extends_not_found");
+          if (probeSourcePath(parentPath) === "missing") {
+            extendsMissing = true;
+            continue;
+          }
           options = { ...options, ...loadTsConfig(parentPath, visited) };
         }
         const own = cfg.compilerOptions ?? {};
@@ -395,6 +399,9 @@ export class ImportResolver {
         pkg.dependencies, pkg.devDependencies, pkg.peerDependencies, pkg.optionalDependencies,
       ];
       if (depMaps.some(deps => deps && Object.hasOwn(deps, name))) return finish("external", "package_manifest_dependency");
+      if (extendsMissing) {
+        return finish("unsupported", "manifest_or_source_error: tsconfig_extends_not_found");
+      }
       return finish("unresolved", "package_not_declared");
     } catch (error) {
       return finish("unsupported", error instanceof Error && error.message.includes("outside_workspace") ? "outside_workspace" : `manifest_or_source_error: ${error instanceof Error ? error.message : String(error)}`);

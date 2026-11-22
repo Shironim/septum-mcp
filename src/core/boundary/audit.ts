@@ -72,11 +72,19 @@ export async function evaluateBoundary(
   const proposedImports = args.proposed_imports ?? [];
   const evaluatedScope = { mode: "proposal", proposed_imports_supplied: args.proposed_imports_supplied, existing_imports_checked: false, omissions: ["Existing file imports are not certified by proposal approval."] };
 
+  const requested = [...(Array.isArray(args.file_path) ? args.file_path : args.file_path ? [args.file_path] : []), ...(args.file_paths || [])]
+    .map(file => relative(root, resolve(root, file)).replace(/\\/g, "/"));
+  const effectiveScope = requested.length > 0
+    ? "file"
+    : (args.scope ?? (args.staged ? "staged" : args.domain ? "domain" : "all"));
+
   const syncState = repo?.getMeta("sync_state");
   const syncError = repo?.getMeta("sync_error");
   if (!syncState || syncState === "running" || syncState === "error" || syncState !== "complete" || syncError) {
     return incompleteEvidence({
       status: "unknown",
+      scope: effectiveScope,
+      ...(args.domain ? { domain: args.domain } : {}),
       sync_state: syncState || "unindexed",
       sync_error: syncError || undefined,
       message: "Boundary audit is incomplete because workspace synchronization has not completed.",
@@ -84,8 +92,6 @@ export async function evaluateBoundary(
   }
   const skipped = JSON.parse(repo?.getMeta("skipped_files") || "[]") as {path: string; reason: string}[];
   const unsupported = JSON.parse(repo?.getMeta("unsupported_files") || "[]") as string[];
-  const requested = [...(Array.isArray(args.file_path) ? args.file_path : args.file_path ? [args.file_path] : []), ...(args.file_paths || [])]
-    .map(file => relative(root, resolve(root, file)).replace(/\\/g, "/"));
   const relevantUnsupported = unsupported.filter(file =>
     (!args.domain || evaluator.resolveSourceDomain(file, config) === args.domain) &&
     (requested.length === 0 || requested.includes(file))
@@ -95,10 +101,10 @@ export async function evaluateBoundary(
     (requested.length === 0 || requested.includes(file.path))
   );
   if (relevantSkipped.length > 0 && args.scope !== "staged" && !args.staged) {
-    return incompleteEvidence({status: "unknown", skipped_files: relevantSkipped, message: "Boundary audit is incomplete because source files exceed resource limits."});
+    return incompleteEvidence({status: "unknown", scope: effectiveScope, ...(args.domain ? { domain: args.domain } : {}), skipped_files: relevantSkipped, message: "Boundary audit is incomplete because source files exceed resource limits."});
   }
   if (relevantUnsupported.length > 0 && args.scope !== "staged" && !args.staged) {
-    return incompleteEvidence({ status: "unknown", unsupported_files: relevantUnsupported, message: "Boundary audit is incomplete because source files have no supported parser." });
+    return incompleteEvidence({ status: "unknown", scope: effectiveScope, ...(args.domain ? { domain: args.domain } : {}), unsupported_files: relevantUnsupported, message: "Boundary audit is incomplete because source files have no supported parser." });
   }
 
   let evidence: ImportEvidence | undefined;
@@ -112,9 +118,12 @@ export async function evaluateBoundary(
     const proposed = allProposed.filter(result => !["resolved", "external"].includes(result.status) || result.coverage === "conditional");
     if (incomplete.length || proposed.length || staleFiles.length) {
       const known = evaluator.auditCodebase(config, evidence).filter(violation => relevant(violation.file));
-      known.push(...requested.flatMap(file => evaluator.evaluate(file, proposedImports, config)));
+      known.push(...requested.flatMap(file => evaluator.evaluate(file, proposedImports, config, evidence)));
       return incompleteEvidence({
-        status: known.length ? "rejected" : "unknown", violations: known, total_violations: known.length,
+        status: known.length ? "rejected" : "unknown",
+        scope: effectiveScope,
+        ...(args.domain ? { domain: args.domain } : {}),
+        violations: known, total_violations: known.length,
         circular_dependencies: known.filter(v => v.rule === "circular_dependency"), circular_dependencies_count: known.filter(v => v.rule === "circular_dependency").length,
         relationships: incomplete.slice(0, 10), proposed_resolutions: allProposed,
         diagnostic_accounting: { total: incomplete.length, returned: Math.min(10, incomplete.length), omitted: Math.max(0, incomplete.length - 10) },
@@ -223,12 +232,18 @@ export async function evaluateBoundary(
     const hasViolations = violations.length > 0;
     const hasWarnings = warnings.length > 0;
     const domainCount = Object.keys(config?.domains || {}).length;
-    const emptyScopedDomain = Boolean(args.domain && repo && !repo.getAllFiles().some(
+    const allIndexedFiles = repo ? repo.getAllFiles() : [];
+    const emptyScopedDomain = Boolean(args.domain && repo && !allIndexedFiles.some(
       (file) => evaluator.resolveSourceDomain(file.path, config) === args.domain,
     ));
+    const emptyWorkspace = Boolean(repo && allIndexedFiles.length === 0);
+    const uncoveredFiles: string[] = !args.domain && repo
+      ? JSON.parse(repo.getMeta("uncovered_files") || "[]")
+      : [];
+    const hasUncoveredWorkspaceFiles = !args.domain && uncoveredFiles.length > 0;
 
     return evaluated({
-      status: hasViolations ? "rejected" : emptyScopedDomain || domainCount === 0 ? "unknown" : "approved",
+      status: hasViolations ? "rejected" : emptyScopedDomain || emptyWorkspace || domainCount === 0 ? "unknown" : "approved",
       scope: args.domain ? "domain" : "all",
       enforcement_mode: config?.settings?.enforcement ?? "strict",
       ...(args.domain ? { domain: args.domain } : {}),
@@ -238,18 +253,23 @@ export async function evaluateBoundary(
       ...summary,
       violations,
       ...(hasWarnings ? { warnings } : {}),
+      ...(hasUncoveredWorkspaceFiles ? { uncovered_files_count: uncoveredFiles.length } : {}),
       message: hasViolations
         ? `${violations.length} boundary violation(s) (${summary.circular_dependencies_count} circular) detected${
             args.domain ? ` in domain '${args.domain}'` : " across codebase"
           }.${hasWarnings ? ` Also ${warnings.length} unlisted dependency warning(s) in 'warn' mode.` : ""}`
         : emptyScopedDomain
         ? `Boundary check is incomplete: domain '${args.domain}' has 0 indexed files (it may be unindexed or shadowed by a parent domain).`
+        : emptyWorkspace
+        ? "Boundary check is incomplete: 0 source files are indexed across the workspace; an empty graph cannot prove boundary approval."
         : domainCount === 0
         ? "Boundary check is incomplete: no domain policies are available. Initialize or register domains before auditing."
         : hasWarnings
         ? `No blocking boundary violations detected${
             args.domain ? ` for domain '${args.domain}'` : ""
           }, but ${warnings.length} unlisted dependency warning(s) were found under 'warn' enforcement.`
+        : hasUncoveredWorkspaceFiles
+        ? `All registered domain boundaries are clean across ${allIndexedFiles.length} indexed file(s) (${uncoveredFiles.length} uncovered file(s) outside registered domains were not audited).`
         : `All domain boundaries are clean${
             args.domain ? ` for domain '${args.domain}'` : ""
           }. Zero cross-domain leaks or circular dependencies detected.`,
@@ -261,8 +281,8 @@ export async function evaluateBoundary(
   // Multi-file batch evaluation
   if (filesToCheck.length > 1) {
     const results = filesToCheck.map((filePath) => {
-      const violations = evaluator.evaluate(filePath, proposedImports, config);
-      const impact = repo?.getFileInboundImpact(filePath);
+      const violations = evaluator.evaluate(filePath, proposedImports, config, evidence);
+      const impact = repo?.getFileInboundImpact(filePath, evidence?.relationships);
       return {
         file: filePath,
         evaluated_scope: evaluatedScope,
@@ -301,8 +321,8 @@ export async function evaluateBoundary(
 
   // Single file evaluation
   const singleFile = filesToCheck[0];
-  const violations = evaluator.evaluate(singleFile, proposedImports, config);
-  const impact = repo?.getFileInboundImpact(singleFile);
+  const violations = evaluator.evaluate(singleFile, proposedImports, config, evidence);
+  const impact = repo?.getFileInboundImpact(singleFile, evidence?.relationships);
   const impactSummary = impact
     ? {
         direct_dependents: impact.direct_dependents_count,

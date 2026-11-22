@@ -5,7 +5,6 @@ export const DEFAULT_IGNORED_DIRECTORIES: ReadonlySet<string> = new Set([
   "bower_components",
   "jspm_packages",
   "deps",
-  "packages",
   ".bundle",
   ".cargo",
   ".gradle",

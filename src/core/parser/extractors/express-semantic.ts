@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import ts from "typescript";
 import type { ExecutionChainNode } from "../../../types/index.ts";
@@ -43,14 +44,36 @@ export class ExpressSemanticExtractor implements SemanticSliceExtractor {
 
   public canHandle(projectRoot: string, framework?: string): boolean {
     if (framework === "express") return true;
-    const manifestFile = path.join(projectRoot, "package.json");
-    if (probeSourcePath(manifestFile) !== "file") return false;
-    const manifest = readOptionalSourceFile(manifestFile, "utf-8");
-    if (!manifest) return false;
-    try {
-      const pkg = JSON.parse(manifest);
-      return !!(pkg.dependencies?.express || pkg.devDependencies?.express);
-    } catch { return false; }
+    const hasExpressInPkg = (manifestFile: string): boolean => {
+      if (probeSourcePath(manifestFile) !== "file") return false;
+      const manifest = readOptionalSourceFile(manifestFile, "utf-8");
+      if (!manifest) return false;
+      try {
+        const pkg = JSON.parse(manifest);
+        return !!(pkg.dependencies?.express || pkg.devDependencies?.express);
+      } catch {
+        return false;
+      }
+    };
+    if (hasExpressInPkg(path.join(projectRoot, "package.json"))) return true;
+    for (const sub of ["api", "server", "backend"]) {
+      if (hasExpressInPkg(path.join(projectRoot, sub, "package.json"))) return true;
+    }
+    for (const group of ["apps", "packages"]) {
+      const groupDir = path.join(projectRoot, group);
+      if (probeSourcePath(groupDir) === "directory") {
+        try {
+          for (const entry of fs.readdirSync(groupDir, { withFileTypes: true })) {
+            if (entry.isDirectory() && hasExpressInPkg(path.join(groupDir, entry.name, "package.json"))) {
+              return true;
+            }
+          }
+        } catch {
+          // Ignore unreadable sub-packages
+        }
+      }
+    }
+    return false;
   }
 
   public async extractSlices(
@@ -156,7 +179,18 @@ export class ExpressSemanticExtractor implements SemanticSliceExtractor {
       const prefixes = prefixesByRouter.get(route.router) ?? [];
       const registrationFile = relative(route.call);
       const registrationLine = lineOf(route.call);
-      const expression = route.callbacks.at(-1)!;
+      const primaryIndex = (() => {
+        if (route.callbacks.length > 1) {
+          const last = route.callbacks.at(-1)!;
+          if (ts.isIdentifier(last) && /^(?:respond|send|finish)$/i.test(last.text)) {
+            for (let idx = route.callbacks.length - 2; idx >= 0; idx--) {
+              if (bindings.handler(route.callbacks[idx])) return idx;
+            }
+          }
+        }
+        return route.callbacks.length - 1;
+      })();
+      const expression = route.callbacks[primaryIndex]!;
       const handler = bindings.handler(expression);
       const controllerFile = handler ? relative(handler.node) : null;
       const controllerLine = handler ? lineOf(handler.node) : 0;
@@ -165,10 +199,12 @@ export class ExpressSemanticExtractor implements SemanticSliceExtractor {
         ? expression.getText() : actionName;
       const controllerClass = ts.isPropertyAccessExpression(expression) ? expression.expression.getText() :
         path.basename(controllerFile ?? registrationFile).replace(/\.[^.]+$/, "");
-      const middlewares: ExecutionChainNode[] = route.callbacks.slice(0, -1).map(callback => ({
-        stage: "middleware", symbol: callback.getText(), file: relative(callback), line: lineOf(callback),
-        description: "Express Middleware Argument",
-      }));
+      const middlewares: ExecutionChainNode[] = route.callbacks
+        .filter((_, idx) => idx !== primaryIndex)
+        .map(callback => ({
+          stage: "middleware", symbol: callback.getText(), file: relative(callback), line: lineOf(callback),
+          description: "Express Middleware Argument",
+        }));
 
       for (const prefix of prefixes) {
         for (const localPath of route.paths) {

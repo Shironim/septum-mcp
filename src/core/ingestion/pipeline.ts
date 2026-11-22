@@ -148,6 +148,7 @@ export class IngestionPipeline {
     let dependenciesIndexed = 0;
     const unsupportedFiles: string[] = [];
     const skippedFiles: SkippedSourceFile[] = [];
+    const ingestedFullPaths = new Set<string>();
     let removedFiles = 0;
 
     let domainNames = Object.keys(config.domains);
@@ -422,17 +423,31 @@ export class IngestionPipeline {
         }
 
         const lineCount = content.split("\n").length;
+        ingestedFullPaths.add(fullPath);
         work.parserInvocations++;
         const parseStart = performance.now();
         const ast = await this.parserEngine.parseFile(fullPath, content);
         parseMs += performance.now() - parseStart;
-        if (ast.status === "unsupported") {
+        if (ast.status === "unsupported" || ast.status === "degraded") {
           unsupportedFiles.push(relPath);
+          if (existingFile) removedFiles++;
           this.repo.deleteFileByPath(relPath);
           this.repo.setMeta("slices_dirty", "1");
+          if (ast.status === "degraded") {
+            SeptumTelemetry.recordSystemEvent({
+              level: "WARN",
+              component: "ingestion",
+              event: "parser_degraded_isolated",
+              fields: {
+                file: relPath,
+                diagnostics: ast.diagnostics?.map(d => `${d.code}: ${d.message}`).join("; ").slice(0, 200),
+              },
+              workspaceRoot: projectRoot,
+              emitStderr: false,
+            });
+          }
           continue;
         }
-        if (ast.status === "degraded") throw new Error(`Cannot reliably index '${relPath}': parser is degraded. ${ast.diagnostics?.map(d => `${d.code}: ${d.message}`).join("; ") ?? ""}`);
 
         filesUpdated++;
         batchBytes += sizeBytes;
@@ -500,15 +515,26 @@ export class IngestionPipeline {
 
     skippedFiles.push(...JSON.parse(this.repo.getMeta("semantic_skipped_files") || "[]"));
     const endScan = scanSourceFiles(projectRoot, { ignorePatterns: config.settings.ignore_patterns, signal: options.signal });
-    const endRelPaths: string[] = [];
-    const endInventory = endScan.files.map(fullPath => {
-      const relPath = relative(projectRoot, fullPath).replace(/\\/g, "/");
-      endRelPaths.push(relPath);
-      const stat = statSync(fullPath);
-      return `${relPath}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
-    }).sort();
-    if (inventory.length !== endInventory.length || inventory.some((val, i) => val !== endInventory[i])) {
+    if (endScan.files.length !== initialStats.size || endScan.files.some(fullPath => !initialStats.has(fullPath))) {
       throw new Error("Source changed during synchronization: workspace inventory changed. Run sync again after the files stop changing.");
+    }
+    for (const fullPath of ingestedFullPaths) {
+      const initialStat = initialStats.get(fullPath);
+      if (!initialStat) continue;
+      let endStat: Stats;
+      try {
+        endStat = statSync(fullPath);
+      } catch {
+        throw new Error("Source changed during synchronization: workspace inventory changed. Run sync again after the files stop changing.");
+      }
+      if (
+        endStat.size !== initialStat.size ||
+        endStat.mtimeMs !== initialStat.mtimeMs ||
+        endStat.ctimeMs !== initialStat.ctimeMs ||
+        endStat.ino !== initialStat.ino
+      ) {
+        throw new Error("Source changed during synchronization: workspace inventory changed. Run sync again after the files stop changing.");
+      }
     }
     const durationMs = Math.round(performance.now() - startTime);
 
@@ -517,7 +543,8 @@ export class IngestionPipeline {
     for (const path of this.verifiedFiles.keys()) if (!indexedPaths.has(path)) this.verifiedFiles.delete(path);
     const unsupportedSet = new Set(unsupportedFiles);
     const skippedSet = new Set(skippedFiles.map((file) => file.path));
-    const uncoveredFiles = endRelPaths
+    const uncoveredFiles = initialEntries
+      .map((entry) => entry.relPath)
       .filter((rel) => !indexedPaths.has(rel) && !unsupportedSet.has(rel) && !skippedSet.has(rel));
 
     // Update SSOT repo_meta watermark
@@ -735,11 +762,10 @@ export class IngestionPipeline {
 
     const lineCount = content.split("\n").length;
     const ast = await this.parserEngine.parseFile(fullPath, content);
-    if (ast.status === "unsupported") {
+    if (ast.status === "unsupported" || ast.status === "degraded") {
       this.removeFile(relPath, "unsupported");
       return false;
     }
-    if (ast.status === "degraded") throw new Error(`Cannot reliably index '${relPath}': parser is degraded. ${ast.diagnostics?.map(d => `${d.code}: ${d.message}`).join("; ") ?? ""}`);
 
     let latestHash: string | undefined;
     try { latestHash = computeContentHash(readSourceFile(fullPath)); }

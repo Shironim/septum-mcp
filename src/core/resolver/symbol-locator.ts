@@ -176,10 +176,16 @@ export class SymbolLocator {
       .map(s => ({ ...s, file_path: owner.file_path }))
       : selection.domain && domainId === undefined
         ? []
-        : this.repo.getAllSymbolsWithFiles({
-            ...(selection.filePath ? { filePath: selection.filePath } : {}),
-            ...(domainId !== undefined ? { domainId } : {}),
-          });
+        : typeof this.repo.findFuzzySymbolCandidates === "function"
+          ? this.repo.findFuzzySymbolCandidates(target, {
+              ...(selection.filePath ? { filePath: selection.filePath } : {}),
+              ...(domainId !== undefined ? { domainId } : {}),
+              limit: 500,
+            })
+          : this.repo.getAllSymbolsWithFiles({
+              ...(selection.filePath ? { filePath: selection.filePath } : {}),
+              ...(domainId !== undefined ? { domainId } : {}),
+            });
     const charBitmask = (str: string): number => {
       let mask = 0;
       for (let i = 0; i < str.length; i++) {

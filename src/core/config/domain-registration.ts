@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { SeptumRepository } from "../database/repository.ts";
 import { IngestionPipeline, type IngestionMetrics } from "../ingestion/pipeline.ts";
 import { assertPathContained } from "../resolver/path-resolver.ts";
@@ -43,6 +43,18 @@ export async function registerDomainPolicy(
 
   // SV-02: Enforce workspace containment (reject traversal/absolute/symlink escape)
   assertPathContained(args.root, workspaceRoot, "Domain root");
+  const absDomainRoot = resolve(workspaceRoot, args.root);
+  try {
+    const rootStat = statSync(absDomainRoot);
+    if (!rootStat.isDirectory()) {
+      throw new Error(`Domain root '${args.root}' is not a directory.`);
+    }
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      if (err instanceof Error && err.message.endsWith("is not a directory.")) throw err;
+      throw new Error(`Failed to access domain root '${args.root}' for domain '${domainName}': ${err?.message || err}`);
+    }
+  }
   signal?.throwIfAborted();
 
   const domainConfig: DomainConfig = {

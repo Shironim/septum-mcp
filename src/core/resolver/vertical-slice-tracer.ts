@@ -48,7 +48,15 @@ export class VerticalSliceTracer {
     const exactCandidates = typeof this.repo.findExactVerticalSlices === "function"
       ? this.repo.findExactVerticalSlices(rawQuery, controllerFile)
       : [];
-    const slices = exactCandidates.length > 0 ? exactCandidates : this.repo.getAllVerticalSlices();
+    const indexedCandidates = exactCandidates.length > 0
+      ? exactCandidates
+      : typeof this.repo.findVerticalSlices === "function"
+        ? this.repo.findVerticalSlices(rawQuery)
+        : [];
+    const filteredIndexed = controllerFile
+      ? indexedCandidates.filter(s => s.controller_file === controllerFile)
+      : indexedCandidates;
+    const slices = filteredIndexed.length > 0 ? filteredIndexed : this.repo.getAllVerticalSlices();
     const selection = selectSliceTarget(slices, rawQuery, effectiveMaxDepth, controllerFile);
     if ("record" in selection) {
       return this.formatSuccessResponse(selection.query, selection.record, selection.confidence, selection.alternatives, effectiveMaxDepth);

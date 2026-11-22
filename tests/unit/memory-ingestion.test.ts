@@ -72,8 +72,8 @@ describe('bounded ingestion and incomplete index safety', () => {
   writeFileSync(file,'export function valid() {}');
   await pipeline.run(config());
   writeFileSync(file,'export function valid() {}\nfunction broken( {');
-  await expect(pipeline.run(config(),{verifyContent:true})).rejects.toThrow('parser is degraded');
-  expect(repo.getMeta('sync_state')).toBe('error');
+  await pipeline.run(config(),{verifyContent:true});
+  expect(JSON.parse(repo.getMeta('unsupported_files')||'[]')).toContain('src/a.ts');
   const evaluator=new BoundaryEvaluator(repo,new ModuleResolver(root,repo));
   const result=await handleCheckBoundary(evaluator,config(),{scope:'all', format: "json"},repo,root);
   expect(JSON.parse(result.content[0].text).status).toBe('unknown');

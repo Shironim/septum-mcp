@@ -71,7 +71,11 @@ function actionList(args: Array<Node | undefined>): string[] | undefined {
 
 type Group = { prefix: string; name: string; controller?: Controller };
 
-export function readLaravelRoutes(root: Node, signal?: AbortSignal): ParsedRoute[] {
+export function readLaravelRoutes(
+  root: Node,
+  signal?: AbortSignal,
+  resolveInclude?: (spec: string, group: Group) => ParsedRoute[] | undefined
+): ParsedRoute[] {
   const routes: ParsedRoute[] = [];
   for (const { namespace, statements } of phpSections(root)) {
     const imports = importsFor(statements);
@@ -119,6 +123,18 @@ export function readLaravelRoutes(root: Node, signal?: AbortSignal): ParsedRoute
       }
       const expression = node.type === "expression_statement" ? children(node)[0] : node.type === "arrow_function" ? node.childForFieldName("body") : null;
       if (!expression) return;
+      if (
+        resolveInclude &&
+        ["require_expression", "require_once_expression", "include_expression", "include_once_expression"].includes(expression.type)
+      ) {
+        const specNode = expression.namedChildren.find((c) => c.type === "string" || c.type === "encapsed_string");
+        const spec = literal(specNode);
+        if (spec) {
+          const included = resolveInclude(spec, group);
+          if (included) routes.push(...included);
+        }
+        return;
+      }
       const calls = routeCalls(expression, isFacade);
       const first = calls[0];
       if (!first) return;

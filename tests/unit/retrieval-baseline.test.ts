@@ -192,7 +192,7 @@ describe("TypeScript selective retrieval manual oracle", () => {
     expect(initialization.completeness).toBe("partial");
     expect(initialization.items.some((i: any) => i.reason === "module_execution_or_reexport_not_expanded")).toBe(true);
     put("src/broken-context.ts", 'export function brokenTarget() { return 1; }\nconst broken = ;');
-    await expect(pipeline.run(config)).rejects.toThrow("parser is degraded");
+    await pipeline.run(config);
     const afterFailure = await tool({ action: "context", query: "initializeTarget" });
     expect(afterFailure.completeness).toBe("partial");
   });

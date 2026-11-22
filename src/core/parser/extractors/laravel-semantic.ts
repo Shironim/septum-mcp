@@ -61,20 +61,29 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
       domainId = projectRootOrDomainId;
     }
 
-    const routeFiles = [
+    const standardRouteFiles = [
       path.join(root, "routes/web.php"),
       path.join(root, "routes/api.php"),
     ].filter((f) => fs.existsSync(f) && (!this.inventory || this.inventory.files.includes(f)));
 
+    const discoveredRouteFiles = listSourceFiles(
+      root,
+      /(?:^|\/)(?:routes\/[^/]+\.php|[^/]+-routes\.php)$/i,
+      this.inventory
+    ).filter((f) => !/(?:^|\/)routes\/(?:console|channels)\.php$/i.test(f));
+
+    const routeFiles = [...new Set([...standardRouteFiles, ...discoveredRouteFiles])];
+    const includedFiles = new Set<string>();
     const parsedRoutes: ParsedRoute[] = [];
 
     for (const routeFile of routeFiles) {
       signal?.throwIfAborted();
+      if (includedFiles.has(path.resolve(routeFile))) continue;
       const content = readOptionalSourceFile(routeFile, "utf-8");
       const relativeRouteFile = path.relative(root, routeFile).replace(/\\/g, "/");
-      const routesFromFile = await this.parseRoutesContent(content, signal);
+      const routesFromFile = await this.parseRoutesContentWithIncludes(content, routeFile, root, includedFiles, signal);
       for (const r of routesFromFile) {
-        r.file = relativeRouteFile;
+        if (!r.file) r.file = relativeRouteFile;
       }
       parsedRoutes.push(...routesFromFile);
     }
@@ -312,6 +321,52 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     return routes;
   }
 
+  private async parseRoutesContentWithIncludes(
+    content: string,
+    routeFile: string,
+    projectRoot: string,
+    includedFiles: Set<string>,
+    signal?: AbortSignal,
+    visited = new Set<string>()
+  ): Promise<ParsedRoute[]> {
+    if (!content.trim()) return [];
+    const absRoute = path.resolve(routeFile);
+    if (visited.has(absRoute)) return [];
+    visited.add(absRoute);
+
+    const relRoute = path.relative(projectRoot, absRoute).replace(/\\/g, "/");
+    const pendingIncludes: Array<{ targetFile: string; prefix: string; name: string }> = [];
+    const source = /^\s*<\?php\b/i.test(content) ? content : "<?php " + content;
+    const routes = await parseWithTreeSitter("php", source, (root) =>
+      readLaravelRoutes(root, signal, (spec, group) => {
+        const cleaned = spec.replace(/^['"]|['"]$/g, "").trim();
+        if (!cleaned) return undefined;
+        const target = path.resolve(path.dirname(absRoute), cleaned);
+        if (probeSourcePath(target) === "file") {
+          pendingIncludes.push({ targetFile: target, prefix: group.prefix, name: group.name });
+        }
+        return undefined;
+      })
+    );
+    signal?.throwIfAborted();
+    if (!routes) throw new Error("Laravel route AST extraction failed.");
+    for (const r of routes) r.file = relRoute;
+
+    for (const inc of pendingIncludes) {
+      includedFiles.add(path.resolve(inc.targetFile));
+      const incContent = readOptionalSourceFile(inc.targetFile, "utf-8");
+      const incRoutes = await this.parseRoutesContentWithIncludes(incContent, inc.targetFile, projectRoot, includedFiles, signal, visited);
+      for (const r of incRoutes) {
+        const joinedUri = "/" + [inc.prefix, r.uri].map((v) => v.replace(/^\/+|\/+$/g, "")).filter(Boolean).join("/");
+        r.uri = joinedUri;
+        if (inc.name && r.routeName) r.routeName = inc.name + r.routeName;
+        routes.push(r);
+      }
+    }
+
+    return routes;
+  }
+
   private async resolveController(
     route: ParsedRoute,
     resolver: ImportResolver,
@@ -337,6 +392,13 @@ export class LaravelSemanticExtractor implements SemanticSliceExtractor {
     } else {
       candidates = ["", "Api", "Admin"].map(directory =>
         path.join(this.projectRoot, "app/Http/Controllers", directory, shortName + ".php"));
+    }
+    if (candidates.every((c) => probeSourcePath(c) !== "file") && this.inventory) {
+      const namespaceTail = (target ?? route.controllerClass).replace(/^\\/, "").replace(/\\/g, "/");
+      const tailMatches = this.inventory.files.filter(
+        (f) => f.endsWith(`/${namespaceTail}.php`) || f.endsWith(`/${shortName}.php`)
+      );
+      if (tailMatches.length > 0) candidates.push(...tailMatches);
     }
     const matches = [...new Set(candidates)].filter(file => probeSourcePath(file) === "file");
     if (matches.length !== 1) return { line: 0 };

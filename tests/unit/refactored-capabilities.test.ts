@@ -339,6 +339,8 @@ class InvoiceRepository {
     it("should perform repo-wide boundary audit when called with empty args", async () => {
       repo.upsertDomain("core", mockConfig.domains.core);
       repo.upsertDomain("types", mockConfig.domains.types);
+      repo.upsertFile(repo.getDomainByName("core")!.id, "src/core/index.ts", "service", "h1", 1);
+      repo.upsertFile(repo.getDomainByName("types")!.id, "src/types/index.ts", "model", "h2", 1);
       repo.setMeta("sync_state", "complete");
 
       const evaluator = new BoundaryEvaluator(repo);

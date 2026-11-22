@@ -48,7 +48,11 @@ export function visitRouteCalls(
   if (ts.isSourceFile(container) || ts.isBlock(container)) {
     for (const statement of container.statements) {
       if (ts.isVariableStatement(statement) || ts.isExpressionStatement(statement) || ts.isExportAssignment(statement) ||
-          ts.isReturnStatement(statement)) walk(statement);
+          ts.isReturnStatement(statement)) {
+        walk(statement);
+      } else if (ts.isFunctionDeclaration(statement) && statement.body) {
+        visitRouteCalls(statement.body, visit);
+      }
     }
   } else walk(container);
 }
@@ -266,6 +270,14 @@ export class TypeScriptBindings {
     const node = unwrap(expression);
     if (ts.isIdentifier(node)) return this.target(this.declaration(node), seen);
     if (ts.isFunctionExpression(node) || ts.isArrowFunction(node)) return this.target(node, seen);
+    if (ts.isCallExpression(node) && node.arguments.length >= 1) {
+      for (const arg of node.arguments) {
+        if (ts.isFunctionExpression(arg) || ts.isArrowFunction(arg)) {
+          const inner = this.handler(arg, seen);
+          if (inner) return inner;
+        }
+      }
+    }
     if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
       const declaration = this.declaration(node.expression);
       const moduleName = declaration && importTarget(declaration);

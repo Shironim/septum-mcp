@@ -33,7 +33,10 @@ function applySymbolFormat<T extends { content: Array<{ type: "text"; text: stri
       ...result,
       content: [{ type: "text" as const, text: formatter(payload) }, ...result.content.slice(1)],
       structuredContent: result.structuredContent ?? payload,
-      metadata: result.metadata ?? payload,
+      metadata: result.metadata ?? {
+        status: payload.status,
+        found: payload.found ?? payload.found_in_index,
+      },
     };
   } catch {
     return result;
@@ -226,6 +229,7 @@ function inspectImpact(
   }
 
   const selectedCandidate = candidates[0];
+  const resolvedSymbol = selectedCandidate?.name ?? symbol;
   let suggestions: string[] | undefined;
   if (!selectedCandidate && args.file_path) {
     const normalizedPath = args.file_path.replace(/\\/g, "/").replace(/^\.\//, "");
@@ -244,16 +248,20 @@ function inspectImpact(
     }
   }
 
-  const impact = repo.getSymbolImpact(symbol, {
+  const impact = repo.getSymbolImpact(resolvedSymbol, {
     domain: args.domain,
     filePath: args.file_path || selectedCandidate?.file_path,
     reference: args.symbol_ref || selectedCandidate?.symbol_ref,
     workspaceRoot: workspaceRoot || args.workspace_path,
   });
 
-  const relationships = repo.getImportRelationships(workspaceRoot || args.workspace_path);
   const targetFiles = candidates.map(c => c.file_path);
   const targetFileSet = new Set(targetFiles);
+  const relationships = targetFileSet.size > 0
+    ? repo.getScopedImportRelationships(workspaceRoot || args.workspace_path, {
+        targetCandidateFiles: targetFileSet,
+      })
+    : [];
   const importDependents = relationships.filter(edge =>
     edge.resolution.status === "resolved" &&
     edge.resolution.targets.some(t => t.files.some(f => targetFileSet.has(f)))
@@ -306,7 +314,8 @@ function inspectImpact(
     relationship_limits: "Imports do not prove executed calls; runtime dispatch and unindexed callers are omitted.",
     ...(firstResolution ? { resolution_metadata: { resolver_revision: firstResolution.resolver_revision, config_revision: firstResolution.config_revision } } : {}),
     import_dependents: compactImportDependents,
-    resolution_warnings: warnings.relevant,
+    resolution_warnings: warnings.relevant.slice(0, 25),
+    ...(warnings.relevant.length > 25 ? { resolution_warnings_omitted: warnings.relevant.length - 25 } : {}),
     workspace_resolution_diagnostics: {
       count: warnings.workspace.length,
       returned_details: 0,

@@ -17,7 +17,9 @@ export interface DependencyQueryStore {
   getIndexedFilesForEvidence(sourceFile?: string): Array<{ path: string; content_hash: string; domain_id: number }>;
   getDomainsForEvidence(): Array<{ name: string; root_path: string }>;
   hasIndexedFile(path: string): boolean;
-  getAllDependenciesWithDomains(sourceFile?: string): IndexedDependency[];
+  getAllDependenciesWithDomains(sourceFile?: string): Array<IndexedDependency & { resolved_target_file?: string | null }>;
+  getDependenciesForFiles(filePaths: string[]): IndexedDependency[];
+  getIndexedFilesByPaths(filePaths: string[]): Array<{ path: string; content_hash: string; domain_id: number }>;
   getAllFileSummaries(): Array<{ id: number; domain_id: number; path: string }>;
   getAllInternalDependencyTargets(): Array<{ source_file_id: number; target_symbol_or_path: string }>;
   findImpactMethodCandidates(trimmed: string, container: string, method: string, domain?: string): Array<{
@@ -92,6 +94,85 @@ export function buildImportRelationships(
   sourceFile?: string
 ): ImportRelationship[] {
   return buildImportEvidence(store, workspaceRoot, sourceFile).relationships;
+}
+
+export function buildScopedImportRelationships(
+  store: DependencyQueryStore,
+  workspaceRoot?: string,
+  options: {
+    sourceFiles?: ReadonlySet<string>;
+    targetCandidateFiles?: ReadonlySet<string>;
+    sourceOrTargetPaths?: ReadonlySet<string>;
+  } = {}
+): ImportRelationship[] {
+  const { sourceFiles, targetCandidateFiles, sourceOrTargetPaths } = options;
+  if (!sourceFiles && !targetCandidateFiles && !sourceOrTargetPaths) {
+    return buildImportRelationships(store, workspaceRoot);
+  }
+  const root = workspaceRoot ?? store.getWorkspaceRootMeta();
+  if (!root) return [];
+
+  let dependencies: IndexedDependency[];
+  if (sourceOrTargetPaths) {
+    const targetTokens = new Set<string>();
+    for (const p of sourceOrTargetPaths) {
+      const clean = p.replace(/\\/g, "/");
+      const parts = clean.split("/");
+      const file = parts.pop() ?? "";
+      const stem = file.replace(/\.[^.]+$/, "").toLowerCase();
+      if (stem.length >= 2) targetTokens.add(stem);
+      const parent = (parts.pop() ?? "").toLowerCase();
+      if (parent.length >= 2) targetTokens.add(parent);
+    }
+    const tokenList = Array.from(targetTokens);
+    const allDeps = store.getAllDependenciesWithDomains();
+    dependencies = allDeps.filter((dep) => {
+      if (sourceOrTargetPaths.has(dep.source_file)) return true;
+      if (dep.is_external) return false;
+      if (dep.resolved_target_file != null) {
+        return sourceOrTargetPaths.has(dep.resolved_target_file);
+      }
+      if (tokenList.length === 0) return false;
+      const lowerTarget = dep.target.toLowerCase();
+      return tokenList.some((tok) => lowerTarget.includes(tok));
+    });
+  } else {
+    const scopedSources = new Set<string>(sourceFiles);
+    if (targetCandidateFiles && targetCandidateFiles.size > 0) {
+      for (const targetFile of targetCandidateFiles) {
+        const cleanPath = targetFile.replace(/\\/g, "/");
+        scopedSources.add(cleanPath);
+        const parts = cleanPath.split("/");
+        const rawBase = parts.pop()?.replace(/\.[^.]+$/, "") || "";
+        const parentDir = parts.pop() || "";
+        const symbolNames = store.findFileSymbolNames(cleanPath);
+        for (const row of store.queryDependenciesForFileInbound(cleanPath, rawBase, symbolNames)) {
+          scopedSources.add(row.file);
+        }
+        if (parentDir.length >= 3 && parentDir !== rawBase) {
+          for (const row of store.queryDependenciesForFileInbound(cleanPath, parentDir, [])) {
+            scopedSources.add(row.file);
+          }
+        }
+      }
+    }
+    const sourceList = Array.from(scopedSources);
+    if (sourceList.length === 0) return [];
+    dependencies = store.getDependenciesForFiles(sourceList);
+  }
+
+  if (dependencies.length === 0) return [];
+
+  const uniqueSources = Array.from(new Set(dependencies.map((d) => d.source_file)));
+  const files = store.getIndexedFilesByPaths(uniqueSources);
+  const domains = store.getDomainsForEvidence().sort((a, b) => b.root_path.length - a.root_path.length);
+  return collectImportEvidence({
+    root,
+    files,
+    domains,
+    dependencies,
+    hasAdditionalIndexedFile: (file) => store.hasIndexedFile(file),
+  }).relationships;
 }
 
 export function buildDomainFileConnections(
@@ -350,14 +431,31 @@ export function buildSymbolImpact(
     for (let i = 0; i < parts.length; i++) {
       suffixes.push(parts.slice(i).join("/"));
     }
-    return suffixes.some((s) => {
+    if (suffixes.some((s) => {
       const escaped = escapeRegExp(s);
       const r = new RegExp(`(?:^|[\\\\/\"\x27.@:])(?:${escaped})(?:$|[\\\\/\"\x27;:.()\\s]|\\.[^\\\\/]+)`, "i");
       return r.test(normStmt) || r.test(normTarget);
-    });
+    })) {
+      return true;
+    }
+    // Support barrel imports (e.g. `@/lib/api/links` -> `.../links/get-links-for-workspace.ts`)
+    // only when the target specifier itself ends at the barrel directory or its `/index`.
+    if (parts.length > 1) {
+      const dirClean = parts.slice(0, -1).join("/");
+      const dirParts = dirClean.split("/");
+      for (let i = 0; i < dirParts.length; i++) {
+        const dirSuffix = escapeRegExp(dirParts.slice(i).join("/"));
+        const barrelRe = new RegExp(`(?:^|[\\\\/]|@/)(?:${dirSuffix})(?:/index(?:\\.[^\\\\/]+)?)?$`, "i");
+        if (barrelRe.test(normTarget)) return true;
+      }
+    }
+    return false;
   };
 
-  const containerWordRegex = new RegExp(`\\b${escapeRegExp(targetContainer)}\\b`);
+  const targetContainerShort = targetContainer.split(/[\\/]/).pop() ?? targetContainer;
+  const containerWordRegex = targetContainerShort !== targetContainer
+    ? new RegExp(`\\b(?:${escapeRegExp(targetContainer)}|${escapeRegExp(targetContainerShort)})\\b`)
+    : new RegExp(`\\b${escapeRegExp(targetContainer)}\\b`);
   const depRows = rawDepRows.filter((row) => {
     const normCallerFile = String(row.file).replace(/\\/g, "/");
     if (row.domain_name) domainByFile.set(normCallerFile, String(row.domain_name));
@@ -434,7 +532,8 @@ export function buildSymbolImpact(
 
 export function buildFileInboundImpact(
   store: DependencyQueryStore,
-  filePath: string
+  filePath: string,
+  precomputedRelationships?: ImportRelationship[]
 ): {
   direct_dependents_count: number;
   top_consumers: string[];
@@ -446,7 +545,9 @@ export function buildFileInboundImpact(
   const symbols = store.findFileSymbolNames(cleanPath);
 
   const matchedFiles = new Set<string>();
-  const relationships = buildImportRelationships(store);
+  const relationships = precomputedRelationships ?? buildScopedImportRelationships(store, undefined, {
+    targetCandidateFiles: new Set([cleanPath]),
+  });
   if (relationships.length > 0) {
     for (const edge of relationships) {
       if (edge.freshness !== "current" || edge.resolution.status !== "resolved") continue;

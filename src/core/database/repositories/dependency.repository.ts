@@ -96,19 +96,26 @@ export class DependencyRepository implements DependencyQueryStore {
     const term = searchTerm.trim();
     const runQuery = (candidate: string) => {
       const wild = `%${candidate}%`;
-      const query = `
+      const metadataQuery = `
         SELECT * FROM vertical_slices
         WHERE route_uri LIKE ?
            OR route_name LIKE ?
            OR controller_class LIKE ?
            OR action_name LIKE ?
            OR feature_key LIKE ?
-           OR execution_chain_json LIKE ?
         ORDER BY id ASC
       `;
-      return this.db.query<VerticalSliceRecord, [string, string, string, string, string, string]>(query).all(
-        wild, wild, wild, wild, wild, wild
-      );
+      const metaRows = this.db
+        .query<VerticalSliceRecord, [string, string, string, string, string]>(metadataQuery)
+        .all(wild, wild, wild, wild, wild);
+      if (metaRows.length > 0) return metaRows;
+
+      const chainQuery = `
+        SELECT * FROM vertical_slices
+        WHERE execution_chain_json LIKE ?
+        ORDER BY id ASC
+      `;
+      return this.db.query<VerticalSliceRecord, [string]>(chainQuery).all(wild);
     };
 
     const direct = runQuery(term);
@@ -187,7 +194,7 @@ export class DependencyRepository implements DependencyQueryStore {
     }
   }
 
-  public getAllDependenciesWithDomains(sourceFile?: string): IndexedDependency[] {
+  public getAllDependenciesWithDomains(sourceFile?: string): Array<IndexedDependency & { resolved_target_file?: string | null }> {
     const query = `
       SELECT 
         f.path AS source_file,
@@ -195,14 +202,60 @@ export class DependencyRepository implements DependencyQueryStore {
         dep.line_number,
         dep.target_symbol_or_path AS target,
         dep.import_statement AS statement,
-        dep.is_external
+        dep.is_external,
+        dep.resolved_target_file
       FROM dependencies dep
       JOIN files f ON dep.source_file_id = f.id
       JOIN domains d ON f.domain_id = d.id
       ${sourceFile === undefined ? "" : "WHERE f.path = ?"}
       ORDER BY d.name, f.path, dep.line_number
     `;
-    return this.db.query<IndexedDependency, string[]>(query).all(...(sourceFile === undefined ? [] : [sourceFile]));
+    return this.db
+      .query<IndexedDependency & { resolved_target_file?: string | null }, string[]>(query)
+      .all(...(sourceFile === undefined ? [] : [sourceFile]));
+  }
+
+  public getDependenciesForFiles(filePaths: string[]): IndexedDependency[] {
+    if (filePaths.length === 0) return [];
+    const results: IndexedDependency[] = [];
+    for (let i = 0; i < filePaths.length; i += 400) {
+      const chunk = filePaths.slice(i, i + 400);
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = this.db
+        .query<IndexedDependency, string[]>(
+          `SELECT
+             f.path AS source_file,
+             d.name AS source_domain,
+             dep.line_number,
+             dep.target_symbol_or_path AS target,
+             dep.import_statement AS statement,
+             dep.is_external
+           FROM dependencies dep
+           JOIN files f ON dep.source_file_id = f.id
+           JOIN domains d ON f.domain_id = d.id
+           WHERE f.path IN (${placeholders})
+           ORDER BY d.name, f.path, dep.line_number`
+        )
+        .all(...chunk);
+      results.push(...rows);
+    }
+    return results;
+  }
+
+  public getIndexedFilesByPaths(filePaths: string[]): Array<{ path: string; content_hash: string; domain_id: number }> {
+    if (filePaths.length === 0) return [];
+    const results: Array<{ path: string; content_hash: string; domain_id: number }> = [];
+    for (let i = 0; i < filePaths.length; i += 400) {
+      const chunk = filePaths.slice(i, i + 400);
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = this.db
+        .query<{ path: string; content_hash: string; domain_id: number }, string[]>(
+          `SELECT path, content_hash, domain_id FROM files WHERE path IN (${placeholders}) ORDER BY path ASC`
+        )
+        .all(...chunk);
+      results.push(...rows);
+    }
+    return results;
   }
 
   public getWorkspaceRootMeta(): string | undefined {

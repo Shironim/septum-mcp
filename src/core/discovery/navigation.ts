@@ -19,7 +19,11 @@ function aggregateImportEdges(
   const edges = new Map<string, NavEdge>();
   const unresolved: NavUnresolved[] = [];
 
-  for (const edge of repo.getImportRelationships(root)) {
+  const relationshipList = workspace
+    ? repo.getImportRelationships(root)
+    : repo.getScopedImportRelationships(root, { sourceOrTargetPaths: paths });
+
+  for (const edge of relationshipList) {
     const source = edge.source.file;
     const targets = [...new Set(edge.resolution.targets.flatMap(target => target.files))];
     if (!paths.has(source) && !targets.some(target => paths.has(target))) continue;
@@ -61,7 +65,10 @@ function aggregateImportEdges(
 function computeNavigationHealth(
   repo: SeptumRepository,
   domainRoot: string | undefined,
-  unresolved: NavUnresolved[]
+  unresolved: NavUnresolved[],
+  emptyDomainsCount: number,
+  totalIndexedFiles: number,
+  uncoveredCount: number
 ) {
   const sync = repo.getMeta("sync_state") ?? "unindexed";
   const dirty = repo.getMeta("slices_dirty") === "1";
@@ -75,11 +82,21 @@ function computeNavigationHealth(
     ...unresolved.map(item => item.reason),
     ...(unsupported > 0 ? ["unsupported_files"] : []),
     ...(skipped > 0 ? ["skipped_files"] : []),
+    ...(emptyDomainsCount > 0 ? ["empty_domains"] : []),
+    ...(totalIndexedFiles === 0 ? ["no_indexed_files"] : []),
+    ...(!domainRoot && uncoveredCount > 0 ? ["uncovered_workspace_files"] : []),
     ...(dirty ? ["slices_dirty"] : []),
     ...(sync !== "complete" ? [`index_${sync}`] : []),
   ])].sort().slice(0, 10);
 
-  const coverage = sync === "complete" && !dirty && unresolved.length === 0 && unsupported === 0 && skipped === 0
+  const coverage = sync === "complete" &&
+    !dirty &&
+    unresolved.length === 0 &&
+    unsupported === 0 &&
+    skipped === 0 &&
+    emptyDomainsCount === 0 &&
+    totalIndexedFiles > 0 &&
+    (domainRoot !== undefined || uncoveredCount === 0)
     ? "complete"
     : "partial";
 
@@ -202,7 +219,10 @@ export function buildNavigation(repo: SeptumRepository, args: NavigationQuery, r
     return filteredEdges.slice(0, 100);
   })();
   const entrypoints = entries.filter(entry => workspace || selectedPaths.has(entry.file!)).slice(0, 20);
-  const { sync, dirty, health } = computeNavigationHealth(repo, domain?.root_path, unresolved);
+  const scopedDomains = workspace ? domains : domain ? [domain] : [];
+  const emptyDomainsCount = scopedDomains.filter(d => (domainCounts.get(d.name) ?? 0) === 0).length;
+  const uncoveredCount = (JSON.parse(repo.getMeta("uncovered_files") || "[]") as string[]).length;
+  const { sync, dirty, health } = computeNavigationHealth(repo, domain?.root_path, unresolved, emptyDomainsCount, files.length, uncoveredCount);
   const end = offset + selected.length;
 
   return {

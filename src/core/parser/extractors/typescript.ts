@@ -12,8 +12,9 @@ import {
   calculateControlFlowNesting,
   findBraceBlockEnd,
 } from "../boundary-tracker.ts";
-import { calculateAstControlFlowNesting, getNodeHeader, parseSourceWithTreeSitter } from "../wasm-loader.ts";
+import { getNodeHeader, calculateAstControlFlowNesting, parseSourceWithTreeSitter } from "../wasm-loader.ts";
 import type { CodeExtractor } from "./base.ts";
+import { extractWithTypeScriptCompiler } from "./typescript-compiler-fallback.ts";
 import { extractTypeScriptFallback } from "./typescript-fallback.ts";
 
 const TS_CONTROL_FLOW_NODES = new Set([
@@ -47,6 +48,15 @@ export class TypeScriptExtractor implements CodeExtractor {
       this.extractFromAst(rootNode, content),
       () => this.extractFallback(content)
     );
+
+    if (treeSitterResult && treeSitterResult.status !== "degraded") {
+      return treeSitterResult;
+    }
+
+    const compilerAst = extractWithTypeScriptCompiler(filePath, content);
+    if (compilerAst) {
+      return compilerAst;
+    }
 
     if (treeSitterResult) {
       return treeSitterResult;

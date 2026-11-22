@@ -76,7 +76,15 @@ export function analyzeSymbolImpact(facts: ImpactFacts): GetSymbolImpactResponse
           for (const statement of source.statements) {
             if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) || statement.importClause?.isTypeOnly) continue;
             const resolution = new ImportResolver(options.workspaceRoot!).resolve(statement.moduleSpecifier.text, file);
-            if (resolution.status !== "resolved" || !resolution.targets.some(target => target.files.some(path => definingFiles.has(path)))) continue;
+            const hitsDefiningOrBarrel = resolution.status === "resolved" && resolution.targets.some(target => target.files.some(path => {
+              if (definingFiles.has(path)) return true;
+              if (/\/index\.[cm]?[jt]sx?$/.test(path)) {
+                const barrelDir = path.replace(/\/index\.[cm]?[jt]sx?$/, "");
+                return Array.from(definingFiles).some(df => df.startsWith(barrelDir + "/"));
+              }
+              return false;
+            }));
+            if (!hitsDefiningOrBarrel) continue;
             const clause = statement.importClause;
             if (clause?.name && targetSymRows.some(row => row.signature?.includes("export default"))) { const binding = checker.getSymbolAtLocation(clause.name); if (binding) bindings.add(binding); }
             if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) for (const specifier of clause.namedBindings.elements) {
