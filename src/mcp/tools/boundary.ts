@@ -34,28 +34,34 @@ export async function evaluateBoundary(
   repo?: SeptumRepository,
   workspaceRoot?: string,
 ) {
+  const effectiveRoot = workspaceRoot ?? args.workspace_path ?? evaluator.getResolver().getProjectRoot();
   const audit = await auditBoundary(
-    evaluator, config, args, repo, workspaceRoot ?? args.workspace_path ?? evaluator.getResolver().getProjectRoot(),
+    evaluator, config, args, repo, effectiveRoot,
   );
-  return renderBoundaryAudit(audit, args.max_bytes, args.format ?? "text");
+  return renderBoundaryAudit(audit, args.max_bytes, args.format ?? "text", effectiveRoot);
 }
 
 export function renderBoundaryAudit(
   { payload, kind }: Awaited<ReturnType<typeof auditBoundary>>,
   maxBytes?: number,
   format: "json" | "text" = "text",
+  workspaceRoot?: string,
 ) {
+  const structuredPayload = workspaceRoot
+    ? { workspace_root: workspaceRoot, ...(payload as Record<string, unknown>) }
+    : (payload as Record<string, unknown>);
   const rendered = format === "json"
-    ? JSON.stringify(payload, null, kind === "evaluated" ? 2 : undefined)
-    : formatBoundaryAsText(payload as Record<string, any>);
+    ? JSON.stringify(structuredPayload, null, kind === "evaluated" ? 2 : undefined)
+    : formatBoundaryAsText(structuredPayload as Record<string, any>);
   const result = {
     content: [{ type: "text" as const, text: rendered }],
+    structuredContent: structuredPayload,
     metadata: { status: payload.status, format },
   };
   if (maxBytes === undefined) return result;
 
   const compact = format === "json"
-    ? { ...result, content: [{ type: "text" as const, text: JSON.stringify(payload) }] }
+    ? { ...result, content: [{ type: "text" as const, text: JSON.stringify(structuredPayload) }] }
     : result;
   const requiredBytes = Buffer.byteLength(JSON.stringify(compact));
   if (requiredBytes <= maxBytes) return compact;
@@ -70,6 +76,7 @@ export function renderBoundaryAudit(
   return {
     isError: true,
     content: [{ type: "text" as const, text: format === "json" ? JSON.stringify(errPayload) : formatBoundaryAsText(errPayload) }],
+    structuredContent: errPayload,
     metadata: { status: "unknown" as const, code: "BUDGET_RESPONSE_TOO_LARGE", format },
   };
 }

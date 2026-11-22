@@ -1,5 +1,6 @@
 import type { ValidatedSeptumConfig } from "../../core/config/schema.ts";
 import type { SeptumRepository } from "../../core/database/repository.ts";
+import { SeptumError } from "../../core/errors.ts";
 import { VerticalSliceTracer } from "../../core/resolver/vertical-slice-tracer.ts";
 import { formatSliceNode, SLICE_RELATIONSHIP_LIMITS } from "../../core/resolver/slice-format.ts";
 import type { VerticalSliceTraceResponse } from "../../types/index.ts";
@@ -28,7 +29,8 @@ export function handleTraceVerticalSlice(
   const query = (args.query || args.symbol || args.route || "").toString().trim();
 
   if (!query) {
-    throw new Error(
+    throw new SeptumError(
+      "INVALID_QUERY",
       "Missing required argument: 'query' (e.g. 'POST /orders/{id}/status', 'OrderController@updateStatus', or task intent 'Ubah status order di dashboard')"
     );
   }
@@ -69,6 +71,7 @@ export function handleTraceVerticalSlice(
     ];
 
     const payload = {
+      workspace_root: root,
       status: result.diagnostics?.includes("ambiguous_target") ? "ambiguous" : result.diagnostics?.length ? "unknown" : result.found ? "success" : "not_found",
       coverage: result.coverage,
       diagnostics: result.diagnostics,
@@ -97,6 +100,7 @@ export function handleTraceVerticalSlice(
     const text = format === "json" ? JSON.stringify(payload) : formatSliceAsText(payload);
     return {
       content: [{ type: "text" as const, text }],
+      structuredContent: payload,
       metadata: {
         status: payload.status,
         found: payload.found,

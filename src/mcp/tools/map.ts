@@ -44,6 +44,7 @@ export function buildDomainCatalog(
   const evidence = args.include_evidence && "files" in navigation
     ? repo.getImportRelationships(root, navigation.files[0]!.path) : [];
   return {
+    workspace_root: root,
     ...navigation,
     ...(args.include_capabilities ? { parser_capabilities: { ...getParserCapabilities(args.detail_level === "full"), semantic_adapters: SemanticSliceExtractorRegistry.getCapabilities() } } : {}),
     ...(args.include_evidence ? { evidence: evidence.slice(0, 20), evidence_accounting: { total: evidence.length, returned: Math.min(20, evidence.length), omitted: Math.max(0, evidence.length - 20) } } : {}),
@@ -63,6 +64,7 @@ export function handleGetDomainCatalog(
   const text = format === "json" ? JSON.stringify(payload) : formatMapAsText(payload);
   return {
     content: [{ type: "text" as const, text }],
+    structuredContent: payload,
     metadata: { schema: payload.schema, status: payload.status, format },
     runtime_version: payload.runtime_version,
   };

@@ -101,7 +101,7 @@ Guidelines for AI Coding Agents:
 3. CONSUMERS: Before changing public contracts, inspect septum_symbol(action: 'impact') and relevant consumers. Import dependents and caller hints are incomplete static evidence; verify affected application behavior.
 4. ENTRYPOINTS: Call septum_slice(query: '<route|handler>') for catalog matches and related nodes. Matching confidence does not establish runtime reachability or execution order.
 5. BOUNDARIES: Call septum_boundary(scope: 'file', file_path: '...', proposed_imports: [...]) for candidate imports, or scope: 'all'/'domain'/'staged' for those audit scopes. Proposal approval does not audit existing imports. Unknown is not approval; approved describes only the evaluated static scope.
-6. RESOURCES & PROMPTS: Initial-workspace snapshots are available at septum://domains, septum://health, septum://boundaries, and septum://domain/{name}; workflow playbooks at prompts septum-pre-edit-check and septum-architecture-audit.`;
+6. RESOURCES & PROMPTS: Initial-workspace snapshots are available at septum://domains, septum://health, septum://boundaries, septum://apps, and septum://domain/{name}; workflow playbooks at prompts septum_apps, septum_spaghetti_audit, septum_pre_commit_guard, septum_refactor_plan, and septum_trace_feature.`;
 
 export function createMcpServer(manager: WorkspaceManager): Server {
 
@@ -161,7 +161,7 @@ export function createMcpServer(manager: WorkspaceManager): Server {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOL_CATALOG.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+    tools: TOOL_CATALOG.map(({ name, description, inputSchema, _meta }) => ({ name, description, inputSchema, _meta })),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -173,8 +173,53 @@ export function createMcpServer(manager: WorkspaceManager): Server {
     let stage: ToolCallStage = "validation";
     let root: string | undefined;
     let action: string | undefined;
-    const tool = TOOL_CATALOG.some(entry => entry.name === name) ? name : "unknown";
+    const toolSpec = TOOL_CATALOG.find(entry => entry.name === name);
+    const tool = toolSpec ? name : "unknown";
+    const hasUiResource = Boolean((toolSpec?._meta?.ui as { resourceUri?: string } | undefined)?.resourceUri);
+    const wantsStructured = (args && typeof args === "object" && (args as Record<string, unknown>).format === "json") || hasUiResource;
     const finish = <T extends ToolResponse>(response: T, error?: Error): T => {
+      const shapedResponse = (() => {
+        if (!response || typeof response !== "object") return response;
+        const record = response as Record<string, unknown>;
+        if (
+          !wantsStructured &&
+          record.structuredContent &&
+          Array.isArray(record.content) &&
+          record.content.length > 0
+        ) {
+          const { structuredContent: _omitted, ...withoutStructured } = record;
+          return withoutStructured as unknown as T;
+        }
+        let structured = record.structuredContent;
+        if (
+          wantsStructured &&
+          !structured &&
+          Array.isArray(record.content) &&
+          typeof (record.content[0] as { text?: unknown } | undefined)?.text === "string"
+        ) {
+          try {
+            const parsed = JSON.parse((record.content[0] as { text: string }).text);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              structured = parsed;
+            }
+          } catch {
+            // Non-JSON text content; leave structuredContent unset
+          }
+        }
+        if (wantsStructured && structured && typeof structured === "object") {
+          const withRoot =
+            root && !("workspace_root" in (structured as Record<string, unknown>))
+              ? { workspace_root: root, ...(structured as Record<string, unknown>) }
+              : structured;
+          if (withRoot !== record.structuredContent) {
+            return {
+              ...record,
+              structuredContent: withRoot,
+            } as unknown as T;
+          }
+        }
+        return response;
+      })();
       const code = error instanceof SeptumError ? error.code : undefined;
       SeptumTelemetry.recordToolResponse({
         trace_id: traceId,
@@ -184,8 +229,8 @@ export function createMcpServer(manager: WorkspaceManager): Server {
         duration_ms: Math.round(performance.now() - startTime),
         input: root ? args ?? {} : {},
         error: error ? { code, message: root ? error.message : "Tool execution failed.", stack: root ? error.stack : undefined } : undefined,
-      }, response, root ?? manager.initialRoot ?? null, root !== undefined);
-      return response;
+      }, shapedResponse, root ?? manager.initialRoot ?? null, root !== undefined);
+      return shapedResponse;
     };
 
     const progressToken = request.params._meta?.progressToken;
@@ -234,6 +279,7 @@ export function createMcpServer(manager: WorkspaceManager): Server {
                 text: JSON.stringify(diagnostic, null, 2),
               },
             ],
+            structuredContent: diagnostic,
             metadata: diagnostic,
             runtime_version: runtimeVersion,
           });

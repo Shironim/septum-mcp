@@ -10,12 +10,13 @@ function defineTool<Name extends string, Args>(
   definition: Omit<Tool, "name"> & {
     name: Name;
     schema: { parse(input: unknown): Args };
+    _meta?: Record<string, unknown>;
     execute(ctx: WorkspaceContext, args: Args, signal?: AbortSignal): ReturnType<typeof handleMapTool> | ReturnType<typeof handleSymbolTool> | ReturnType<typeof handleSliceTool> | ReturnType<typeof handleBoundaryTool>;
   },
 ) {
-  const { name, description, inputSchema, schema, execute } = definition;
+  const { name, description, inputSchema, _meta, schema, execute } = definition;
   return {
-    name, description, inputSchema,
+    name, description, inputSchema, _meta,
     parse(input: unknown) {
       const args = schema.parse(input ?? {});
       return { name, args, execute: (ctx: WorkspaceContext, signal?: AbortSignal) => execute(ctx, args, signal) };
@@ -23,11 +24,22 @@ function defineTool<Name extends string, Args>(
   };
 }
 
+const SEPTUM_APP_URI = "ui://septum/app.html";
+
 export const TOOL_CATALOG = [
   defineTool({
     name: "septum_map",
     schema: MapToolSchema,
     execute: (ctx, args, signal) => handleMapTool(ctx.repo, ctx.config, args, ctx.root, signal),
+    _meta: {
+      ui: { resourceUri: SEPTUM_APP_URI },
+      "com.google.antigravity/ui": {
+        entrypoints: [
+          { type: "aux_pane", title: "Septum Architecture" },
+          { type: "global", title: "Septum" },
+        ],
+      },
+    },
     description:
       "Navigate architecture: workspace domains and cross-domain import adjacency, domain/file neighborhoods, static entrypoints and coverage. Output schema navigation/v1. Signatures, member lists and source belong to septum_symbol; full expands navigation only. Use file_filter to focus, include_evidence for one file's import details, or septum_slice for static handler relationships. Example: {action:'catalog',domain:'mcp'}.",
     inputSchema: {
@@ -212,6 +224,9 @@ export const TOOL_CATALOG = [
     name: "septum_slice",
     schema: SliceToolSchema,
     execute: (ctx, args, signal) => handleSliceTool(ctx.repo, ctx.config, args, ctx.root, signal),
+    _meta: {
+      ui: { resourceUri: SEPTUM_APP_URI },
+    },
     description:
       "Match a supported static entrypoint and inspect related nodes with relationship evidence and diagnostics. Supports cataloged routes, handlers, jobs, CLI commands and events; results do not establish runtime execution order or complete reachability. Use septum_symbol for declarations and septum_boundary for import policy. Example: {query:'POST /orders/{id}/pay',max_depth:5} or {query:'OrderController@pay'}.",
     inputSchema: {
@@ -251,6 +266,9 @@ export const TOOL_CATALOG = [
     name: "septum_boundary",
     schema: BoundaryToolSchema,
     execute: (ctx, args, signal) => handleBoundaryTool(ctx.evaluator, ctx.config, args, ctx.repo, ctx.root),
+    _meta: {
+      ui: { resourceUri: SEPTUM_APP_URI },
+    },
     description:
       "Architectural firewall: validate proposed or staged imports against domain boundaries and circular dependency constraints. When to use: (1) scope='file' with proposed_imports BEFORE writing new import statements, (2) scope='staged' BEFORE git commit to prevent cross-domain leaks, (3) scope='all' or 'domain' for codebase audits. When NOT to use: do NOT use to read source code or locate symbols. Status 'approved' confirms zero violations; 'rejected' requires refactoring. Example: {scope:'file',file_path:'src/order/service.ts',proposed_imports:['../billing/repo']}.",
     inputSchema: {

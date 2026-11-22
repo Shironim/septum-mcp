@@ -20,7 +20,7 @@ import type { LocateSymbolArgs, SymbolToolArgs } from "../schemas.ts";
 
 export type { LocateSymbolArgs, SymbolToolArgs };
 
-function applySymbolFormat<T extends { content: Array<{ type: "text"; text: string }>; metadata?: unknown }>(
+function applySymbolFormat<T extends { content: Array<{ type: "text"; text: string }>; metadata?: unknown; structuredContent?: unknown }>(
   result: T,
   format: "json" | "text" | undefined,
   formatter: (payload: Record<string, any>) => string
@@ -32,6 +32,7 @@ function applySymbolFormat<T extends { content: Array<{ type: "text"; text: stri
     return {
       ...result,
       content: [{ type: "text" as const, text: formatter(payload) }, ...result.content.slice(1)],
+      structuredContent: result.structuredContent ?? payload,
       metadata: result.metadata ?? payload,
     };
   } catch {
@@ -54,6 +55,20 @@ export async function handleSymbolTool(
     case "context":
     case "inspect": {
       const { mode, symbol } = selectSymbolContextMode(repo, args);
+      if (mode === "invalid_query") {
+        const err = {
+          status: "invalid_query",
+          message: "Choose a target with query, symbol or symbol_ref.",
+        };
+        return {
+          content: [{
+            type: "text" as const,
+            text: format === "json" ? JSON.stringify(err) : formatSourceContextAsText(err),
+          }],
+          structuredContent: err,
+          metadata: err,
+        };
+      }
       if (mode === "deep") {
         const res = await retrieveContext(repo, config, args, symbolWorkspace(repo, workspaceRoot || args.workspace_path), signal);
         return applySymbolFormat(res, format, formatDeepContextAsText);
@@ -68,6 +83,7 @@ export async function handleSymbolTool(
             type: "text" as const,
             text: format === "json" ? JSON.stringify(err) : formatSourceContextAsText(err),
           }],
+          structuredContent: err,
           metadata: err,
         };
       }
@@ -237,9 +253,10 @@ function inspectImpact(
 
   const relationships = repo.getImportRelationships(workspaceRoot || args.workspace_path);
   const targetFiles = candidates.map(c => c.file_path);
+  const targetFileSet = new Set(targetFiles);
   const importDependents = relationships.filter(edge =>
     edge.resolution.status === "resolved" &&
-    edge.resolution.targets.some(t => t.files.some(f => targetFiles.includes(f)))
+    edge.resolution.targets.some(t => t.files.some(f => targetFileSet.has(f)))
   );
   const warnings = partitionResolutionWarnings(relationships, targetFiles);
   const callSites = impact.inbound_callers.filter(

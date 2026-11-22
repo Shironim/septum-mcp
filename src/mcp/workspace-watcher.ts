@@ -6,6 +6,7 @@ import type { SeptumRepository } from '../core/database/repository.ts';
 import type { IngestionPipeline } from '../core/ingestion/pipeline.ts';
 import { ASTParserEngine } from '../core/parser/tree-sitter.ts';
 import { isResolutionInput } from '../core/resolver/interpretation-inputs.ts';
+import { rebuildSliceCatalog } from '../core/resolver/slice-catalog.ts';
 import { shouldIgnoreSourcePath } from '../core/resources/ignore.ts';
 import { RESOURCE_LIMITS } from '../core/resources/limits.ts';
 import { SerialWorkQueue } from '../core/resources/work-queue.ts';
@@ -192,7 +193,14 @@ export class WorkspaceWatcher {
           else this.pipeline.removeFile(filename);
         }
       }
-      if (sourceEvents || this.repo.getMeta('slices_dirty') === '1') await this.pipeline.run(config, {signal: this.abort.signal});
+      if (this.repo.getMeta('slices_dirty') === '1') {
+        await rebuildSliceCatalog(this.repo, this.root, {
+          ignorePatterns: config.settings.ignore_patterns,
+          signal: this.abort.signal,
+        });
+      } else if (sourceEvents) {
+        await this.pipeline.run(config, {signal: this.abort.signal});
+      }
     }, signal);
     try { await this.flushing; }
     finally { this.flushing = null; }

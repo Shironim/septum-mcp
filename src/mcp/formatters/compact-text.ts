@@ -229,10 +229,15 @@ export function formatSourceContextAsText(payload: Record<string, any>): string 
       lines.push(`Imported by (${cf.imported_by_count ?? cf.imported_by.length}): ${cf.imported_by.join(", ")}`);
     }
   }
-  if (typeof payload.source_code === "string") {
+  const sourceText = typeof payload.source_code === "string"
+    ? payload.source_code
+    : (typeof payload.source_slice?.text === "string" ? payload.source_slice.text : undefined);
+  if (typeof sourceText === "string") {
     const slice = payload.source_slice;
-    const sliceNote = slice ? ` (L${slice.start_line}-${slice.end_line}${slice.truncated ? `, next_start_line=${slice.next_start_line}` : ""})` : "";
-    lines.push("", `## Source${sliceNote}`, "```", payload.source_code, "```");
+    const sliceNote = slice && slice.start_line !== undefined && slice.end_line !== undefined
+      ? ` (L${slice.start_line}-${slice.end_line}${slice.truncated ? `, next_start_line=${slice.next_start_line}` : ""})`
+      : "";
+    lines.push("", `## Source${sliceNote}`, "```", sourceText, "```");
   }
   return lines.join("\n");
 }
@@ -250,10 +255,14 @@ export function formatDeepContextAsText(payload: Record<string, any>): string {
     return lines.join("\n");
   }
 
-  const t = payload.target ?? {};
+  const targetName = typeof payload.target === "string" ? payload.target : (payload.target?.name ?? "?");
+  const targetFile = typeof payload.file_path === "string" ? payload.file_path : (payload.target?.file_path ?? "?");
+  const targetStart = payload.target?.start_line ?? "";
+  const targetEnd = payload.target?.end_line ?? "";
+  const targetRange = targetStart && targetEnd ? `:${targetStart}-${targetEnd}` : "";
   const acc = payload.accounting ?? {};
   const lines: string[] = [
-    `# Septum Deep Context: ${t.name ?? "?"} @ ${t.file_path ?? "?"}:${t.start_line ?? "?"}-${t.end_line ?? "?"} [${payload.status}]`,
+    `# Septum Deep Context: ${targetName} @ ${targetFile}${targetRange} [${payload.status}]`,
     `Freshness: ${payload.freshness ?? "unknown"} | Depth: ${payload.dependency_depth ?? "?"} | Items: ${acc.returned ?? payload.items.length}/${acc.total ?? payload.items.length} (+${acc.omitted_after ?? 0} after) | Bytes: ${payload.output_bytes ?? "?"}/${payload.budget_bytes ?? "?"}`,
   ];
 
@@ -262,10 +271,11 @@ export function formatDeepContextAsText(payload: Record<string, any>): string {
     if (item.kind === "source" && item.source) {
       const s = item.source;
       const frag = item.fragment ? ` [fragment ${item.fragment.start_utf16}..${item.fragment.end_utf16}/${item.fragment.total_utf16}]` : "";
+      const lang = s.file_path.endsWith(".py") ? "python" : s.file_path.endsWith(".go") ? "go" : s.file_path.endsWith(".php") ? "php" : "ts";
       lines.push(
         "",
         `## [hop=${item.depth ?? 0}] ${item.name} @ ${s.file_path}:${s.start_line}-${s.end_line} (${item.reason}${frag})`,
-        "```ts",
+        `\`\`\`${lang}`,
         s.text,
         "```"
       );
@@ -276,6 +286,12 @@ export function formatDeepContextAsText(payload: Record<string, any>): string {
         "```ts",
         item.text,
         "```"
+      );
+    } else if (item.kind === "relationship" && item.relationship) {
+      const rel = item.relationship;
+      lines.push(
+        "",
+        `## [import] ${rel.source.file}:${rel.source.line} -> ${rel.resolution?.source?.target ?? rel.target} [${rel.resolution?.status ?? "resolved"}]`
       );
     } else if (item.kind === "diagnostic") {
       diagnostics.push(`${item.reason}${item.file_path ? ` (${item.file_path})` : ""}${item.detail ? `: ${item.detail}` : ""}`);
@@ -382,6 +398,16 @@ export function formatBoundaryAsText(payload: Record<string, any>): string {
     lines.push("", `## Warnings (${payload.warnings.length})`);
     for (const w of payload.warnings) {
       lines.push(`- [${w.rule}] ${w.file}:${w.line ?? 1} (${w.source_domain} -> ${w.target_domain}): ${w.message}`);
+    }
+  }
+
+  if (Array.isArray(payload.pre_existing_violations) && payload.pre_existing_violations.length) {
+    lines.push("", `## Pre-existing Codebase Violations (${payload.pre_existing_violations.length})`);
+    for (const v of payload.pre_existing_violations.slice(0, 5)) {
+      lines.push(`- [${v.rule}] ${v.file}:${v.line ?? 1}: ${v.message}`);
+    }
+    if (payload.pre_existing_violations.length > 5) {
+      lines.push(`  ... and ${payload.pre_existing_violations.length - 5} more pre-existing violations.`);
     }
   }
 
