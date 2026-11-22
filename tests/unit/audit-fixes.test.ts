@@ -176,13 +176,34 @@ describe("Audit fixes verification", () => {
       "septum://domains",
       "septum://health",
       "septum://boundaries",
+      "septum://apps",
+      "ui://septum/app.html",
     ]);
     expect(listSeptumPrompts().prompts.map((p) => p.name)).toEqual([
-      "septum-pre-edit-check",
-      "septum-architecture-audit",
+      "septum_apps",
+      "septum_spaghetti_audit",
+      "septum_pre_commit_guard",
+      "septum_refactor_plan",
+      "septum_trace_feature",
     ]);
 
-    const prompt = getSeptumPrompt("septum-pre-edit-check", { target: "createOrder" });
+    const appsPrompt = getSeptumPrompt("septum_apps");
+    expect(appsPrompt.messages[0]?.content.text).toContain("septum_map");
+    expect(appsPrompt.messages[0]?.content.text).toContain("septum://apps");
+
+    const spaghetti = getSeptumPrompt("septum_spaghetti_audit", { domain: "", workspace_path: "" });
+    expect(spaghetti.messages[0]?.content.text).toContain("circular dependencies");
+
+    const preCommit = getSeptumPrompt("septum_pre_commit_guard");
+    expect(preCommit.messages[0]?.content.text).toContain("staged");
+
+    const refactorPlan = getSeptumPrompt("septum_refactor_plan");
+    expect(refactorPlan.messages[0]?.content.text).toContain("impact");
+
+    const traceFeature = getSeptumPrompt("septum_trace_feature");
+    expect(traceFeature.messages[0]?.content.text).toContain("septum_slice");
+
+    const prompt = getSeptumPrompt("septum_refactor_plan", { target: "createOrder" });
     expect(prompt.messages[0]?.content.text).toContain("createOrder");
 
     const manager = new WorkspaceManager();

@@ -112,17 +112,15 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         error = request('resources/read', {'uri': missing_uri}, expected_error=-32002)
         assert error['data']['uri'] == missing_uri, error
 
-        pre_edit_name = 'septum-pre-edit-check'
-        pre_edit = next(item for item in request('prompts/list', {})['prompts']
-                        if item['name'] == pre_edit_name)
-        assert any(arg['name'] == 'target' and arg['required'] for arg in pre_edit['arguments']), pre_edit
-        request('prompts/get', {'name': pre_edit_name}, expected_error=-32602)
-        request('prompts/get', {'name': pre_edit_name, 'arguments': {'target': '   '}}, expected_error=-32602)
-        prompt = request('prompts/get', {'name': pre_edit_name, 'arguments': {'target': 'oldOrder'}})
+        refactor_name = 'septum_refactor_plan'
+        refactor_prompt = next(item for item in request('prompts/list', {})['prompts']
+                               if item['name'] == refactor_name)
+        assert any(arg['name'] == 'target' for arg in refactor_prompt['arguments']), refactor_prompt
+        prompt = request('prompts/get', {'name': refactor_name, 'arguments': {'target': 'oldOrder'}})
         message = prompt['messages'][0]
         assert message['role'] == 'user' and message['content']['type'] == 'text', message
         assert 'oldOrder' in message['content']['text'], message
-        print('PASS: MCP capability negotiation, resource discovery and missing URI, pre-edit prompt validation')
+        print('PASS: MCP capability negotiation, resource discovery and missing URI, refactor prompt')
 
         (a / 'requirements.txt').write_text('fastapi==0.115.0\n')
         (a / 'main.py').write_text('from fastapi import FastAPI\napp = FastAPI()\n@app.get("/before")\ndef before():\n    return 1\n')
@@ -225,24 +223,21 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         policy = discovered / 'septum.config.json'
         policy.write_text('{}')
 
-        prompt_name = 'septum-architecture-audit'
+        prompt_name = 'septum_spaghetti_audit'
         listed = request('prompts/list', {})['prompts']
         prompt = next(entry for entry in listed if entry['name'] == prompt_name)
         assert {arg['name'] for arg in prompt['arguments']} == {'domain', 'workspace_path'}
-        request('prompts/get', {'name': prompt_name, 'arguments': {'domain': '   '}}, expected_error=-32602)
         for domain in (None, 'pkg'):
             args = {'workspace_path': str(discovered)}
             if domain:
                 args['domain'] = domain
             prompt = request('prompts/get', {'name': prompt_name, 'arguments': args})
             instruction = prompt['messages'][0]['content']['text']
-            map_args, audit_args = (json.loads(line) for line in instruction.splitlines() if line.startswith('{'))
-            assert map_args == {'action': 'catalog', 'detail_level': 'compact', **args}
-            assert audit_args == {'scope': 'domain' if domain else 'all', **args}
-            catalog = tool('septum_map', map_args)
+            assert 'septum_map' in instruction and 'septum_boundary' in instruction, instruction
+            catalog = tool('septum_map', {'action': 'catalog', 'detail_level': 'compact', **args})
             assert any(item['name'] == 'pkg' and 'auth' in item['forbidden_dependencies']
                        for item in catalog['domains']), catalog
-            verdict = tool('septum_boundary', audit_args)
+            verdict = tool('septum_boundary', {'scope': 'domain' if domain else 'all', **args})
             assert verdict['status'] == 'rejected' and verdict['total_domains_checked'] == 2, verdict
             assert any(item['rule'] == 'forbidden_dependency' and item['file'] == 'pkg/service.go'
                        for item in verdict['violations']), verdict
