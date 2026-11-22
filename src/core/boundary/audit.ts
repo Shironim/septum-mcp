@@ -149,7 +149,12 @@ export async function evaluateBoundary(
       args.scope ?? (args.staged ? "staged" : args.domain ? "domain" : "all");
 
     if (effectiveScope === "staged") {
-      const { files: stagedFiles, violations: stagedViolations, resolution_issues: resolutionIssues } = await auditStagedFiles(evaluator, config, root, repo);
+      const {
+        files: stagedFiles,
+        violations: stagedViolations,
+        resolution_issues: resolutionIssues,
+        background_resolution_issues_count: backgroundResolutionIssuesCount,
+      } = await auditStagedFiles(evaluator, config, root, repo);
       const enforcementMode = config?.settings?.enforcement ?? "strict";
 
       if (stagedFiles.length === 0 && stagedViolations.length === 0) {
@@ -179,6 +184,9 @@ export async function evaluateBoundary(
       return evaluated({
         status: hasViolations ? "rejected" : resolutionIssues.length ? "unknown" : "approved",
         resolution_issues: resolutionIssues,
+        ...(backgroundResolutionIssuesCount > 0
+          ? { background_resolution_issues_count: backgroundResolutionIssuesCount }
+          : {}),
         scope: "staged",
         enforcement_mode: enforcementMode,
         total_checked: stagedFiles.length,
@@ -304,21 +312,25 @@ export async function evaluateBoundary(
       }
     : undefined;
 
-  if (violations.length > 0) {
+  const newViolations = violations.filter((v) => !v.pre_existing);
+  const preExistingViolations = violations.filter((v) => v.pre_existing);
+
+  if (newViolations.length > 0) {
     return evaluated({
       status: "rejected",
       scope: "file",
       enforcement_mode: enforcementMode,
       file: singleFile,
       evaluated_scope: evaluatedScope,
-      total_violations: violations.length,
-      violations_count: violations.length,
-      violations,
+      total_violations: newViolations.length,
+      violations_count: newViolations.length,
+      violations: newViolations,
+      ...(preExistingViolations.length > 0 ? { pre_existing_violations: preExistingViolations } : {}),
       impact_summary: impactSummary,
       message:
         Object.keys(config?.domains || {}).length === 0
           ? "Boundary integrity check failed: Domain catalog is currently unindexed. Run 'septum_map' with action='register' to initialize bounded contexts."
-          : violations.some((v) => v.rule === "unmapped_domain")
+          : newViolations.some((v) => v.rule === "unmapped_domain")
           ? "Boundary integrity check failed: File does not belong to any declared bounded context."
           : "Boundary violation detected. Proposed imports violate bounded context architecture.",
     });
@@ -332,9 +344,15 @@ export async function evaluateBoundary(
     evaluated_scope: evaluatedScope,
     total_violations: 0,
     violations: [],
+    ...(preExistingViolations.length > 0 ? {
+      pre_existing_violations: preExistingViolations,
+      pre_existing_violations_count: preExistingViolations.length,
+    } : {}),
     impact_summary: impactSummary,
     message:
-      Object.keys(config?.domains || {}).length === 0
+      preExistingViolations.length > 0
+        ? `Approved. Proposed imports do not introduce new boundary violations (${preExistingViolations.length} pre-existing circular dependencies noted in codebase).`
+        : Object.keys(config?.domains || {}).length === 0
         ? "No boundary violations detected. [Septum Notice: Domain catalog is currently unindexed. Run 'septum_map' with action='register' to initialize bounded contexts.]"
         : enforcementMode === "warn"
         ? "Approved under 'warn' enforcement (unlisted allowed_dependencies are not blocked; only explicit forbidden_dependencies are rejected)."

@@ -207,7 +207,7 @@ export function buildNavigation(repo: SeptumRepository, args: NavigationQuery, r
 
   return {
     schema: NAVIGATION_SCHEMA,
-    status: requested || filter ? (matching.length ? "success" : "not_found") : (domains.length ? "success" : "NOT_INDEXED"),
+    status: requested || filter ? (matching.length ? "success" : domain && !filter ? "empty_domain" : "not_found") : (domains.length ? "success" : "NOT_INDEXED"),
     scope: { level: workspace ? "workspace" : filter ? "file" : "domain", ...(domain ? { domain: domain.name } : {}), ...(filter ? { file_filter: args.file_filter } : {}) },
     domains: (workspace ? domains : domain ? [domain] : []).map(d => ({
       name: d.name,

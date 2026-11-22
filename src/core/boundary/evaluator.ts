@@ -54,7 +54,18 @@ export class BoundaryEvaluator {
       violations.push(...this.checkProposedChanges(filePath, proposedImports, activeConfig));
       const sourceDomain = this.resolveSourceDomain(filePath, activeConfig);
       if (sourceDomain && typeof this.repo?.getAllDependenciesWithDomains === "function") {
-        const existingDeps = this.repo.getAllDependenciesWithDomains().filter(
+        // Resolutions from import-evidence (requires workspace_root meta) — optional, used for
+        // richer cycle detection. Falls back to raw indexed deps when unavailable (e.g. in tests).
+        const indexed = this.repo?.getMeta?.("workspace_root");
+        const auditEvidence = (indexed && this.repo ? this.repo.getImportEvidence(this.resolver.getProjectRoot()) : undefined);
+        const evidence = indexed ? auditEvidence?.relationships : undefined;
+        const resolutions = evidence && new Map(evidence.filter(edge => edge.freshness === "current").map(edge => [
+          dependencyKey(edge.source.file, edge.source.line, edge.resolution.source.target, edge.source.statement),
+          edge.resolution,
+        ]));
+
+        const allDeps = this.repo.getAllDependenciesWithDomains();
+        const existingDeps = allDeps.filter(
           (dep) => dep.source_file !== filePath
         );
         const proposedDeps = proposedImports.map((statement) => ({
@@ -65,13 +76,41 @@ export class BoundaryEvaluator {
           statement,
           is_external: false,
         }));
-        violations.push(
-          ...this.detectCircularDependencies(
-            activeConfig,
-            [...existingDeps, ...proposedDeps],
-            new Set([filePath])
-          )
+
+        // Baseline: detect cycles that already exist in the indexed graph, independent of
+        // workspace_root / import-evidence so the tagging works even in in-memory test repos.
+        // We detect against ALL deps (no filter) so we capture all existing cycles regardless
+        // of which file anchors the DFS traversal.
+        const baselineCycles = this.detectCircularDependencies(
+          activeConfig,
+          allDeps,
+          undefined, // no relevantFiles filter — capture all pre-existing cycles
+          resolutions
         );
+        // Normalize cycle messages to a rotation-agnostic canonical form:
+        // extract the node list, sort it, then join. This handles DFS start-node differences.
+        const extractCycleNodeSet = (msg: string): string => {
+          const match = /detected: (.+)\.$/.exec(msg);
+          if (!match) return msg;
+          // "a -> b -> a" → split, dedupe, sort
+          const nodes = match[1]!.split(" -> ").filter((n, i, arr) => !(i === arr.length - 1 && n === arr[0]));
+          return nodes.sort().join(",");
+        };
+        const baselineCanonicals = new Set(baselineCycles.map((c) => extractCycleNodeSet(c.message)));
+
+        const detectedCycles = this.detectCircularDependencies(
+          activeConfig,
+          [...existingDeps, ...proposedDeps],
+          new Set([filePath]),
+          resolutions
+        );
+
+        for (const cycle of detectedCycles) {
+          if (baselineCanonicals.has(extractCycleNodeSet(cycle.message))) {
+            cycle.pre_existing = true;
+          }
+          violations.push(cycle);
+        }
       }
     }
 
@@ -282,7 +321,7 @@ export class BoundaryEvaluator {
       kindLabel: "file" | "domain"
     ) => {
       const visited = new Set<string>();
-      const inStack = new Set<string>();
+      const stackIndex = new Map<string, number>();
       const stack: string[] = [];
       const reportedCycles = new Set<string>();
 
@@ -298,7 +337,7 @@ export class BoundaryEvaluator {
 
       const dfs = (node: string) => {
         visited.add(node);
-        inStack.add(node);
+        stackIndex.set(node, stack.length);
         stack.push(node);
 
         const neighbors = graph.get(node);
@@ -306,9 +345,9 @@ export class BoundaryEvaluator {
           for (const [nextNode, edgeMeta] of neighbors.entries()) {
             if (!visited.has(nextNode)) {
               dfs(nextNode);
-            } else if (inStack.has(nextNode)) {
-              const cycleStartIndex = stack.indexOf(nextNode);
-              if (cycleStartIndex !== -1) {
+            } else {
+              const cycleStartIndex = stackIndex.get(nextNode);
+              if (cycleStartIndex !== undefined) {
                 const cycleNodes = stack.slice(cycleStartIndex);
                 const sig = canonicalizeCycle(cycleNodes);
                 const cycleEdges = cycleNodes.map((source, index) => graph.get(source)?.get(cycleNodes[(index + 1) % cycleNodes.length]));
@@ -335,7 +374,7 @@ export class BoundaryEvaluator {
         }
 
         stack.pop();
-        inStack.delete(node);
+        stackIndex.delete(node);
       };
 
       for (const startNode of graph.keys()) {

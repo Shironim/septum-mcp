@@ -1,4 +1,4 @@
-import { scanSourceFiles } from "../resources/source-inventory.ts";
+import { scanSourceFiles, type SourceInventory } from "../resources/source-inventory.ts";
 import { rebuildSliceCatalog } from "../resolver/slice-catalog.ts";
 import { SEMANTIC_FINGERPRINT } from "../parser/semantic-revision.ts";
 import { RESOLVER_REVISION } from "../resolver/import-resolver.ts";
@@ -6,7 +6,7 @@ import { sourceObservationsCurrent } from "../resources/source-files.ts";
 import { shouldIgnoreSourcePath } from "../resources/ignore.ts";
 import { RESOURCE_LIMITS } from "../resources/limits.ts";
 import { readSourceFile, SourceFileLimitError, type SkippedSourceFile, type SourceReadFingerprint } from "../resources/source-files.ts";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, type Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isPathContained, resolveWorkspaceRoot } from "../resolver/path-resolver.ts";
 import type { ArchetypeKind, ParsedFileAST } from "../../types/index.ts";
@@ -22,6 +22,12 @@ import { assertUniqueDomainRoots, domainNameKey, DomainRootConflictError } from 
 import { ConfigLoader } from "../config/loader.ts";
 import { SeptumTelemetry } from "../telemetry/telemetry.ts";
 
+export type IngestionProgressEvent =
+  | { phase: "scanning"; status: "start" | "done"; total: number }
+  | { phase: "parsing"; status: "progress" | "done"; processed: number; total: number }
+  | { phase: "resolving"; status: "done"; symbols: number; dependencies: number }
+  | { phase: "linking"; status: "start" | "done"; slices: number };
+
 export interface IngestionMetrics {
   domains_processed: number;
   files_scanned: number;
@@ -32,6 +38,12 @@ export interface IngestionMetrics {
   /** Indexed-file parse attempts across this sync, including recovered retries; excludes semantic extraction. */
   parser_invocations: number;
   duration_ms: number;
+  stage_timings_ms?: {
+    scan_ms: number;
+    parse_ms: number;
+    commit_ms: number;
+    slice_ms: number;
+  };
 }
 
 export class IngestionPipeline {
@@ -50,7 +62,15 @@ export class IngestionPipeline {
     }
   }
 
-  public async run(config: ValidatedSeptumConfig, options: { verifyContent?: boolean; rebuild?: boolean; signal?: AbortSignal } = {}): Promise<IngestionMetrics> {
+  public async run(
+    config: ValidatedSeptumConfig,
+    options: {
+      verifyContent?: boolean;
+      rebuild?: boolean;
+      signal?: AbortSignal;
+      onProgress?: (info: IngestionProgressEvent) => void;
+    } = {}
+  ): Promise<IngestionMetrics> {
     const workspaceRoot = this.resolveWorkspaceRoot(config, Object.values(config.domains)[0]?.root ?? ".");
     this.repo.setMeta("workspace_root", workspaceRoot);
     this.repo.setMeta("settings_json", JSON.stringify(config.settings));
@@ -81,6 +101,7 @@ export class IngestionPipeline {
           files_skipped: result!.files_skipped,
           parser_invocations: result!.parser_invocations,
           duration_ms: result!.duration_ms,
+          ...(result!.stage_timings_ms ?? {}),
         },
         workspaceRoot,
         emitStderr: false,
@@ -105,8 +126,21 @@ export class IngestionPipeline {
     }
   }
 
-  private async runSync(config: ValidatedSeptumConfig, options: { verifyContent?: boolean; rebuild?: boolean; signal?: AbortSignal }, work: { parserInvocations: number }): Promise<IngestionMetrics> {
+  private async runSync(
+    config: ValidatedSeptumConfig,
+    options: {
+      verifyContent?: boolean;
+      rebuild?: boolean;
+      signal?: AbortSignal;
+      onProgress?: (info: IngestionProgressEvent) => void;
+    },
+    work: { parserInvocations: number }
+  ): Promise<IngestionMetrics> {
     const startTime = performance.now();
+    let scanMs = 0;
+    let parseMs = 0;
+    let commitMs = 0;
+    let sliceMs = 0;
     let filesScanned = 0;
     let filesUpdated = 0;
     let filesSkipped = 0;
@@ -144,11 +178,62 @@ export class IngestionPipeline {
       }
     }
     this.ensureParserFingerprint(options.rebuild);
-    const inventory = this.sourceInventory(projectRoot, config.settings.ignore_patterns, options.signal);
+    options.onProgress?.({ phase: "scanning", status: "start", total: 0 });
+    const scanStart = performance.now();
+    const initialScan = scanSourceFiles(projectRoot, { ignorePatterns: config.settings.ignore_patterns, signal: options.signal });
+    const initialStats = new Map<string, Stats>();
+    const initialEntries: Array<{ fullPath: string; relPath: string }> = [];
+    const inventory = initialScan.files.map(fullPath => {
+      const relPath = relative(projectRoot, fullPath).replace(/\\/g, "/");
+      const stat = statSync(fullPath);
+      initialStats.set(fullPath, stat);
+      initialEntries.push({ fullPath, relPath });
+      return `${relPath}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
+    }).sort();
+    scanMs += performance.now() - scanStart;
+    const totalEstimatedFiles = initialEntries.length;
+    options.onProgress?.({ phase: "scanning", status: "done", total: totalEstimatedFiles });
+    const batchFilesLimit = options.rebuild && totalEstimatedFiles >= 500 ? 250 : RESOURCE_LIMITS.batchFiles;
+    const batchBytesLimit = options.rebuild && totalEstimatedFiles >= 500 ? 4 * 1024 * 1024 : RESOURCE_LIMITS.batchBytes;
 
     const existingFilesMap = new Map<string, import("../../types/index.ts").FileRecord>();
     for (const f of this.repo.getAllFiles()) {
       existingFilesMap.set(f.path, f);
+    }
+
+    // Single-pass O(F * depth) longest-prefix domain partitioning for projectRoot domains
+    const prefixToDomain = new Map<string, string>();
+    for (const domainName of domainNames) {
+      const domainCfg = config.domains[domainName];
+      const wsRoot = this.resolveWorkspaceRoot(config, domainCfg.root);
+      if (wsRoot !== projectRoot || !isPathContained(domainCfg.root, wsRoot)) continue;
+      const relPrefix = relative(wsRoot, resolve(wsRoot, domainCfg.root)).replace(/\\/g, "/");
+      prefixToDomain.set(relPrefix, domainName);
+    }
+    const entriesByDomain = new Map<string, Array<{ fullPath: string; relPath: string }>>();
+    for (const entry of initialEntries) {
+      let owner: string | undefined = prefixToDomain.get(entry.relPath);
+      if (!owner) {
+        let dir = entry.relPath;
+        while (true) {
+          const slash = dir.lastIndexOf("/");
+          if (slash === -1) {
+            owner = prefixToDomain.get("");
+            break;
+          }
+          dir = dir.slice(0, slash);
+          owner = prefixToDomain.get(dir);
+          if (owner) break;
+        }
+      }
+      if (owner) {
+        let bucket = entriesByDomain.get(owner);
+        if (!bucket) {
+          bucket = [];
+          entriesByDomain.set(owner, bucket);
+        }
+        bucket.push(entry);
+      }
     }
 
     for (const domainName of domainNames) {
@@ -177,21 +262,21 @@ export class IngestionPipeline {
         throw new Error(`Failed to access domain root '${domainCfg.root}' for domain '${domainName}': ${err.message || err}`);
       }
 
-      const childDomainRoots = domainNames
-        .filter(name => name !== domainName)
-        .map(name => relative(workspaceRoot, resolve(workspaceRoot, config.domains[name].root)).replace(/\\/g, "/"))
-        .filter(child => {
-          const fromParent = relative(absDomainRoot, resolve(workspaceRoot, child)).replace(/\\/g, "/");
-          return fromParent !== "" && fromParent !== ".." && !fromParent.startsWith("../") && !isAbsolute(fromParent);
-        });
-
-      const collectedFiles = this.collectFiles(
-        absDomainRoot,
-        workspaceRoot,
-        config.settings.ignore_patterns,
-        childDomainRoots,
-        options.signal
-      );
+      const collectedFiles = workspaceRoot === projectRoot
+        ? (entriesByDomain.get(domainName) ?? [])
+        : this.collectFiles(
+            absDomainRoot,
+            workspaceRoot,
+            config.settings.ignore_patterns,
+            domainNames
+              .filter(name => name !== domainName)
+              .map(name => relative(workspaceRoot, resolve(workspaceRoot, config.domains[name].root)).replace(/\\/g, "/"))
+              .filter(child => {
+                const fromParent = relative(absDomainRoot, resolve(workspaceRoot, child)).replace(/\\/g, "/");
+                return fromParent !== "" && fromParent !== ".." && !fromParent.startsWith("../") && !isAbsolute(fromParent);
+              }),
+            options.signal
+          );
       const activeRelPaths = new Set<string>();
 
       const pendingMetadataUpdates: Array<{
@@ -209,22 +294,39 @@ export class IngestionPipeline {
         lineCount: number;
         archetype: ReturnType<typeof detectArchetype>;
         mtimeMs: number;
+        ctimeMs: number;
         sizeBytes: number;
+        ino: number;
         ast: ParsedFileAST;
       }> = [];
 
       let batchBytes = 0;
       const commitBatch = () => {
         for (const item of pendingUpdates) {
-          let currentHash: string | undefined;
-          try { currentHash = existsSync(item.fullPath) ? computeContentHash(readSourceFile(item.fullPath)) : undefined; }
-          catch (error: any) {
-            if (error?.code !== "ENOENT") throw error;
+          let changed = false;
+          try {
+            const s = statSync(item.fullPath);
+            if (s.size !== item.sizeBytes || s.mtimeMs !== item.mtimeMs || s.ctimeMs !== item.ctimeMs || s.ino !== item.ino) {
+              changed = true;
+            }
+          } catch (error: any) {
+            if (error?.code === "ENOENT") {
+              throw new Error(`Source changed during synchronization: '${item.relPath}'. Run sync again after the file stops changing.`);
+            }
+            throw error;
           }
-          if (currentHash !== item.contentHash) {
-            throw new Error(`Source changed during synchronization: '${item.relPath}'. Run sync again after the file stops changing.`);
+          if (changed) {
+            let currentHash: string | undefined;
+            try { currentHash = existsSync(item.fullPath) ? computeContentHash(readSourceFile(item.fullPath)) : undefined; }
+            catch (error: any) {
+              if (error?.code !== "ENOENT") throw error;
+            }
+            if (currentHash !== item.contentHash) {
+              throw new Error(`Source changed during synchronization: '${item.relPath}'. Run sync again after the file stops changing.`);
+            }
           }
         }
+        const commitStart = performance.now();
         this.repo.runInTransaction(() => {
           for (const meta of pendingMetadataUpdates) {
             if (meta.file.archetype !== meta.archetype) {
@@ -234,13 +336,17 @@ export class IngestionPipeline {
           }
 
           for (const item of pendingUpdates) {
-            this.publishParsedFile(domainId, item);
+            this.publishParsedFile(domainId, item, false);
 
             symbolsIndexed += item.ast.symbols.length;
             dependenciesIndexed += item.ast.dependencies.length;
           }
+          if (pendingUpdates.length > 0) {
+            this.repo.setMeta("slices_dirty", "1");
+          }
 
         });
+        commitMs += performance.now() - commitStart;
         pendingUpdates.length = 0;
         pendingMetadataUpdates.length = 0;
         batchBytes = 0;
@@ -248,17 +354,23 @@ export class IngestionPipeline {
 
       for (const { fullPath, relPath } of collectedFiles) {
         options.signal?.throwIfAborted();
-        if (pendingMetadataUpdates.length >= RESOURCE_LIMITS.batchFiles) commitBatch();
+        if (pendingMetadataUpdates.length >= batchFilesLimit) commitBatch();
         filesScanned++;
-        if (filesScanned % RESOURCE_LIMITS.batchFiles === 0) { await new Promise<void>(done => setTimeout(done, 0)); options.signal?.throwIfAborted(); }
+        if (filesScanned % RESOURCE_LIMITS.batchFiles === 0) {
+          options.onProgress?.({ phase: "parsing", status: "progress", processed: filesScanned, total: totalEstimatedFiles });
+          await new Promise<void>(done => setTimeout(done, 0));
+          options.signal?.throwIfAborted();
+        }
         activeRelPaths.add(relPath);
 
-        let stat;
-        try {
-          stat = statSync(fullPath);
-        } catch (error: any) {
-          if (error?.code === "ENOENT") continue;
-          throw new Error(`Failed to inspect source '${relPath}': ${error?.message || error}`);
+        let stat = initialStats.get(fullPath);
+        if (!stat) {
+          try {
+            stat = statSync(fullPath);
+          } catch (error: any) {
+            if (error?.code === "ENOENT") continue;
+            throw new Error(`Failed to inspect source '${relPath}': ${error?.message || error}`);
+          }
         }
 
         const mtimeMs = stat.mtimeMs;
@@ -282,7 +394,7 @@ export class IngestionPipeline {
           filesSkipped++;
           continue;
         }
-        if (pendingUpdates.length >= RESOURCE_LIMITS.batchFiles || (batchBytes + sizeBytes > RESOURCE_LIMITS.batchBytes && pendingUpdates.length > 0)) { commitBatch(); await new Promise<void>(done => setTimeout(done, 0)); options.signal?.throwIfAborted(); }
+        if (pendingUpdates.length >= batchFilesLimit || (batchBytes + sizeBytes > batchBytesLimit && pendingUpdates.length > 0)) { commitBatch(); await new Promise<void>(done => setTimeout(done, 0)); options.signal?.throwIfAborted(); }
         let content: string;
         try { content = readSourceFile(fullPath); }
         catch (error) {
@@ -311,7 +423,9 @@ export class IngestionPipeline {
 
         const lineCount = content.split("\n").length;
         work.parserInvocations++;
+        const parseStart = performance.now();
         const ast = await this.parserEngine.parseFile(fullPath, content);
+        parseMs += performance.now() - parseStart;
         if (ast.status === "unsupported") {
           unsupportedFiles.push(relPath);
           this.repo.deleteFileByPath(relPath);
@@ -329,7 +443,9 @@ export class IngestionPipeline {
           lineCount,
           archetype,
           mtimeMs,
+          ctimeMs: stat.ctimeMs,
           sizeBytes,
+          ino: stat.ino,
           ast,
         });
       }
@@ -346,6 +462,9 @@ export class IngestionPipeline {
         }
       });
     }
+
+    options.onProgress?.({ phase: "parsing", status: "done", processed: filesScanned, total: totalEstimatedFiles });
+    options.onProgress?.({ phase: "resolving", status: "done", symbols: symbolsIndexed, dependencies: dependenciesIndexed });
 
     options.signal?.throwIfAborted();
     const topologyInputs = ["package.json", "composer.json", "nest-cli.json", "go.mod", "artisan", "tsconfig.json"]
@@ -368,15 +487,27 @@ export class IngestionPipeline {
       if (semanticInputChanged) break;
     }
     const extractorRevision = SEMANTIC_FINGERPRINT;
+    options.onProgress?.({ phase: "linking", status: "start", slices: 0 });
+    const sliceStart = performance.now();
     if (this.repo.getMeta("semantic_extractor_revision") !== extractorRevision || this.repo.getMeta("semantic_inventory") !== inventoryRevision || semanticInputChanged || filesUpdated > 0 || removedFiles > 0 || this.repo.getMeta("slices_dirty") === "1" || this.repo.getMeta("semantic_revision") !== semanticRevision) {
       await rebuildSliceCatalog(this.repo, projectRoot, {
         ignorePatterns: config.settings.ignore_patterns, signal: options.signal,
-        semanticRevision, inventoryRevision,
+        semanticRevision, inventoryRevision, inventory: initialScan,
       });
     }
+    sliceMs += performance.now() - sliceStart;
+    options.onProgress?.({ phase: "linking", status: "done", slices: this.repo.countVerticalSlices() });
 
     skippedFiles.push(...JSON.parse(this.repo.getMeta("semantic_skipped_files") || "[]"));
-    if (JSON.stringify(inventory) !== JSON.stringify(this.sourceInventory(projectRoot, config.settings.ignore_patterns, options.signal))) {
+    const endScan = scanSourceFiles(projectRoot, { ignorePatterns: config.settings.ignore_patterns, signal: options.signal });
+    const endRelPaths: string[] = [];
+    const endInventory = endScan.files.map(fullPath => {
+      const relPath = relative(projectRoot, fullPath).replace(/\\/g, "/");
+      endRelPaths.push(relPath);
+      const stat = statSync(fullPath);
+      return `${relPath}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
+    }).sort();
+    if (inventory.length !== endInventory.length || inventory.some((val, i) => val !== endInventory[i])) {
       throw new Error("Source changed during synchronization: workspace inventory changed. Run sync again after the files stop changing.");
     }
     const durationMs = Math.round(performance.now() - startTime);
@@ -384,11 +515,9 @@ export class IngestionPipeline {
     // Identify uncovered eligible source files outside registered domains
     const indexedPaths = new Set(this.repo.getAllFiles().map((file) => file.path));
     for (const path of this.verifiedFiles.keys()) if (!indexedPaths.has(path)) this.verifiedFiles.delete(path);
-    const allWorkspaceFiles = this.collectFiles(projectRoot, projectRoot, config.settings.ignore_patterns, [], options.signal);
     const unsupportedSet = new Set(unsupportedFiles);
     const skippedSet = new Set(skippedFiles.map((file) => file.path));
-    const uncoveredFiles = allWorkspaceFiles
-      .map((file) => file.relPath)
+    const uncoveredFiles = endRelPaths
       .filter((rel) => !indexedPaths.has(rel) && !unsupportedSet.has(rel) && !skippedSet.has(rel));
 
     // Update SSOT repo_meta watermark
@@ -415,6 +544,12 @@ export class IngestionPipeline {
       dependencies_indexed: dependenciesIndexed,
       parser_invocations: work.parserInvocations,
       duration_ms: durationMs,
+      stage_timings_ms: {
+        scan_ms: Math.round(scanMs),
+        parse_ms: Math.round(parseMs),
+        commit_ms: Math.round(commitMs),
+        slice_ms: Math.round(sliceMs),
+      },
     };
   }
 
@@ -506,12 +641,12 @@ export class IngestionPipeline {
     mtimeMs: number;
     sizeBytes: number;
     ast: ParsedFileAST;
-  }): void {
+  }, markSlicesDirty = true): void {
     const { relPath, archetype, contentHash, lineCount, mtimeMs, sizeBytes, ast } = file;
     const fileId = this.repo.upsertFile(domainId, relPath, archetype, contentHash, lineCount, mtimeMs, sizeBytes);
     this.repo.replaceFileSymbols(fileId, ast.symbols);
     this.repo.replaceFileDependencies(fileId, ast.dependencies);
-    this.repo.setMeta("slices_dirty", "1");
+    if (markSlicesDirty) this.repo.setMeta("slices_dirty", "1");
   }
 
   private removeIndexedFile(path: string): void {

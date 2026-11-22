@@ -18,10 +18,29 @@ export async function auditStagedFiles(
   config: ValidatedSeptumConfig,
   workspaceRoot: string,
   repo?: SeptumRepository
-): Promise<{ files: string[]; violations: BoundaryViolation[]; resolution_issues: ImportResolution[] }> {
+): Promise<{
+  files: string[];
+  violations: BoundaryViolation[];
+  resolution_issues: ImportResolution[];
+  background_resolution_issues_count: number;
+}> {
   const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: workspaceRoot, encoding: "utf8" }).trim();
   // Freeze the index as a Git tree. Every source/config/target is read from this tree.
   const tree = execFileSync("git", ["write-tree"], { cwd: gitRoot, encoding: "utf8", timeout: 5000 }).trim();
+  const rawPrefix = relative(gitRoot, workspaceRoot).replace(/\\/g, "/");
+  const prefix = rawPrefix === "." ? "" : rawPrefix;
+  const inside = (file: string) => !prefix || file === prefix || file.startsWith(prefix + "/");
+  const hasHead = (() => { try { execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: gitRoot, stdio: "ignore" }); return true; } catch { return false; } })();
+  const emptyTree = execFileSync("git", ["hash-object", "-t", "tree", "--stdin"], { cwd: gitRoot, input: "", encoding: "utf8" }).trim();
+  const stagedPaths = (filter: string) => execFileSync("git", ["diff-tree", "--root", "--no-commit-id", "-r", "--name-only", `--diff-filter=${filter}`, "-z", hasHead ? "HEAD" : emptyTree, tree], {
+    cwd: gitRoot, encoding: "utf-8", timeout: 5000, maxBuffer: 10 * 1024 * 1024,
+  }).split("\0").filter(Boolean).map(f => f.replace(/\\/g, "/")).filter(inside);
+  const files = stagedPaths("ACMR").map(file => (prefix ? relative(prefix, file) : file).replace(/\\/g, "/"));
+  const deleted = stagedPaths("D").map(file => (prefix ? relative(prefix, file) : file).replace(/\\/g, "/"));
+  if (files.length === 0 && deleted.length === 0) {
+    return { files: [], violations: [], resolution_issues: [], background_resolution_issues_count: 0 };
+  }
+
   const scratch = mkdtempSync(join(tmpdir(), "septum-staged-"));
   const snapshot = join(scratch, "tree");
   try {
@@ -32,14 +51,15 @@ export async function auditStagedFiles(
     const indexedPaths: string[] = [];
     const blobs: Array<{ oid: string; file: string; size: number }> = [];
     for (const entry of entries) {
-      const match = /^(\d+) blob ([a-f0-9]+)\s+(\d+)\t([\s\S]+)$/.exec(entry);
-      if (!match || !["100644", "100755"].includes(match[1]!)) throw new Error("Cannot certify staged view containing symlinks or submodules.");
-      const [, , oid, sizeText, file] = match;
+      const match = /^(\d+) (?:blob|commit) ([a-f0-9]+)\s+(\d+|-)\t([\s\S]+)$/.exec(entry);
+      if (!match) continue;
+      const [, mode, oid, sizeText, file] = match;
       // Only source and interpretation inputs need bytes in the parser snapshot.
       // Keep the complete path inventory so omitted assets cannot masquerade as source.
       indexedPaths.push(file!);
       const needed = ASTParserEngine.isSourceFile(file!) || isResolutionInput(file!);
       if (!needed) continue;
+      if (!["100644", "100755"].includes(mode!)) throw new Error("Cannot certify staged view containing symlinks or submodules.");
       const size = Number(sizeText);
       totalBytes += size;
       if (size > RESOURCE_LIMITS.sourceBytes || totalBytes > 128 * 1024 * 1024) throw new Error("Staged view exceeds resource limits.");
@@ -70,20 +90,11 @@ export async function auditStagedFiles(
       writeFileSync(destination, record.subarray(header.length, length - 1));
       offset += length;
     }
-    const rawPrefix = relative(gitRoot, workspaceRoot).replace(/\\/g, "/");
-    const prefix = rawPrefix === "." ? "" : rawPrefix;
-    const inside = (file: string) => !prefix || file === prefix || file.startsWith(prefix + "/");
-    const hasHead = (() => { try { execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: gitRoot, stdio: "ignore" }); return true; } catch { return false; } })();
-    const emptyTree = execFileSync("git", ["hash-object", "-t", "tree", "--stdin"], { cwd: gitRoot, input: "", encoding: "utf8" }).trim();
-    const stagedPaths = (filter: string) => execFileSync("git", ["diff-tree", "--root", "--no-commit-id", "-r", "--name-only", `--diff-filter=${filter}`, "-z", hasHead ? "HEAD" : emptyTree, tree], {
-      cwd: gitRoot, encoding: "utf-8", timeout: 5000, maxBuffer: 10 * 1024 * 1024,
-    }).split("\0").filter(Boolean).map(f => f.replace(/\\/g, "/")).filter(inside);
-    const files = stagedPaths("ACMR").map(file => (prefix ? relative(prefix, file) : file).replace(/\\/g, "/"));
-    const deleted = stagedPaths("D").map(file => (prefix ? relative(prefix, file) : file).replace(/\\/g, "/"));
     const snapshotRoot = join(snapshot, prefix);
     evaluator = evaluator.withResolver(new ModuleResolver(snapshotRoot));
     const violations: BoundaryViolation[] = [];
     const resolutionIssues: ImportResolution[] = [];
+    let backgroundResolutionIssuesCount = 0;
     const stagedDependencies: ReturnType<SeptumRepository["getAllDependenciesWithDomains"]> = [];
     const parser = new ASTParserEngine();
     const interpretationChanged = [...files, ...deleted].some(isResolutionInput);
@@ -107,14 +118,24 @@ export async function auditStagedFiles(
         stagedDependencies.push({ source_file: file, source_domain: evaluator.resolveSourceDomain(file, config)!, target: dependency.target, statement: dependency.statement, line_number: dependency.line_number, is_external: dependency.is_external });
         const found = evaluator.checkProposedChanges(file, [dependency.target], config, [dependency.statement]).map(violation => ({ ...violation, line: dependency.line_number }));
         const resolution = evaluator.getResolver().resolveImport(dependency.target,file,dependency.statement);
+        const isRelevantFile = changed.has(file) || interpretationChanged;
         if (found.length === 0 && (!["resolved","external"].includes(resolution.status) || resolution.coverage === "conditional")) {
-          resolutionIssues.push(resolution);
+          if (isRelevantFile) {
+            resolutionIssues.push(resolution);
+          } else {
+            backgroundResolutionIssuesCount++;
+          }
         }
-        if (changed.has(file) || interpretationChanged) violations.push(...found);
+        if (isRelevantFile) violations.push(...found);
       }
     }
     const staged = new Set([...files, ...deleted]);
     violations.push(...evaluator.detectCircularDependencies(config, stagedDependencies, interpretationChanged ? new Set(sourceFiles) : staged));
-    return { files: Array.from(staged), violations, resolution_issues: resolutionIssues };
+    return {
+      files: Array.from(staged),
+      violations,
+      resolution_issues: resolutionIssues,
+      background_resolution_issues_count: backgroundResolutionIssuesCount,
+    };
   } finally { rmSync(scratch, { recursive: true, force: true }); }
 }
