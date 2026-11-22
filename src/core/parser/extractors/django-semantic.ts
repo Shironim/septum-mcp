@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExecutionChainNode } from "../../../types/index.ts";
 import { anyFileContains } from "./manifest-helpers.ts";
+import { buildGraphQLSliceCandidate, isGraphQLRouteOrHandler } from "./graphql-entrypoint.ts";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
 
 interface ViewMethodInfo {
@@ -28,6 +29,7 @@ interface ViewInfo {
   relPath: string;
   line: number;
   kind: "cbv" | "fbv" | "viewset";
+  baseClasses?: string[];
   serializer?: string;
   model?: string;
   methods: ViewMethodInfo[];
@@ -80,12 +82,17 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
       viewsMap.set(`${key}@${view.line}`, view);
     };
     const urlConfs = new Map<string, DjangoUrlEntry[]>();
+    const parsedFiles = new Set<string>();
+    const pyFileSet = new Set(pyFiles.map(f => path.resolve(f)));
 
-    for (const file of pyFiles) {
+    const inspectPythonFile = async (file: string, extractUrlconf: boolean): Promise<void> => {
+      const absFile = path.resolve(file);
+      if (parsedFiles.has(absFile)) return;
+      parsedFiles.add(absFile);
       signal?.throwIfAborted();
-      const content = readOptionalSourceFile(file, "utf-8");
-      if (!content || !/urlpatterns|\b(?:class|def)\s/.test(content)) continue;
-      const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
+      const content = readOptionalSourceFile(absFile, "utf-8");
+      if (!content || !/urlpatterns|\b(?:class|def)\s|SimpleRouter|DefaultRouter/.test(content)) return;
+      const relPath = path.relative(projectRoot, absFile).replace(/\\/g, "/");
 
       const parsed = await parseSourceWithTreeSitter("python", content, (root) => {
         const imports = new Map<string, PythonImport>();
@@ -161,6 +168,7 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
 
           let serializer: string | undefined;
           let model: string | undefined;
+          let dispatchLine: number | undefined;
           const explicitMethods: ViewMethodInfo[] = [];
 
           const body = node.childForFieldName("body");
@@ -195,6 +203,8 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
                 if (!isViewSet) {
                   if (/^(get|post|put|patch|delete|options|head|trace)$/.test(action)) {
                     explicitMethods.push({ method: action.toUpperCase(), action, line });
+                  } else if (action === "dispatch") {
+                    dispatchLine = line;
                   }
                   continue;
                 }
@@ -261,22 +271,78 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
               methods.push(custom);
             }
           } else {
-            methods.push(...explicitMethods);
+            if (explicitMethods.length > 0) {
+              methods.push(...explicitMethods);
+            } else if (dispatchLine !== undefined) {
+              methods.push({ method: "ANY", action: "dispatch", line: dispatchLine });
+            } else {
+              const canonicalBases = baseClasses.map((base) => pythonImportedName(base, imports) ?? base);
+              const isGenericCbv = canonicalBases.some((b) =>
+                /(?:^|\.)(?:View|TemplateView|RedirectView|ListView|DetailView|FormView|CreateView|UpdateView|DeleteView|APIView|(?:Async)?GraphQLView)$/.test(b)
+              );
+              if (isGenericCbv) {
+                methods.push({ method: "ANY", action: "dispatch", line: classLine });
+              }
+            }
           }
 
           recordView({
             name: className, relPath, line: classLine, kind: isViewSet ? "viewset" : "cbv",
+            baseClasses: baseClasses.map((base) => pythonImportedName(base, imports) ?? base),
             serializer, model, methods,
           });
         }
 
-        const routes = readDjangoUrlconf(root, signal);
-        if (routes.length) urlConfs.set(relPath, routes);
+        if (extractUrlconf) {
+          const routes = readDjangoUrlconf(root, signal);
+          if (routes.length) urlConfs.set(relPath, routes);
+        }
         return { symbols: [], dependencies: [] };
       });
 
       if (parsed?.status !== "parsed") {
         throw new Error(`Django AST unavailable or degraded: ${relPath}`);
+      }
+    };
+
+    // Pass 1: Only parse URLconf / router files first (entrypoint-driven).
+    const urlConfHint = /\b(?:urlpatterns|SimpleRouter|DefaultRouter)\b/;
+    for (const file of pyFiles) {
+      signal?.throwIfAborted();
+      const content = readOptionalSourceFile(file, "utf-8");
+      if (!content || !urlConfHint.test(content)) continue;
+      await inspectPythonFile(file, true);
+    }
+
+    // Pass 1b: Follow any included URLconf modules not yet parsed.
+    const urlQueue = [...urlConfs.keys()];
+    for (let i = 0; i < urlQueue.length; i++) {
+      const parent = urlQueue[i]!;
+      const routes = urlConfs.get(parent) ?? [];
+      for (const route of routes) {
+        if (route.kind !== "include") continue;
+        const resolved = resolver.resolve(route.module, path.resolve(projectRoot, parent));
+        const child = resolved.status === "resolved" ? resolved.targets[0]?.files[0] : undefined;
+        if (!child) continue;
+        const absChild = path.resolve(projectRoot, child);
+        if (pyFileSet.has(absChild) && !parsedFiles.has(absChild)) {
+          await inspectPythonFile(absChild, true);
+          if (urlConfs.has(child)) urlQueue.push(child);
+        }
+      }
+    }
+
+    // Pass 2: Parse only the view files actually referenced by discovered URLconfs.
+    for (const [urlFile, routes] of urlConfs) {
+      for (const route of routes) {
+        if (route.kind === "include" || !route.target.module) continue;
+        const resolution = resolver.resolve(route.target.module, path.resolve(projectRoot, urlFile));
+        const targetRel = resolution.status === "resolved" ? resolution.targets[0]?.files[0] : undefined;
+        if (!targetRel) continue;
+        const absTarget = path.resolve(projectRoot, targetRel);
+        if (pyFileSet.has(absTarget) && !parsedFiles.has(absTarget)) {
+          await inspectPythonFile(absTarget, false);
+        }
       }
     }
 
@@ -319,11 +385,44 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
             });
           } else if (route.actionMap) continue;
         }
+        if (route.kind === "path" && route.methods?.length) {
+          const allowed = new Set(route.methods.map((m) => m.toUpperCase()));
+          const constrained = methods.filter((m) => m.method === "ANY" || allowed.has(m.method.toUpperCase()));
+          const nextMethods = constrained.map((m) => (m.method === "ANY" ? { ...m, method: route.methods![0]! } : m));
+          methods = nextMethods.length > 0
+            ? nextMethods
+            : route.methods.map((m) => ({
+                method: m,
+                action: methods[0]?.action ?? "dispatch",
+                line: methods[0]?.line ?? view.line,
+              }));
+        }
 
         for (const prefix of prefixes) {
           const base = normalizeUri(prefix + cleanRoutePattern(route.pattern));
           for (const method of methods) {
             const isRouter = route.kind === "router";
+            if (!isRouter && isGraphQLRouteOrHandler({ uri: base, handlerName: view.name, baseClasses: view.baseClasses })) {
+              slices.push(
+                buildGraphQLSliceCandidate({
+                  domainId,
+                  frameworkStyle: "django-graphql",
+                  httpMethod: method.method,
+                  uri: base,
+                  routeName: route.kind === "path" ? route.name : undefined,
+                  controllerClass: view.name,
+                  actionName: method.action,
+                  controllerFile: view.relPath,
+                  controllerLine: method.line,
+                  routeFile: urlFile,
+                  routeLine: route.line,
+                  schemaSymbol: route.kind === "path" ? route.schemaSymbol : undefined,
+                  description: "Django GraphQL Route Registration",
+                  inferredAction: method.line === view.line && view.kind === "cbv",
+                })
+              );
+              continue;
+            }
             const architecture = isRouter ? "django-drf" : "django-mvc";
             const suffix = !isRouter ? "" :
               method.isCustomAction ? (method.isDetail ? `/{id}/${method.urlPath}` : `/${method.urlPath}`) :
@@ -371,6 +470,99 @@ export class DjangoSemanticExtractor implements SemanticSliceExtractor {
           }
         }
       }
+    }
+
+    // Extract Django management commands (*/management/commands/<name>.py)
+    const commandFiles = pyFiles.filter(file => {
+      const norm = file.replace(/\\/g, "/");
+      const base = path.basename(norm);
+      return /(?:^|\/)management\/commands\/[^/]+\.py$/.test(norm) && base !== "__init__.py" && !base.startsWith("_");
+    });
+
+    for (const cmdFile of commandFiles) {
+      signal?.throwIfAborted();
+      const absFile = path.resolve(cmdFile);
+      const content = readOptionalSourceFile(absFile, "utf-8");
+      if (!content || !/\bclass\s+Command\b/.test(content)) continue;
+      const relPath = path.relative(projectRoot, absFile).replace(/\\/g, "/");
+      const commandName = path.basename(relPath, ".py");
+
+      let commandInfo: { classLine: number; handleLine: number; hasHandle: boolean } | undefined;
+      await parseSourceWithTreeSitter("python", content, (root) => {
+        for (const statement of root.namedChildren) {
+          const node = statement.type === "decorated_definition" ? statement.childForFieldName("definition") : statement;
+          if (!node || node.type !== "class_definition" || node.hasError) continue;
+          const className = node.childForFieldName("name")?.text.trim();
+          if (className !== "Command") continue;
+          const classLine = node.startPosition.row + 1;
+          let handleLine = classLine;
+          let hasHandle = false;
+          const body = node.childForFieldName("body");
+          if (body) {
+            for (const member of body.namedChildren) {
+              const fnNode = member.type === "decorated_definition" ? member.childForFieldName("definition") : member;
+              if (fnNode?.type === "function_definition" && fnNode.childForFieldName("name")?.text.trim() === "handle") {
+                handleLine = fnNode.startPosition.row + 1;
+                hasHandle = true;
+                break;
+              }
+            }
+          }
+          commandInfo = { classLine, handleLine, hasHandle };
+          break;
+        }
+        return { symbols: [], dependencies: [] };
+      });
+
+      if (!commandInfo) continue;
+
+      const evidencedChain = [
+        {
+          stage: "ingress" as const,
+          symbol: `CLI ${commandName}`,
+          file: relPath,
+          line: commandInfo.classLine,
+          description: "Django Management Command",
+          relationship: {
+            kind: "cli_command",
+            derivation: "source",
+            source: { file: relPath, line: commandInfo.classLine },
+            reason: "Django Management Command",
+          },
+        },
+        {
+          stage: "controller" as const,
+          symbol: "Command::handle",
+          file: relPath,
+          line: commandInfo.handleLine,
+          description: commandInfo.hasHandle
+            ? "Django Management Command Handler"
+            : "Inherited Django Management Command Handler (line points to Command class)",
+          relationship: {
+            kind: "cli_command",
+            derivation: commandInfo.hasHandle ? "source" : "inferred",
+            source: { file: relPath, line: commandInfo.handleLine },
+            reason: commandInfo.hasHandle
+              ? "Django Management Command Handler"
+              : "Inherited Django Management Command Handler",
+          },
+        },
+      ];
+
+      slices.push({
+        domain_id: domainId ?? null,
+        feature_key: `command:${commandName}`,
+        http_method: "CLI",
+        route_uri: `command:${commandName}`,
+        route_name: `cli.${commandName}`,
+        controller_class: "Command",
+        action_name: "handle",
+        controller_file: relPath,
+        controller_line: commandInfo.handleLine,
+        architecture_style: "django-cli",
+        entry_kind: "cli_command",
+        execution_chain_json: JSON.stringify(evidencedChain),
+      });
     }
 
     return slices;

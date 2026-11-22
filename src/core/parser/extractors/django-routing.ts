@@ -2,13 +2,14 @@ import type Parser from "web-tree-sitter";
 import { readPythonStaticString as literal } from "../static-string.ts";
 import {
   pythonCallArgument, pythonCallUsesUnpacking, pythonImportedMember, pythonImportedName, pythonImports,
+  unwrapPythonCallWrapper,
   type PythonImport,
 } from "./python-route-ast.ts";
 
 type Node = Parser.SyntaxNode;
 export type DjangoViewTarget = { symbol: string; module?: string; line?: number };
 type PathEntry = { kind: "path"; pattern: string; target: DjangoViewTarget; name?: string; line: number;
-  actionMap?: Map<string, string>; dispatch: "function" | "class" };
+  actionMap?: Map<string, string>; dispatch: "function" | "class"; methods?: string[]; schemaSymbol?: string };
 type RouterEntry = { kind: "router"; pattern: string; target: DjangoViewTarget; line: number };
 type Inclusion = { kind: "include"; pattern: string | undefined; module: string };
 export type DjangoUrlEntry = PathEntry | RouterEntry | Inclusion;
@@ -87,15 +88,20 @@ export function readDjangoUrlconf(root: Node, signal?: AbortSignal): DjangoUrlEn
     }
     if (pattern === undefined) return undefined;
 
-    const asView = view.type === "call" && fn?.type === "attribute" && fn.childForFieldName("attribute")?.text === "as_view";
-    const target = viewTarget(asView ? fn.childForFieldName("object") : view);
+    const unwrapped = unwrapPythonCallWrapper(view, callee);
+    const unwrappedFn = unwrapped.node.childForFieldName("function");
+    const asView = unwrapped.node.type === "call" && unwrappedFn?.type === "attribute" && unwrappedFn.childForFieldName("attribute")?.text === "as_view";
+    const target = viewTarget(asView ? unwrappedFn.childForFieldName("object") : unwrapped.node);
     if (!target) return undefined;
-    const mapping = asView ? pythonCallArgument(view, "actions", 0) : undefined;
+    const mapping = asView ? pythonCallArgument(unwrapped.node, "actions", 0) : undefined;
     const actionMap = mapping ? viewActions(mapping) : undefined;
     if (mapping && !actionMap) return undefined;
+    const schemaArg = asView ? pythonCallArgument(unwrapped.node, "schema") : undefined;
+    const schemaSymbol = schemaArg && ["identifier", "attribute"].includes(schemaArg.type) ? schemaArg.text : undefined;
     return [{
       kind: "path", pattern, target, name: literal(pythonCallArgument(node, "name", 3)),
       line: node.startPosition.row + 1, actionMap, dispatch: asView ? "class" : "function",
+      methods: unwrapped.methods, schemaSymbol,
     }];
   };
 

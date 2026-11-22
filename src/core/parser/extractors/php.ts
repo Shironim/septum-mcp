@@ -369,7 +369,7 @@ export class PHPExtractor implements CodeExtractor {
         };
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node);
+        const headerLine = getNodeHeader(node, content);
 
         symbols.push({
           name: containerName,

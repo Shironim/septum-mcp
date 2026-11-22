@@ -66,7 +66,11 @@ export class TypeScriptExtractor implements CodeExtractor {
 
     const stripQuotes = (raw: string): string => raw.replace(/^['"`]|['"`]$/g, "");
 
-    const walkDependencies = (node: Parser.SyntaxNode): void => {
+    const depNodeTypes = /\b(?:require|import)\s*\(/.test(content)
+      ? ["import_statement", "export_statement", "call_expression"]
+      : ["import_statement", "export_statement"];
+
+    for (const node of rootNode.descendantsOfType(depNodeTypes)) {
       if (node.type === "import_statement") {
         const sourceNode =
           node.childForFieldName("source") ??
@@ -85,7 +89,7 @@ export class TypeScriptExtractor implements CodeExtractor {
             });
           }
         }
-        return;
+        continue;
       }
 
       if (node.type === "export_statement") {
@@ -105,8 +109,8 @@ export class TypeScriptExtractor implements CodeExtractor {
               ...(importedSymbols.length > 0 ? { imported_symbols: importedSymbols } : {}),
             });
           }
-          return;
         }
+        continue;
       }
 
       if (node.type === "call_expression") {
@@ -133,13 +137,7 @@ export class TypeScriptExtractor implements CodeExtractor {
           }
         }
       }
-
-      for (const child of node.namedChildren) {
-        walkDependencies(child);
-      }
-    };
-
-    walkDependencies(rootNode);
+    }
 
     const processTopLevelNode = (stmtNode: Parser.SyntaxNode, isExported: boolean, outerStartRow?: number): void => {
       const startRow = outerStartRow ?? stmtNode.startPosition.row;
@@ -214,7 +212,7 @@ export class TypeScriptExtractor implements CodeExtractor {
         symbols.push({
           name: className,
           kind,
-          signature: getNodeHeader(stmtNode),
+          signature: getNodeHeader(stmtNode, content),
           visibility: "public",
           line_start: lineStart,
           line_end: lineEnd,
@@ -241,7 +239,7 @@ export class TypeScriptExtractor implements CodeExtractor {
         symbols.push({
           name: nameNode.text,
           kind: stmtNode.type === "enum_declaration" ? "enum" : "type",
-          signature: getNodeHeader(stmtNode),
+          signature: getNodeHeader(stmtNode, content),
           visibility: "public",
           line_start: lineStart,
           line_end: lineEnd,

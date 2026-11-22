@@ -6,6 +6,7 @@ import { probeSourcePath, readOptionalSourceFile } from "../../resources/source-
 import { composeMountPrefixes } from "./route-prefixes.ts";
 import type { SemanticSliceExtractor, VerticalSliceCandidate } from "./semantic-extractor.interface.ts";
 import { lineOf, literal, TypeScriptBindings, visitRouteCalls } from "./typescript-bindings.ts";
+import { isGraphQLRouteOrHandler } from "./graphql-entrypoint.ts";
 
 const verbs = new Set(["get", "post", "put", "patch", "delete", "head", "options", "trace", "connect", "all"]);
 
@@ -94,8 +95,10 @@ export class ExpressSemanticExtractor implements SemanticSliceExtractor {
       return receiver;
     };
 
+    const routeCallHint = /\.(?:use|get|post|put|patch|delete|head|options|trace|connect|all|route)\s*\(/;
     for (const file of files) {
       signal?.throwIfAborted();
+      if (!bindings.matches(file, routeCallHint)) continue;
       const unit = bindings.load(file);
       if (!unit) continue;
       visitRouteCalls(unit.source, call => {
@@ -118,10 +121,22 @@ export class ExpressSemanticExtractor implements SemanticSliceExtractor {
           const prefixes = knownPaths ? knownPaths.map(value => value.replace(/\/+$/, "")) :
             [implicitPath ? "" : undefined];
           const callbacks = knownPaths ? flattenedArguments(call.arguments.slice(1)) : allCallbacks;
+          const nonRouterCallbacks: ts.Expression[] = [];
           for (const argument of callbacks) {
             const child = receiverOf(argument);
-            if (!child || child.paths !== undefined || child.router === receiver.router) continue;
+            if (!child || child.paths !== undefined || child.router === receiver.router) {
+              nonRouterCallbacks.push(argument);
+              continue;
+            }
             for (const prefix of prefixes) mounts.push({ parent: receiver.router, child: child.router, prefix });
+          }
+          if (knownPaths?.length && nonRouterCallbacks.length) {
+            const gql = nonRouterCallbacks.some((arg) =>
+              isGraphQLRouteOrHandler({ uri: knownPaths[0], handlerName: arg.getText() })
+            );
+            if (gql) {
+              routes.push({ router: receiver.router, call, paths: knownPaths, callbacks: nonRouterCallbacks, method: "ANY" });
+            }
           }
           return;
         }

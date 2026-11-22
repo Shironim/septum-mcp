@@ -174,8 +174,10 @@ export class FastifySemanticExtractor implements SemanticSliceExtractor {
       });
     };
 
+    const routeCallHint = /\.(?:route|register|addHook|addSchema|get|post|put|patch|delete|head|options|trace|connect|all)\s*\(/;
     for (const file of files) {
       signal?.throwIfAborted();
+      if (!bindings.matches(file, routeCallHint)) continue;
       const unit = bindings.load(file);
       if (unit) visitRouteCalls(unit.source, readCall);
     }

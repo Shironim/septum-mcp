@@ -110,7 +110,7 @@ export class RubyExtractor implements CodeExtractor {
           const fullName = scopeName ? `${scopeName}::${baseName}` : baseName;
           const lineStart = child.startPosition.row + 1;
           const lineEnd = Math.max(lineStart, child.endPosition.row + 1);
-          const headerLine = getNodeHeader(child);
+          const headerLine = getNodeHeader(child, content);
           const kind = child.type === "class" ? "class" : "interface";
 
           symbols.push({
@@ -145,7 +145,7 @@ export class RubyExtractor implements CodeExtractor {
             : methodName;
           const lineStart = child.startPosition.row + 1;
           const lineEnd = Math.max(lineStart, child.endPosition.row + 1);
-          const headerLine = getNodeHeader(child);
+          const headerLine = getNodeHeader(child, content);
           const nestingDepth = calculateAstControlFlowNesting(
             child,
             RUBY_CONTROL_FLOW_NODES,

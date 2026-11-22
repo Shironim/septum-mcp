@@ -80,17 +80,34 @@ function importTarget(node: ts.Node): string | undefined {
 
 export class TypeScriptBindings {
   private readonly indexed = new Map<string, Unit | undefined>();
+  private readonly textCache = new Map<string, string | undefined>();
   private readonly resolver: ImportResolver;
 
   constructor(private readonly root: string, private readonly files: ReadonlySet<string>, private readonly signal?: AbortSignal) {
     this.resolver = new ImportResolver(root);
   }
 
+  private readText(file: string): string | undefined {
+    this.signal?.throwIfAborted();
+    if (!this.files.has(file)) return undefined;
+    if (!this.textCache.has(file)) {
+      this.textCache.set(file, readOptionalSourceFile(file, "utf-8"));
+    }
+    return this.textCache.get(file);
+  }
+
+  /** Fast text pre-filter before constructing a TypeScript Program/TypeChecker for a file. */
+  matches(file: string, pattern: RegExp): boolean {
+    const text = this.readText(file);
+    return text !== undefined && pattern.test(text);
+  }
+
   load(file: string): Unit | undefined {
     this.signal?.throwIfAborted();
     if (!this.files.has(file)) return undefined;
     if (!this.indexed.has(file)) {
-      const text = readOptionalSourceFile(file, "utf-8");
+      const text = this.readText(file);
+      this.textCache.delete(file);
       const unit = text ? bindContextFile(file, text) : undefined;
       this.indexed.set(file, unit?.hasErrors ? undefined : unit);
     }
@@ -126,7 +143,7 @@ export class TypeScriptBindings {
     return matches.length === 1 ? this.load(path.resolve(this.root, matches[0]!)) : undefined;
   }
 
-  visitModules(files: readonly string[], visit: (unit: Unit) => void): void {
+  visitModules(files: readonly string[], visit: (unit: Unit) => void, pattern?: RegExp): void {
     const visited = new Set<string>();
     const evaluate = (unit: Unit) => {
       this.signal?.throwIfAborted();
@@ -142,6 +159,7 @@ export class TypeScriptBindings {
       visit(unit);
     };
     for (const file of files) {
+      if (pattern && !this.matches(file, pattern)) continue;
       const unit = this.load(file);
       if (unit) evaluate(unit);
     }

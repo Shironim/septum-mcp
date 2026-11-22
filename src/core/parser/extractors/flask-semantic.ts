@@ -86,7 +86,7 @@ export class FlaskSemanticExtractor implements SemanticSliceExtractor {
       signal?.throwIfAborted();
       const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
       const content = readOptionalSourceFile(file, "utf-8");
-      if (!content || !/@|register_blueprint|add_url_rule|Blueprint|Flask/.test(content)) continue;
+      if (!content || !/@\s*[A-Za-z_]\w*\.(?:route|get|post|put|patch|delete|options|head|trace)\b|register_blueprint|add_url_rule|Blueprint|Flask/.test(content)) continue;
 
       const parsed = await parseSourceWithTreeSitter("python", content, root => {
         const readRoute = (key: string, call: Node, method: string, handler: Node, line: number) => {

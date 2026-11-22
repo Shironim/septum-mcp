@@ -79,6 +79,7 @@ export class HonoSemanticExtractor implements SemanticSliceExtractor {
       return receiver;
     };
 
+    const honoRouteHint = /\.(?:route|on|basePath|get|post|put|patch|delete|head|options|trace|connect|all)\s*\(|\bnew\s+Hono\b/;
     bindings.visitModules(files, unit => visitRouteCalls(unit.source, call => {
       signal?.throwIfAborted();
       const member = call.expression;
@@ -113,7 +114,7 @@ export class HonoSemanticExtractor implements SemanticSliceExtractor {
           if (localPath !== undefined) routes.push({ method: m, uri: join(receiver.base, localPath), registration: call, handlers });
         }
       }
-    }));
+    }), honoRouteHint);
 
     const slices: VerticalSliceCandidate[] = [];
     for (const [instance, routes] of tables) {

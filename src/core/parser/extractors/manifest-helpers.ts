@@ -30,9 +30,9 @@ export function hasPackageJsonDependency(projectRoot: string, depNames: string[]
 
 export function hasComposerDependency(projectRoot: string, depNames: string[]): boolean {
   const composerJson = path.join(projectRoot, "composer.json");
-  if (!fs.existsSync(composerJson)) return false;
+  if (probeSourcePath(composerJson) !== "file") return false;
   try {
-    const composer = JSON.parse(fs.readFileSync(composerJson, "utf-8"));
+    const composer = JSON.parse(readOptionalSourceFile(composerJson, "utf-8"));
     const reqs = { ...(composer.require ?? {}), ...(composer["require-dev"] ?? {}) };
     return depNames.some((name) => Boolean(reqs[name]));
   } catch (err: unknown) {
@@ -49,9 +49,9 @@ export function anyFileContains(
 ): boolean {
   for (const rel of relativePaths) {
     const fullPath = path.join(rootDir, rel);
-    if (!fs.existsSync(fullPath)) continue;
+    if (probeSourcePath(fullPath) !== "file") continue;
     try {
-      const raw = fs.readFileSync(fullPath, "utf-8");
+      const raw = readOptionalSourceFile(fullPath, "utf-8");
       const content = caseInsensitive ? raw.toLowerCase() : raw;
       if (needles.some((needle) => content.includes(needle))) {
         return true;

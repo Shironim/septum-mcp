@@ -80,7 +80,7 @@ export class CSharpExtractor implements CodeExtractor {
           const methodName = nameNode.text;
           const lineStart = member.startPosition.row + 1;
           const lineEnd = Math.max(lineStart, member.endPosition.row + 1);
-          const headerLine = getNodeHeader(member);
+          const headerLine = getNodeHeader(member, content);
           const nestingDepth = calculateAstControlFlowNesting(
             member,
             CSHARP_CONTROL_FLOW_NODES,
@@ -162,7 +162,7 @@ export class CSharpExtractor implements CodeExtractor {
         const fullName = parentScope ? `${parentScope}.${baseName}` : baseName;
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node);
+        const headerLine = getNodeHeader(node, content);
         const kind =
           node.type === "interface_declaration"
             ? "interface"

@@ -438,7 +438,7 @@ export class GoExtractor implements CodeExtractor {
         const visibility: Visibility = /^[A-Z]/.test(methodName) ? "public" : "private";
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node);
+        const headerLine = getNodeHeader(node, content);
         const nestingDepth = calculateAstControlFlowNesting(
           node,
           GO_CONTROL_FLOW_NODES,
@@ -468,7 +468,7 @@ export class GoExtractor implements CodeExtractor {
         const visibility: Visibility = /^[A-Z]/.test(funcName) ? "public" : "private";
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node);
+        const headerLine = getNodeHeader(node, content);
         const nestingDepth = calculateAstControlFlowNesting(
           node,
           GO_CONTROL_FLOW_NODES,

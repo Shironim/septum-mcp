@@ -125,7 +125,7 @@ export class FastApiSemanticExtractor implements SemanticSliceExtractor {
       signal?.throwIfAborted();
       const relPath = path.relative(projectRoot, file).replace(/\\/g, "/");
       const content = readOptionalSourceFile(file, "utf-8");
-      if (!content || (!content.includes("@") && !content.includes("include_router") && !content.includes("APIRouter") && !content.includes("FastAPI") && !content.includes("add_api_route"))) {
+      if (!content || !/@\s*[A-Za-z_]\w*\.(?:get|post|put|patch|delete|options|head|trace|api_route|route|websocket)\b|include_router|APIRouter|FastAPI|add_api_route/.test(content)) {
         continue;
       }
 

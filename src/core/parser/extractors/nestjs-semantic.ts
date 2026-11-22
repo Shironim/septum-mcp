@@ -195,8 +195,10 @@ export class NestJsSemanticExtractor implements SemanticSliceExtractor {
     const fileOf = (node: ts.Node) => path.relative(root, node.getSourceFile().fileName).replace(/\\/g, "/");
     const slices: VerticalSliceCandidate[] = [];
 
+    const controllerHint = /@[\s\S]*\bController\b|\bController\b[\s\S]*@/;
     for (const file of files) {
       signal?.throwIfAborted();
+      if (!bindings.matches(file, controllerHint)) continue;
       const unit = bindings.load(file);
       if (!unit) continue;
       const relPath = fileOf(unit.source);

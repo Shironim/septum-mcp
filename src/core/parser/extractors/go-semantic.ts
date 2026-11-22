@@ -95,9 +95,17 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
     });
     const handlers = new Map<string, GoDeclaration>();
     const structs = new Map<string, GoStruct>();
+    const fileContents = new Map<string, string>();
+    const readCached = (file: string): string | undefined => {
+      if (!fileContents.has(file)) {
+        fileContents.set(file, readOptionalSourceFile(file, "utf-8") ?? "");
+      }
+      const content = fileContents.get(file);
+      return content || undefined;
+    };
     const parse = async <T>(file: string, visitor: (root: Parser.SyntaxNode) => T): Promise<T | undefined> => {
       signal?.throwIfAborted();
-      const content = readOptionalSourceFile(file, "utf-8");
+      const content = readCached(file);
       if (!content) return undefined;
       let reason: string | undefined;
       const result = await parseWithTreeSitter("go", content, visitor, diagnostic => { reason = diagnostic.message; });
@@ -108,6 +116,8 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
     const relative = (file: string) => path.relative(projectRoot, file).replace(/\\/g, "/");
 
     for (const file of files) {
+      const content = readCached(file);
+      if (!content || !/\b(?:type|func)\b/.test(content)) continue;
       const owner = path.dirname(file);
       const relPath = relative(file);
       await parse(file, root => {
@@ -155,7 +165,10 @@ export class GoSemanticExtractor implements SemanticSliceExtractor {
     }
 
     const routes: Array<{ file: string; route: GoRoute }> = [];
+    const goRouteHint = /\.(?:get|post|put|patch|delete|options|head|connect|trace|any|all|handle|handlefunc|group|route|mount)\s*\(/i;
     for (const file of files) {
+      const content = readCached(file);
+      if (!content || !goRouteHint.test(content)) continue;
       const found = await parse(file, root => routing.collect(root, goImports(root), path.dirname(file), signal));
       for (const route of found ?? []) routes.push({ file, route });
     }

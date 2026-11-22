@@ -115,7 +115,7 @@ export class RustExtractor implements CodeExtractor {
         const fnName = nameNode.text;
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node);
+        const headerLine = getNodeHeader(node, content);
         const nestingDepth = calculateAstControlFlowNesting(
           node,
           RUST_CONTROL_FLOW_NODES,
@@ -144,7 +144,7 @@ export class RustExtractor implements CodeExtractor {
         const structName = nameNode.text;
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node);
+        const headerLine = getNodeHeader(node, content);
 
         symbols.push({
           name: qualify(structName),
@@ -168,7 +168,7 @@ export class RustExtractor implements CodeExtractor {
         const enumName = nameNode.text;
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node);
+        const headerLine = getNodeHeader(node, content);
 
         symbols.push({
           name: qualify(enumName),
@@ -192,7 +192,7 @@ export class RustExtractor implements CodeExtractor {
         const traitName = nameNode.text;
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node);
+        const headerLine = getNodeHeader(node, content);
 
         symbols.push({
           name: qualify(traitName),

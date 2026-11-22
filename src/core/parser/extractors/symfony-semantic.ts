@@ -53,7 +53,7 @@ export class SymfonySemanticExtractor implements SemanticSliceExtractor {
     for (const file of controllerFiles) {
       signal?.throwIfAborted();
       const content = readOptionalSourceFile(file, "utf-8");
-      if (!content || !content.includes("#[")) continue;
+      if (!content || !/#\[[\s\S]*?\bRoute\b/.test(content)) continue;
 
       const relPath = path.relative(root, file).replace(/\\/g, "/");
 

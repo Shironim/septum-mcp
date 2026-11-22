@@ -179,3 +179,71 @@ export function visitPythonRouterModule(root: Node, file: string, visitor: Pytho
   }
   return { imports, routers };
 }
+
+export interface UnwrappedPythonView {
+  node: Node;
+  methods?: string[];
+}
+
+function isAsViewCall(node: Node): boolean {
+  if (node.type !== "call") return false;
+  const fn = node.childForFieldName("function");
+  return fn?.type === "attribute" && fn.childForFieldName("attribute")?.text === "as_view";
+}
+
+function decoratorMethodConstraint(
+  fnNode: Node | null,
+  callee: (name: string) => string,
+): string[] | undefined {
+  if (!fnNode) return undefined;
+  if (fnNode.type === "call") {
+    const innerName = callee(fnNode.childForFieldName("function")?.text ?? "");
+    if (/^(?:django\.views\.decorators\.http\.)?require_http_methods$/.test(innerName)) {
+      const arg = pythonCallArgument(fnNode, "request_method_list", 0);
+      return arg ? pythonLiteralMethods(arg) : undefined;
+    }
+    return undefined;
+  }
+  const qualified = callee(fnNode.text);
+  if (/^(?:django\.views\.decorators\.http\.)?require_GET$/.test(qualified)) return ["GET"];
+  if (/^(?:django\.views\.decorators\.http\.)?require_POST$/.test(qualified)) return ["POST"];
+  if (/^(?:django\.views\.decorators\.http\.)?require_safe$/.test(qualified)) return ["GET", "HEAD"];
+  return undefined;
+}
+
+/**
+ * Unwraps decorator/middleware wrapper calls (e.g. `csrf_exempt(View.as_view(...))`,
+ * `login_required(fn)`, `cache_page(60)(View.as_view(...))`) to the underlying view expression.
+ */
+export function unwrapPythonCallWrapper(
+  viewNode: Node,
+  callee: (name: string) => string = (name) => name,
+): UnwrappedPythonView {
+  let current = viewNode;
+  let methods: string[] | undefined;
+
+  for (let depth = 0; depth < 8; depth++) {
+    if (current.type === "parenthesized_expression") {
+      const inner = current.namedChildren.find((c) => c.type !== "comment");
+      if (!inner) break;
+      current = inner;
+      continue;
+    }
+    if (current.type !== "call" || isAsViewCall(current) || pythonCallUsesUnpacking(current)) {
+      break;
+    }
+    const args = current.childForFieldName("arguments")?.namedChildren.filter((c) => c.type !== "comment") ?? [];
+    if (args.length !== 1) break;
+    const innerArg = args[0]!;
+    if (!["identifier", "attribute", "call", "parenthesized_expression"].includes(innerArg.type)) {
+      break;
+    }
+    const constraint = decoratorMethodConstraint(current.childForFieldName("function"), callee);
+    if (constraint) {
+      methods = methods ? methods.filter((m) => constraint.includes(m)) : constraint;
+    }
+    current = innerArg;
+  }
+
+  return { node: current, methods };
+}

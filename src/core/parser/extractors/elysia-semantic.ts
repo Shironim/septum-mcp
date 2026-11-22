@@ -169,7 +169,8 @@ export class ElysiaSemanticExtractor implements SemanticSliceExtractor {
     };
 
     const rootFrames: Frames = new Map();
-    bindings.visitModules(files, unit => visitRouteCalls(unit.source, call => readCall(call, rootFrames)));
+    const elysiaRouteHint = /\.(?:use|group|get|post|put|patch|delete|head|options|trace|connect|all|ws|route)\s*\(|\bnew\s+Elysia\b/;
+    bindings.visitModules(files, unit => visitRouteCalls(unit.source, call => readCall(call, rootFrames)), elysiaRouteHint);
 
     const slices: VerticalSliceCandidate[] = [];
     for (const scope of scopes.values()) {

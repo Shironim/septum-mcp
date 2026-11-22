@@ -233,9 +233,13 @@ export async function parseSourceWithTreeSitter(
   };
 }
 
-export function getNodeHeader(node: Parser.SyntaxNode): string {
+export function getNodeHeader(node: Parser.SyntaxNode, content?: string): string {
   const body = node.childForFieldName("body");
   const end = body ?? node.children.findLast(child => child.type === "end");
+  if (content !== undefined) {
+    const endOffset = end ? end.startIndex : node.endIndex;
+    return content.slice(node.startIndex, endOffset).trim().replace(/;$/, "");
+  }
   return (end ? node.text.slice(0, end.startIndex - node.startIndex) : node.text)
     .trim().replace(/;$/, "");
 }
@@ -264,7 +268,7 @@ export function calculateAstControlFlowNesting(
       }
     }
 
-    for (const child of node.namedChildren) {
+    for (let child = node.firstNamedChild; child; child = child.nextNamedSibling) {
       walk(child, nextDepth, false);
     }
   }

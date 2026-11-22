@@ -290,7 +290,7 @@ export class PythonExtractor implements CodeExtractor {
         ? "protected"
         : "public";
 
-    const extractImports = (node: Parser.SyntaxNode): void => {
+    for (const node of rootNode.descendantsOfType(["import_statement", "import_from_statement"])) {
       if (node.type === "import_from_statement") {
         const modNode =
           node.childForFieldName("module_name") ??
@@ -322,7 +322,7 @@ export class PythonExtractor implements CodeExtractor {
             ...(importedSymbols.length > 0 ? { imported_symbols: Array.from(new Set(importedSymbols)) } : {}),
           });
         }
-        return;
+        continue;
       }
 
       if (node.type === "import_statement") {
@@ -355,12 +355,8 @@ export class PythonExtractor implements CodeExtractor {
             }
           }
         }
-        return;
       }
-
-      for (const child of node.namedChildren) extractImports(child);
-    };
-    extractImports(rootNode);
+    }
 
     const processNode = (node: Parser.SyntaxNode, currentClass: string | null, pendingDecorators?: string[]): void => {
       if (node.type === "decorated_definition") {
@@ -387,7 +383,7 @@ export class PythonExtractor implements CodeExtractor {
         const qualifiedName = currentClass ? `${currentClass}::${className}` : className;
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node).replace(/:$/, "").trim();
+        const headerLine = getNodeHeader(node, content).replace(/:$/, "").trim();
         const baseSignature = headerLine || `class ${className}`;
         const signature = pendingDecorators?.length ? `${pendingDecorators.join("\n")}\n${baseSignature}` : baseSignature;
 
@@ -423,7 +419,7 @@ export class PythonExtractor implements CodeExtractor {
         const isProperty = pendingDecorators?.some((d) => d === "@property");
         const lineStart = node.startPosition.row + 1;
         const lineEnd = Math.max(lineStart, node.endPosition.row + 1);
-        const headerLine = getNodeHeader(node).replace(/:$/, "").trim();
+        const headerLine = getNodeHeader(node, content).replace(/:$/, "").trim();
         const baseSignature = headerLine || `def ${funcName}()`;
         const signature = pendingDecorators?.length ? `${pendingDecorators.join("\n")}\n${baseSignature}` : baseSignature;
         const nestingDepth = calculateAstControlFlowNesting(
