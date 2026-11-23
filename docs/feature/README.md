@@ -1,6 +1,6 @@
 # Septum MCP: implemented features
 
-This directory documents implemented behavior, tool contracts, and known limitations for version `0.5.1` ([package.json](../../package.json)). Installed binaries or running MCP processes may differ if built from another revision.
+This directory documents implemented behavior, tool contracts, and known limitations for version `0.5.2` ([package.json](../../package.json)). Installed binaries or running MCP processes may differ if built from another revision.
 
 Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. The stdio server exposes four MCP tools, five resources (plus one domain resource template) and five workflow prompts. CLI commands initialize and synchronize the index, summarize telemetry, audit boundaries and run hooks. The index describes static source evidence.
 
