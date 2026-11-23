@@ -82,7 +82,8 @@ describe("MCP Audit Fixes Regression Suite (MCP-01 to MCP-16)", () => {
       expect(mcpRouteNames).toContain("septum_symbol");
       expect(mcpRouteNames).toContain("septum_slice");
       expect(mcpRouteNames).toContain("septum_boundary");
-      expect(mcpRouteNames).toHaveLength(4);
+      expect(mcpRouteNames).toContain("septum_app");
+      expect(mcpRouteNames).toHaveLength(5);
     });
   });
 

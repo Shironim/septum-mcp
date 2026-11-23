@@ -42,40 +42,7 @@ function createLaravelFixture(): string {
 }
 
 describe("Init & Sync SSOT Domain Lifecycle", () => {
-  it("does not leak ghost 0-file auto-discovered domains when .septum is deleted but septum.config.json remains", () => {
-    const root = createLaravelFixture();
-    const config = ConfigLoader.getDefaultConfig();
-    config.domains = {
-      app: { root: "app", allowed_dependencies: [], forbidden_dependencies: [], archetypes: {} },
-    };
-    fs.writeFileSync(path.join(root, "septum.config.json"), JSON.stringify(config, null, 2));
-
-    const septumBin = path.resolve(import.meta.dir, "../../bin/septum.ts");
-    const res = spawnSync("bun", ["run", septumBin, "init"], {
-      cwd: root,
-      encoding: "utf-8",
-      timeout: 15000,
-      input: "\n",
-    });
-
-    expect(res.status).toBe(0);
-    const output = (res.stdout || "") + (res.stderr || "");
-    expect(output).toContain("Using explicit domains from septum.config.json");
-    expect(output).toContain("covers 3 detected sub-domain(s)");
-
-    const db = new SeptumDatabase(path.join(root, ".septum", "septum.db"));
-    try {
-      const repo = new SeptumRepository(db.raw);
-      const domains = repo.getAllDomains();
-      expect(domains.map((d) => d.name)).toEqual(["app"]);
-      expect(repo.countFiles()).toBe(3);
-      expect(repo.getFilesByDomain(domains[0]!.id)).toHaveLength(3);
-    } finally {
-      db.close();
-    }
-  });
-
-  it("prunes stale SQLite domains during IngestionPipeline.run when septum.config.json removes a domain", async () => {
+  it("prunes stale SQLite domains during IngestionPipeline.run when active config removes a domain", async () => {
     const root = createLaravelFixture();
     const dbPath = path.join(root, ".septum", "septum.db");
     const db = new SeptumDatabase(dbPath);
@@ -101,31 +68,7 @@ describe("Init & Sync SSOT Domain Lifecycle", () => {
     }
   });
 
-  it("prunes stale SQLite domains in ConfigLoader.syncDiskConfigToDatabase", () => {
-    const root = createLaravelFixture();
-    const dbPath = path.join(root, ".septum", "septum.db");
-    const db = new SeptumDatabase(dbPath);
-    const repo = new SeptumRepository(db.raw);
-    repo.upsertDomain("legacy", { root: "app/Services" }, root);
-    repo.upsertDomain("http", { root: "app/Http" }, root);
-    db.close();
-
-    const diskConfig = ConfigLoader.getDefaultConfig();
-    diskConfig.domains = {
-      app: { root: "app", allowed_dependencies: [], forbidden_dependencies: [], archetypes: {} },
-    };
-    ConfigLoader.syncDiskConfigToDatabase(dbPath, diskConfig, root);
-
-    const checkDb = new SeptumDatabase(dbPath);
-    try {
-      const checkRepo = new SeptumRepository(checkDb.raw);
-      expect(checkRepo.getAllDomains().map((d) => d.name)).toEqual(["app"]);
-    } finally {
-      checkDb.close();
-    }
-  });
-
-  it("prunes stale SQLite domains on forced re-discovery when no septum.config.json exists", () => {
+  it("prunes stale SQLite domains on forced re-discovery", () => {
     const root = createLaravelFixture();
     const dbPath = path.join(root, ".septum", "septum.db");
     const db = new SeptumDatabase(dbPath);

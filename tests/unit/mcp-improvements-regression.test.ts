@@ -233,28 +233,22 @@ class PenjualanController {
     });
   });
 
-  // 5. ConfigLoader disk priority & settings_json sync
-  describe("Item 5: ConfigLoader physical file priority", () => {
-    it("loads directly from septum.config.json and syncs settings to repo_meta", () => {
-      const diskConfig = {
-        version: "1.0",
-        settings: {
-          enforcement: "strict",
-          db_path: ".septum/test.db",
-          ignore_patterns: ["custom_ignore/**"],
-        },
-        domains: {
-          custom_domain: {
-            root: "src/custom",
-            allowed_dependencies: [],
-            forbidden_dependencies: [],
-            archetypes: {},
-          },
-        },
-      };
-      writeFileSync(join(tempDir, "septum.config.json"), JSON.stringify(diskConfig, null, 2));
+  // 5. ConfigLoader SQLite SSOT loading
+  describe("Item 5: ConfigLoader SQLite SSOT priority", () => {
+    it("loads settings and domains from SQLite SSOT and ignores septum.config.json", () => {
+      repo.setMeta("settings_json", JSON.stringify({
+        enforcement: "strict",
+        db_path: ".septum/septum.db",
+        ignore_patterns: ["custom_ignore/**"],
+      }));
+      repo.upsertDomain("custom_domain", {
+        root: "src/custom",
+        allowed_dependencies: [],
+        forbidden_dependencies: [],
+        archetypes: {},
+      }, tempDir);
 
-      const loaded = ConfigLoader.load(undefined, tempDir);
+      const loaded = ConfigLoader.loadFromRepository(repo);
       expect(loaded.settings.enforcement).toBe("strict");
       expect(loaded.settings.ignore_patterns).toContain("custom_ignore/**");
       expect(loaded.domains.custom_domain).toBeDefined();

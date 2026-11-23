@@ -50,7 +50,7 @@ Evidence mode adds up to 20 raw import relationships originating in the selected
 
 Name/domain and root are required. Roots must be contained in the workspace. Different names cannot own the same physical root; nested roots are supported. Registration retains omitted policy arrays/maps; explicit empty arrays/maps clear them.
 
-When `septum.config.json` exists, it owns policy. Registration updates that file and SQLite and reports `policy_owner: "file"`. Otherwise SQLite owns registered policy and the response reports `"database"`. File updates use an exclusive lock, snapshot checks and atomic rename. A file-write failure rolls back the surrounding database transaction. File and database commits are not a distributed transaction; a crash can leave them out of step.
+Registration stores policy in SQLite and reports `policy_owner: "database"`. See [workspace lifecycle](workspace-lifecycle.md#upgrade-from-file-based-configuration) for upgrade behavior.
 
 `ingest_now` defaults to false. A successful registration alone does not certify source-index freshness. With ingestion enabled, synchronization follows registration; an ingestion failure need not undo the already recorded policy.
 

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { Database } from "bun:sqlite";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import appHtmlPath from "./ui/app.html" with { type: "file" };
 import type { WorkspaceManager } from "./workspace-manager.ts";
@@ -7,6 +8,7 @@ import { isWorkspaceInitialized, resolveServerWorkspace } from "./workspace-mana
 import { handleGetDomainCatalog } from "./tools/map.ts";
 import { runWorkspaceBoundary } from "./workspace-boundary.ts";
 import { RESOURCE_LIMITS } from "../core/resources/limits.ts";
+import { ConfigLoader, resolveDatabasePath } from "../core/config/loader.ts";
 
 export const SEPTUM_RESOURCES = [
   {
@@ -71,6 +73,37 @@ function matchDomainResource(uri: string): string | undefined {
 function readIndexHealth(manager: WorkspaceManager, root: string) {
   const ctx = manager.peek(root);
   if (!ctx) {
+    try {
+      const config = ConfigLoader.load(undefined, root);
+      const dbPath = resolveDatabasePath(root, config.settings.db_path);
+      if (existsSync(dbPath)) {
+        const db = new Database(dbPath, { readonly: true });
+        try {
+          const getMeta = (key: string): string | undefined =>
+            db.query<{ value: string }, [string]>("SELECT value FROM repo_meta WHERE key = ?").get(key)?.value;
+          const syncState = getMeta("sync_state") ?? "unindexed";
+          const syncError = getMeta("sync_error") || undefined;
+          const domainsCount = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM domains").get()?.count ?? 0;
+          const filesCount = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM files").get()?.count ?? 0;
+          const slicesCount = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM vertical_slices").get()?.count ?? 0;
+          return {
+            workspace_root: root,
+            status: syncError ? "error" : syncState,
+            sync_state: syncState,
+            sync_error: syncError,
+            last_sync: getMeta("last_sync"),
+            domains_count: domainsCount,
+            files_count: filesCount,
+            slices_count: slicesCount,
+            context_active: false,
+          };
+        } finally {
+          db.close();
+        }
+      }
+    } catch {
+      // Fall back to initialization check when DB is unreadable or unmigrated.
+    }
     return {
       workspace_root: root,
       status: isWorkspaceInitialized(root) ? "inactive" : "not_indexed",
@@ -155,7 +188,7 @@ function buildAppsGuide(manager: WorkspaceManager, root: string) {
   return {
     workspace_root: root,
     ui_resource: "ui://septum/app.html",
-    open_via_tools: ["septum_map", "septum_slice", "septum_boundary"],
+    open_via_tools: ["septum_app"],
     antigravity_entrypoints: [
       { type: "aux_pane", title: "Septum Architecture" },
       { type: "global", title: "Septum" },

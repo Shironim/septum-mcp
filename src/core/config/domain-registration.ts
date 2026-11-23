@@ -1,11 +1,10 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { statSync } from "node:fs";
+import { resolve } from "node:path";
 import type { SeptumRepository } from "../database/repository.ts";
 import { IngestionPipeline, type IngestionMetrics } from "../ingestion/pipeline.ts";
 import { assertPathContained } from "../resolver/path-resolver.ts";
 import { assertUniqueDomainRoots, domainNameKey, domainRootIdentity } from "./domain-ownership.ts";
-import { ConfigLoader } from "./loader.ts";
-import { SeptumConfigSchema, type ValidatedSeptumConfig } from "./schema.ts";
+import type { ValidatedSeptumConfig } from "./schema.ts";
 import type { DomainConfig } from "../../types/index.ts";
 
 export interface DomainRegistrationInput {
@@ -20,7 +19,7 @@ export interface DomainRegistrationInput {
 }
 
 export interface DomainRegistrationResult {
-  policyOwner: "database" | "file";
+  policyOwner: "database";
   domainId: number;
   domain: string;
   config: ValidatedSeptumConfig["domains"][string];
@@ -73,39 +72,9 @@ export async function registerDomainPolicy(
   );
   assertUniqueDomainRoots({ ...memoryClaims, [domainName]: domainConfig }, workspaceRoot);
 
-  const policyFile = join(workspaceRoot, "septum.config.json");
-  const policySource = existsSync(policyFile) ? readFileSync(policyFile, "utf8") : undefined;
-  if (policySource !== undefined) {
-    const policy = SeptumConfigSchema.parse(JSON.parse(policySource));
-    const existing = Object.entries(policy.domains).find(([name]) => domainNameKey(name) === domainNameKey(domainName))?.[1];
-    domainConfig.allowed_dependencies ??= existing?.allowed_dependencies ?? [];
-    domainConfig.forbidden_dependencies ??= existing?.forbidden_dependencies ?? [];
-    domainConfig.archetypes ??= existing?.archetypes ?? {};
-    domainConfig.description = args.description ?? existing?.description ?? domainConfig.description;
-    const diskClaims = Object.fromEntries(
-      Object.entries(policy.domains).filter(
-        ([name, claim]) => domainNameKey(name) !== domainNameKey(domainName) && domainRootIdentity(claim.root, workspaceRoot) === proposed
-      )
-    );
-    assertUniqueDomainRoots({ ...diskClaims, [domainName]: domainConfig }, workspaceRoot);
-  }
-
   const domainId = repo.runInTransaction(() => {
     const id = repo.domains.upsertDomain(domainName, domainConfig, workspaceRoot);
     const stored = repo.domains.getDomainByName(domainName)!;
-    if (policySource !== undefined) {
-      ConfigLoader.writeDomain(
-        workspaceRoot,
-        stored.name,
-        {
-          ...domainConfig,
-          allowed_dependencies: JSON.parse(stored.allowed_deps_json),
-          forbidden_dependencies: JSON.parse(stored.forbidden_deps_json),
-          archetypes: JSON.parse(stored.archetypes_json),
-        },
-        policySource
-      );
-    }
     repo.rebindFilesToDomain(stored.root_path || domainConfig.root, id);
     return id;
   }, true);
@@ -131,7 +100,7 @@ export async function registerDomainPolicy(
   }
 
   return {
-    policyOwner: policySource === undefined ? "database" : "file",
+    policyOwner: "database",
     domainId,
     domain: canonicalName,
     config: finalConfig,

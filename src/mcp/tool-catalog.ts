@@ -1,4 +1,5 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import type { WorkspaceContext } from "./workspace-manager.ts";
 import { MapToolSchema, SymbolToolSchema, SliceToolSchema, BoundaryToolSchema } from "./schemas.ts";
 import { handleMapTool } from "./tools/map.ts";
@@ -31,15 +32,6 @@ export const TOOL_CATALOG = [
     name: "septum_map",
     schema: MapToolSchema,
     execute: (ctx, args, signal) => handleMapTool(ctx.repo, ctx.config, args, ctx.root, signal),
-    _meta: {
-      ui: { resourceUri: SEPTUM_APP_URI },
-      "com.google.antigravity/ui": {
-        entrypoints: [
-          { type: "aux_pane", title: "Septum Architecture" },
-          { type: "global", title: "Septum" },
-        ],
-      },
-    },
     description:
       "Inspect workspace architecture or register domains. action='catalog' (default) returns domain topology, cross-domain import adjacency, file neighborhoods, static entrypoints, and index health. action='register' adds a bounded-context domain and optionally ingests it. Use file_filter to focus files, include_evidence=true for one file's import details, septum_symbol for declarations/source, or septum_slice for entrypoint traces. Example: {action:'catalog',domain:'mcp'}.",
     inputSchema: {
@@ -224,9 +216,6 @@ export const TOOL_CATALOG = [
     name: "septum_slice",
     schema: SliceToolSchema,
     execute: (ctx, args, signal) => handleSliceTool(ctx.repo, ctx.config, args, ctx.root, signal),
-    _meta: {
-      ui: { resourceUri: SEPTUM_APP_URI },
-    },
     description:
       "Trace a cataloged static entrypoint (HTTP route, handler, job, CLI command, or event) to related nodes with relationship evidence and diagnostics. Static matches do not establish runtime execution order or complete reachability. Use septum_symbol for declarations and septum_boundary for import policy. Example: {query:'POST /orders/{id}/pay',max_depth:5} or {query:'OrderController@pay'}.",
     inputSchema: {
@@ -266,9 +255,6 @@ export const TOOL_CATALOG = [
     name: "septum_boundary",
     schema: BoundaryToolSchema,
     execute: (ctx, args, signal) => handleBoundaryTool(ctx.evaluator, ctx.config, args, ctx.repo, ctx.root),
-    _meta: {
-      ui: { resourceUri: SEPTUM_APP_URI },
-    },
     description:
       "Validate proposed or staged imports against domain boundaries and circular-dependency rules. When to use: (1) scope='file' with proposed_imports BEFORE writing new import statements, (2) scope='staged' BEFORE git commit to catch cross-domain leaks, (3) scope='all' or 'domain' for codebase audits. When NOT to use: do NOT use to read source code or locate symbols. Status 'approved' confirms zero violations; 'rejected' requires refactoring. Example: {scope:'file',file_path:'src/order/service.ts',proposed_imports:['../billing/repo']}.",
     inputSchema: {
@@ -314,6 +300,35 @@ export const TOOL_CATALOG = [
           default: "text",
           description: "Output format: 'text' (default token-efficient compact summary) or 'json' (structured payload).",
         },
+        workspace_path: {
+          type: "string",
+          description: "Explicit workspace root path. Specifies the target project root in multi-root environments.",
+        },
+      },
+      required: [],
+    },
+  }),
+  defineTool({
+    name: "septum_app",
+    schema: z.object({ workspace_path: z.string().optional() }),
+    execute: (ctx, _args, signal) =>
+      handleMapTool(ctx.repo, ctx.config, { action: "catalog", detail_level: "compact", format: "json", ingest_now: false }, ctx.root, signal),
+    _meta: {
+      ui: {
+        resourceUri: SEPTUM_APP_URI,
+        visibility: ["app"],
+      },
+      "com.google.antigravity/ui": {
+        entrypoints: [
+          { type: "aux_pane", title: "Septum Architecture" },
+          { type: "global", title: "Septum" },
+        ],
+      },
+    },
+    description: "Open the Septum Architecture UI panel in the side pane or sidebar.",
+    inputSchema: {
+      type: "object",
+      properties: {
         workspace_path: {
           type: "string",
           description: "Explicit workspace root path. Specifies the target project root in multi-root environments.",

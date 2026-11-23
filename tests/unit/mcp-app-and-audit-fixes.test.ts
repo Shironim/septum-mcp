@@ -47,18 +47,24 @@ describe("MCP Server Audit Fixes & MCP App UI (SEP-1865)", () => {
     }
   });
 
-  it("declares _meta.ui.resourceUri and Antigravity aux_pane/global entrypoints in TOOL_CATALOG", () => {
+  it("declares _meta.ui.resourceUri and Antigravity aux_pane/global entrypoints only on septum_app, keeping analysis tools inline-free", () => {
     const mapTool = TOOL_CATALOG.find((t) => t.name === "septum_map");
     const sliceTool = TOOL_CATALOG.find((t) => t.name === "septum_slice");
     const boundaryTool = TOOL_CATALOG.find((t) => t.name === "septum_boundary");
+    const symbolTool = TOOL_CATALOG.find((t) => t.name === "septum_symbol");
+    const appTool = TOOL_CATALOG.find((t) => t.name === "septum_app");
 
-    expect((mapTool?._meta as any)?.ui?.resourceUri).toBe("ui://septum/app.html");
-    expect((mapTool?._meta as any)?.["com.google.antigravity/ui"]?.entrypoints).toEqual([
+    expect((mapTool?._meta as any)?.ui).toBeUndefined();
+    expect((sliceTool?._meta as any)?.ui).toBeUndefined();
+    expect((boundaryTool?._meta as any)?.ui).toBeUndefined();
+    expect((symbolTool?._meta as any)?.ui).toBeUndefined();
+
+    expect((appTool?._meta as any)?.ui?.resourceUri).toBe("ui://septum/app.html");
+    expect((appTool?._meta as any)?.ui?.visibility).toEqual(["app"]);
+    expect((appTool?._meta as any)?.["com.google.antigravity/ui"]?.entrypoints).toEqual([
       { type: "aux_pane", title: "Septum Architecture" },
       { type: "global", title: "Septum" },
     ]);
-    expect((sliceTool?._meta as any)?.ui?.resourceUri).toBe("ui://septum/app.html");
-    expect((boundaryTool?._meta as any)?.ui?.resourceUri).toBe("ui://septum/app.html");
   });
 
   it("throws typed SeptumError(INVALID_QUERY) when septum_slice query is empty", () => {
@@ -119,10 +125,10 @@ describe("MCP Server Audit Fixes & MCP App UI (SEP-1865)", () => {
     const rootB = mkdtempSync(join(tmpdir(), "septum-res-b-"));
     const manager = new WorkspaceManager();
     try {
-      mkdirSync(join(rootA, ".septum"), { recursive: true });
-      mkdirSync(join(rootB, ".septum"), { recursive: true });
-      writeFileSync(join(rootA, "septum.config.json"), JSON.stringify(ConfigLoader.getDefaultConfig()));
-      writeFileSync(join(rootB, "septum.config.json"), JSON.stringify(ConfigLoader.getDefaultConfig()));
+      const dbA = new SeptumDatabase(join(rootA, ".septum/septum.db"));
+      dbA.close();
+      const dbB = new SeptumDatabase(join(rootB, ".septum/septum.db"));
+      dbB.close();
 
       manager.initialRoot = rootA;
       manager.lastRoot = rootB;
@@ -197,10 +203,92 @@ describe("MCP Server Audit Fixes & MCP App UI (SEP-1865)", () => {
         name: "septum_map",
         arguments: { action: "catalog", format: "text", workspace_path: root },
       });
-      expect((mapText.structuredContent as any)?.workspace_root).toBe(root);
+      expect(mapText.structuredContent).toBeUndefined();
+
+      const appResult = await client.callTool({
+        name: "septum_app",
+        arguments: { workspace_path: root },
+      });
+      expect((appResult.structuredContent as any)?.workspace_root).toBe(root);
     } finally {
       await client.close().catch(() => {});
       await server.close().catch(() => {});
+      await manager.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("separates unresolved_imports from incomplete_imports and avoids empty-graph message when targets are unindexed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "septum-partial-coverage-"));
+    try {
+      mkdirSync(join(root, "src/factories"), { recursive: true });
+      mkdirSync(join(root, "src/models"), { recursive: true });
+      const config = ConfigLoader.getDefaultConfig();
+      config.domains = {
+        factories: { root: "src/factories", allowed_dependencies: ["models"], forbidden_dependencies: [], archetypes: {} },
+      };
+      writeFileSync(join(root, "septum.config.json"), JSON.stringify(config));
+      writeFileSync(join(root, "src/models/user.ts"), "export class User {}\n");
+      writeFileSync(join(root, "src/factories/user-factory.ts"), 'import { User } from "../models/user";\nexport const makeUser = () => new User();\n');
+
+      const db = new SeptumDatabase(join(root, ".septum/septum.db"));
+      try {
+        const repo = new SeptumRepository(db.raw);
+        await new IngestionPipeline(repo, root).run(config);
+
+        const nav = await handleMapTool(repo, config, { action: "catalog", domain: "factories", format: "json" }, root);
+        const navJson = JSON.parse(nav.content[0]!.text);
+        expect(navJson.health.coverage).toBe("partial");
+        expect(navJson.health.unresolved_imports).toBe(0);
+        expect(navJson.health.incomplete_imports).toBe(1);
+        expect(navJson.health.reasons).toContain("target_not_fully_indexed");
+
+        const navText = await handleMapTool(repo, config, { action: "catalog", domain: "factories", format: "text" }, root);
+        expect(navText.content[0]!.text).toContain("unresolved=0 incomplete=1");
+
+        const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(root, repo));
+        const boundary = await handleBoundaryTool(evaluator, config, { scope: "domain", domain: "factories", format: "json" }, repo, root);
+        const boundaryJson = JSON.parse(boundary.content[0]!.text);
+        expect(boundaryJson.status).toBe("unknown");
+        expect(boundaryJson.incomplete_reasons.target_not_fully_indexed).toBe(1);
+        expect(boundaryJson.message).not.toContain("empty graph");
+        expect(boundaryJson.message).toContain("1 target(s) not fully indexed");
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads existing SQLite index health in septum://health when workspace context is not loaded in memory", async () => {
+    const root = mkdtempSync(join(tmpdir(), "septum-health-readonly-"));
+    const manager = new WorkspaceManager();
+    try {
+      mkdirSync(join(root, "src"), { recursive: true });
+      const config = ConfigLoader.getDefaultConfig();
+      config.domains = {
+        app: { root: "src", allowed_dependencies: ["app"], forbidden_dependencies: [], archetypes: {} },
+      };
+      writeFileSync(join(root, "septum.config.json"), JSON.stringify(config));
+      writeFileSync(join(root, "src/index.ts"), "export const ok = true;\n");
+
+      const db = new SeptumDatabase(join(root, ".septum/septum.db"));
+      const repo = new SeptumRepository(db.raw);
+      await new IngestionPipeline(repo, root).run(config);
+      db.close();
+
+      manager.initialRoot = root;
+      manager.lastRoot = root;
+      const health = JSON.parse((await readSeptumResource(manager, "septum://health")).contents[0]!.text);
+      expect(manager.size).toBe(0);
+      expect(health.workspace_root).toBe(root);
+      expect(health.status).toBe("complete");
+      expect(health.sync_state).toBe("complete");
+      expect(health.domains_count).toBe(1);
+      expect(health.files_count).toBe(1);
+      expect(health.context_active).toBe(false);
+    } finally {
       await manager.close();
       rmSync(root, { recursive: true, force: true });
     }

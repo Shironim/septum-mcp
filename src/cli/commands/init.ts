@@ -18,40 +18,21 @@ export async function handleInitCommand(force: boolean = false): Promise<void> {
   if (!fs.existsSync(septumDir)) {
     fs.mkdirSync(septumDir, { recursive: true });
   }
-  const policyFile = path.join(workspaceRoot, "septum.config.json");
-  const diskConfig = fs.existsSync(policyFile) ? ConfigLoader.loadFromDisk(policyFile) : undefined;
-  const dbPath = resolveDatabasePath(workspaceRoot, diskConfig?.settings.db_path);
+  const dbPath = resolveDatabasePath(workspaceRoot);
 
   console.log("\n\x1b[36m◆\x1b[0m  \x1b[1mSeptum Architecture Guard & SSOT Initializer\x1b[0m\n\x1b[36m│\x1b[0m");
   console.log(`\x1b[36m│\x1b[0m  Workspace: ${workspaceRoot}`);
 
-  // 1. Auto-discover project topology (or sync explicit septum.config.json domains) and persist to SQLite SSOT
+  // 1. Auto-discover project topology and persist to SQLite SSOT
   console.log("\x1b[36m◇\x1b[0m  Analyzing codebase topology, modular boundaries, and deployment infrastructure...");
   const db = new SeptumDatabase(dbPath);
   try {
     const repo = new SeptumRepository(db.raw);
-    const hasExplicitDomains = Boolean(diskConfig && Object.keys(diskConfig.domains).length > 0);
-    let domains: Record<string, import("../../types/index.ts").DomainConfig>;
-    let shadowedSubdomains: Array<{ explicitDomain: string; explicitRoot: string; detectedNames: string[] }> = [];
-    if (hasExplicitDomains) {
-      const synced = TopologyDetector.syncExplicitConfigDomains(repo, workspaceRoot, diskConfig!.domains);
-      domains = synced.domains;
-      shadowedSubdomains = synced.shadowedSubdomains;
-      console.log("\x1b[36m│\x1b[0m  \x1b[33mℹ\x1b[0m Using explicit domains from septum.config.json (skipping topology auto-discovery).");
-    } else {
-      domains = TopologyDetector.discoverAndPersist(repo, workspaceRoot, force);
-    }
+    const domains = TopologyDetector.discoverAndPersist(repo, workspaceRoot, force);
     const domainNames = Object.keys(domains);
-    console.log(`\x1b[36m│\x1b[0m  \x1b[32m✓\x1b[0m ${hasExplicitDomains ? "Synchronized" : "Discovered and registered"} ${domainNames.length} domain(s) in SQLite SSOT:`);
+    console.log(`\x1b[36m│\x1b[0m  \x1b[32m✓\x1b[0m Discovered and registered ${domainNames.length} domain(s) in SQLite SSOT:`);
     for (const name of domainNames) {
       console.log(`\x1b[36m│\x1b[0m    - \x1b[1m${name}\x1b[0m: root -> '${domains[name].root}'`);
-    }
-    for (const shadow of shadowedSubdomains) {
-      const preview = shadow.detectedNames.slice(0, 6).join(", ");
-      const suffix = shadow.detectedNames.length > 6 ? `, +${shadow.detectedNames.length - 6} more` : "";
-      console.log(
-        `\x1b[36m│\x1b[0m  \x1b[33m⚠\x1b[0m Explicit domain '${shadow.explicitDomain}' (root: '${shadow.explicitRoot}') covers ${shadow.detectedNames.length} detected sub-domain(s) (${preview}${suffix}). Remove '${shadow.explicitDomain}' or clear 'domains' in septum.config.json to use auto-discovered layers.`
-      );
     }
     const scanned = JSON.parse(repo.getMeta("scanned_folders") || "[]");
     const ignored = JSON.parse(repo.getMeta("ignored_folders") || "[]");

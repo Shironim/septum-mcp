@@ -22,7 +22,6 @@ with tempfile.TemporaryDirectory(prefix='septum-lifecycle-') as temp:
     root = pathlib.Path(temp)
     (root / 'src').mkdir()
     (root / 'package.json').write_text('{"name":"lifecycle"}')
-    (root / 'septum.config.json').write_text(json.dumps({'domains': {'core': {'root': 'src'}}}))
     (root / 'src/a.ts').write_text('export function a() {}')
     with tempfile.TemporaryFile(mode='w+') as log:
         p = subprocess.Popen(CLI, cwd=root, env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)

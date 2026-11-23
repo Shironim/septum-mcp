@@ -79,9 +79,9 @@ describe("Audit fixes verification", () => {
     expect(topology.domains["cmd-server"]?.allowed_dependencies).toEqual(["pkg", "auth", "billing"]);
   });
 
-  it("allows hook wrapper scripts to run when septum.config.json exists for custom db_path", () => {
-    expect(SEPTUM_PRE_WRITE_SCRIPT).toContain('[ ! -f "$ROOT_DIR/.septum/septum.db" ] && [ ! -f "$ROOT_DIR/septum.config.json" ]');
-    expect(SEPTUM_POST_WRITE_SCRIPT).toContain('[ ! -f "$ROOT_DIR/.septum/septum.db" ] && [ ! -f "$ROOT_DIR/septum.config.json" ]');
+  it("guards hook wrapper scripts on .septum/septum.db existence", () => {
+    expect(SEPTUM_PRE_WRITE_SCRIPT).toContain('[ ! -f "$ROOT_DIR/.septum/septum.db" ]');
+    expect(SEPTUM_POST_WRITE_SCRIPT).toContain('[ ! -f "$ROOT_DIR/.septum/septum.db" ]');
     expect(SEPTUM_POST_WRITE_SCRIPT).toContain('mkdir -p "$ROOT_DIR/.septum"');
   });
 
@@ -166,11 +166,6 @@ describe("Audit fixes verification", () => {
   it("exposes MCP resources and prompts for active workspaces", async () => {
     const { root, put } = createTempProject();
     put("src/orders/service.ts", "export function createOrder() { return 1; }\n");
-    const config = ConfigLoader.getDefaultConfig();
-    config.domains = {
-      orders: { root: "src/orders", allowed_dependencies: [], forbidden_dependencies: [], archetypes: {} },
-    };
-    writeFileSync(join(root, "septum.config.json"), JSON.stringify(config, null, 2));
 
     expect(listSeptumResources().resources.map((r) => r.uri)).toEqual([
       "septum://domains",
@@ -210,10 +205,17 @@ describe("Audit fixes verification", () => {
     manager.initialRoot = root;
     manager.lastRoot = root;
     try {
-      const inactive = JSON.parse((await readSeptumResource(manager, "septum://health")).contents[0]!.text);
-      expect(inactive).toEqual({ workspace_root: root, status: "inactive" });
+      const unindexed = JSON.parse((await readSeptumResource(manager, "septum://health")).contents[0]!.text);
+      expect(unindexed).toEqual({ workspace_root: root, status: "not_indexed" });
       expect(manager.size).toBe(0);
       expect(existsSync(join(root, ".septum/septum.db"))).toBe(false);
+
+      const lease = manager.acquire(root);
+      try {
+        await lease.context.ready;
+      } finally {
+        lease.release();
+      }
 
       const domains = JSON.parse((await readSeptumResource(manager, "septum://domains")).contents[0]!.text);
       expect(domains.domains.some((d: any) => d.name === "orders")).toBe(true);

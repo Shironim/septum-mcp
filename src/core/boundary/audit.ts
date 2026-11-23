@@ -119,6 +119,26 @@ export async function evaluateBoundary(
     if (incomplete.length || proposed.length || staleFiles.length) {
       const known = evaluator.auditCodebase(config, evidence).filter(violation => relevant(violation.file));
       known.push(...requested.flatMap(file => evaluator.evaluate(file, proposedImports, config, evidence)));
+      const incompleteReasons = {
+        target_not_fully_indexed: incomplete.filter(edge => edge.index_coverage === "partial").length,
+        stale_source: incomplete.filter(edge => edge.freshness !== "current").length,
+        unresolved_or_unsupported: incomplete.filter(edge => !["resolved", "external"].includes(edge.resolution.status)).length,
+        conditional_resolution: incomplete.filter(edge => edge.resolution.coverage === "conditional").length,
+        multiple_domains: incomplete.filter(edge => edge.target_domains.length > 1).length,
+      };
+      const reasonParts = [
+        incompleteReasons.target_not_fully_indexed > 0 ? `${incompleteReasons.target_not_fully_indexed} target(s) not fully indexed` : "",
+        incompleteReasons.stale_source > 0 ? `${incompleteReasons.stale_source} stale source import(s)` : "",
+        incompleteReasons.unresolved_or_unsupported > 0 ? `${incompleteReasons.unresolved_or_unsupported} unresolved/unsupported import(s)` : "",
+        incompleteReasons.conditional_resolution > 0 ? `${incompleteReasons.conditional_resolution} conditional import(s)` : "",
+        incompleteReasons.multiple_domains > 0 ? `${incompleteReasons.multiple_domains} multi-domain target(s)` : "",
+        proposed.length > 0 ? `${proposed.length} unresolved/conditional proposed import(s)` : "",
+        staleFiles.length > 0 ? `${staleFiles.length} stale indexed file(s)` : "",
+      ].filter(Boolean);
+      const reasonSummary = reasonParts.length > 0 ? reasonParts.join(", ") : "incomplete import evidence";
+      const message = known.length > 0
+        ? `${known.length} boundary violation(s) detected, and relevant import evidence is incomplete (${reasonSummary}).`
+        : `Boundary approval is unknown because relevant import evidence is incomplete (${reasonSummary}).`;
       return incompleteEvidence({
         status: known.length ? "rejected" : "unknown",
         scope: effectiveScope,
@@ -127,16 +147,10 @@ export async function evaluateBoundary(
         circular_dependencies: known.filter(v => v.rule === "circular_dependency"), circular_dependencies_count: known.filter(v => v.rule === "circular_dependency").length,
         relationships: incomplete.slice(0, 10), proposed_resolutions: allProposed,
         diagnostic_accounting: { total: incomplete.length, returned: Math.min(10, incomplete.length), omitted: Math.max(0, incomplete.length - 10) },
-        incomplete_reasons: {
-          target_not_fully_indexed: incomplete.filter(edge => edge.index_coverage === "partial").length,
-          stale_source: incomplete.filter(edge => edge.freshness !== "current").length,
-          unresolved_or_unsupported: incomplete.filter(edge => !["resolved", "external"].includes(edge.resolution.status)).length,
-          conditional_resolution: incomplete.filter(edge => edge.resolution.coverage === "conditional").length,
-          multiple_domains: incomplete.filter(edge => edge.target_domains.length > 1).length,
-        },
+        incomplete_reasons: incompleteReasons,
         next: ["Inspect the listed source imports; register/index uncovered target roots or narrow scope to a file/domain. Unknown is not approval."],
         stale_files: staleFiles,
-        message: "Relevant import resolution is incomplete; an empty graph cannot prove boundary approval.",
+        message,
       });
     }
   }

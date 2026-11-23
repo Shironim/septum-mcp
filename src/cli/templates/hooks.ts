@@ -20,7 +20,7 @@ export const SEPTUM_PRE_WRITE_SCRIPT = `#!/usr/bin/env sh
 # Passes supported edit payloads to the CLI before the client writes them
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
-if [ ! -f "$ROOT_DIR/.septum/septum.db" ] && [ ! -f "$ROOT_DIR/septum.config.json" ]; then
+if [ ! -f "$ROOT_DIR/.septum/septum.db" ]; then
   exit 0
 fi
 
@@ -45,7 +45,7 @@ export const SEPTUM_POST_WRITE_SCRIPT = `#!/usr/bin/env sh
 # Syncs modified AST into SQLite SSOT after file mutations
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
-if [ ! -f "$ROOT_DIR/.septum/septum.db" ] && [ ! -f "$ROOT_DIR/septum.config.json" ]; then
+if [ ! -f "$ROOT_DIR/.septum/septum.db" ]; then
   exit 0
 fi
 

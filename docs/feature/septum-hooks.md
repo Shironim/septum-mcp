@@ -4,7 +4,7 @@ Septum can scaffold harness hooks and Git pre-commit checks through `init`. Gene
 
 ## Pre-write CLI
 
-`septum hook pre-write` reads JSON from stdin. It resolves policy and the configured database from the workspace selected by `SEPTUM_HOOK_ROOT` or the caller's current directory. When `septum.config.json` is present, it evaluates candidate imports in-memory without opening SQLite; when policy is database-owned, it falls back to SQLite if the database exists.
+`septum hook pre-write` reads JSON from stdin and loads policy from `.septum/septum.db` in the workspace selected by `SEPTUM_HOOK_ROOT` or the caller’s current directory.
 
 An absent database, empty input or invalid JSON passes through with exit code 0. A supported payload is reconstructed before import extraction. Unsupported payloads emit an allow decision with `coverage: "unknown"`.
 
@@ -23,7 +23,7 @@ An absent database, empty input or invalid JSON passes through with exit code 0.
 
 ## Generated shell-wrapper behavior
 
-The generated pre-write and post-write scripts run when either `.septum/septum.db` or `septum.config.json` exists, allowing `septum hook pre-write` and `septum sync` to resolve custom `db_path` settings. If neither exists, the wrapper exits 0.
+The generated pre-write and post-write scripts run when `.septum/septum.db` exists. If it is absent, the wrapper exits 0. See [workspace lifecycle](workspace-lifecycle.md#upgrade-from-file-based-configuration) when upgrading an existing workspace.
 
 Wrappers locate a runnable command through local Bun source, a `septum` executable, a local package binary or `bunx`. If no supported command is available, they can exit without performing a check.
 
@@ -44,6 +44,6 @@ The generated Git pre-commit runs `septum check --staged`. Its blocking behavior
 - [Hook command](../../src/cli/commands/hook.ts), [payload normalization](../../src/cli/hook-payload.ts)
 - [Generated wrappers/matchers](../../src/cli/templates/hooks.ts), [harness configuration](../../src/cli/scaffold/harness-config.ts)
 - [Init/Git integration](../../src/cli/commands/init.ts)
-- [Candidate reconstruction](../../tests/unit/refactor-contracts.test.ts), [custom database CLI hook](../../tests/unit/policy-ownership.test.ts), [configuration preservation](../../tests/unit/init-hook-preservation.test.ts), [Codex integration harness](../../tests/integration/codex-hooks.py)
+- [Candidate reconstruction](../../tests/unit/refactor-contracts.test.ts), [SQLite CLI hook](../../tests/unit/policy-ownership.test.ts), [configuration preservation](../../tests/unit/init-hook-preservation.test.ts), [Codex integration harness](../../tests/integration/codex-hooks.py)
 
 CLI regression tests are not evidence of live interception in every client.

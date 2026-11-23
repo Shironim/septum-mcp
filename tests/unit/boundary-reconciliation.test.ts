@@ -15,12 +15,6 @@ test("reconciles a stale working-tree audit once with watcher notifications supp
     mkdirSync(join(root, "src/orders"), { recursive: true });
     mkdirSync(join(root, "src/billing"), { recursive: true });
     writeFileSync(join(root, "package.json"), "{}");
-    writeFileSync(join(root, "septum.config.json"), JSON.stringify({
-      domains: {
-        orders: { root: "src/orders", forbidden_dependencies: ["billing"] },
-        billing: { root: "src/billing" },
-      },
-    }));
     const file = join(root, "src/orders/Order.ts");
     const clean = "export const total = 1;";
     writeFileSync(file, clean);
@@ -28,6 +22,18 @@ test("reconciles a stale working-tree audit once with watcher notifications supp
     const lease = manager.acquire(root);
     try {
       await lease.context.ready;
+      lease.context.repo.upsertDomain("orders", { root: "src/orders", forbidden_dependencies: ["billing"] }, root);
+      lease.context.repo.upsertDomain("billing", { root: "src/billing" }, root);
+      await lease.context.pipeline.run(
+        {
+          ...lease.context.config,
+          domains: {
+            orders: { root: "src/orders", allowed_dependencies: [], forbidden_dependencies: ["billing"], archetypes: {} },
+            billing: { root: "src/billing", allowed_dependencies: [], forbidden_dependencies: [], archetypes: {} },
+          },
+        },
+        { verifyContent: true }
+      );
       const watcher = lease.context.watcher;
       const notify = spyOn(watcher, "notify").mockImplementation(() => {});
       const reconcile = spyOn(watcher, "reconcileForAudit");

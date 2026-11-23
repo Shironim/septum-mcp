@@ -271,7 +271,7 @@ export function createMcpServer(manager: WorkspaceManager): Server {
       });
 
       if (!isWorkspaceInitialized(root)) {
-        if (name === "septum_map" && (!("action" in record) || !record.action || record.action === "catalog")) {
+        if (parsed.name === "septum_app" || (parsed.name === "septum_map" && parsed.args.action === "catalog")) {
           const runtimeVersion = await checkRuntimeVersion();
           const diagnostic = buildUnindexedCatalog(root, runtimeVersion);
           return finish({

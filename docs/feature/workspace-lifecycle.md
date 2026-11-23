@@ -2,15 +2,15 @@
 
 ## Policy and database selection
 
-`ConfigLoader.load()` reads `septum.config.json` when present; otherwise it reads policy/settings from SQLite or defaults. Loading policy does not perform topology discovery or initialize an index.
+SQLite owns registered domains and settings. The standard workspace database is `.septum/septum.db`. `ConfigLoader.load()` reads SQLite or defaults. Loading policy does not discover topology or initialize an index. Enforcement defaults to `warn`, and default ignores include `.septum/**`.
 
-The file owns policy when present. Otherwise SQLite owns registered domains/settings. `resolveDatabasePath()` resolves relative `settings.db_path` from the workspace and preserves absolute paths and `:memory:`. The default path is `.septum/septum.db`.
+MCP workspace discovery and generated hook wrappers use `.septum/septum.db` as the initialization marker. `septum init` discovers topology, sets up workspace integrations, and synchronizes the index. Domain registration updates SQLite as described in [map](septum-map.md).
 
-The configuration schema defaults enforcement to `warn`. Its default ignore patterns include `.septum/**`. The file loader uses the same schema for file configuration and the default configuration.
+### Upgrade from file-based configuration
 
-Custom paths are supported by command/workspace database resolution; MCP initialization recognition and generated hook wrappers both accept `septum.config.json` in addition to `.septum/septum.db`. See [hooks](septum-hooks.md).
+Support for `septum.config.json` has ended. Septum ignores the file, including its domain rules, settings, and `db_path`. Existing policy in the standard workspace database continues to apply. Septum does not import the old file or locate a custom database through it.
 
-Registration updates the authoritative policy owner as described in [map](septum-map.md). `init` performs explicit discovery/scaffolding and initial synchronization. Ingestion without configured domains first considers stored domains, then discovery.
+For a workspace that relied on the file or a custom database, run `septum init` from the workspace root to prepare the standard database and review the discovered domains. Use `septum_map(action='register')` to reapply explicit domain roots and dependency rules. Review the effective policy before relying on boundary verdicts or hooks. Without the standard database, the MCP catalog reports `NOT_INDEXED` and generated pre-write and post-write wrappers exit without processing the edit.
 
 ## SQLite facts
 

@@ -17,7 +17,8 @@ function aggregateImportEdges(
   const byPath = new Map(files.map(file => [file.path, file]));
   const degree = new Map<string, number>();
   const edges = new Map<string, NavEdge>();
-  const unresolved: NavUnresolved[] = [];
+  const incomplete: NavUnresolved[] = [];
+  let unresolvedCount = 0;
 
   const relationshipList = workspace
     ? repo.getImportRelationships(root)
@@ -28,12 +29,14 @@ function aggregateImportEdges(
     const targets = [...new Set(edge.resolution.targets.flatMap(target => target.files))];
     if (!paths.has(source) && !targets.some(target => paths.has(target))) continue;
 
+    const isUnresolved = !["resolved", "external"].includes(edge.resolution.status);
     const isIncomplete = edge.freshness !== "current" ||
-      !["resolved", "external"].includes(edge.resolution.status) ||
+      isUnresolved ||
       edge.resolution.coverage === "conditional" ||
       edge.index_coverage === "partial";
+    if (isUnresolved) unresolvedCount++;
     if (isIncomplete) {
-      unresolved.push({
+      incomplete.push({
         file: source,
         target: edge.resolution.source.target,
         reason: edge.freshness !== "current"
@@ -58,14 +61,15 @@ function aggregateImportEdges(
     }
   }
 
-  return { byPath, degree, edges, unresolved };
+  return { byPath, degree, edges, incomplete, unresolvedCount };
 }
 
 /** Summarize index health and coverage diagnostics for the selected navigation scope. */
 function computeNavigationHealth(
   repo: SeptumRepository,
   domainRoot: string | undefined,
-  unresolved: NavUnresolved[],
+  incomplete: NavUnresolved[],
+  unresolvedCount: number,
   emptyDomainsCount: number,
   totalIndexedFiles: number,
   uncoveredCount: number
@@ -79,7 +83,7 @@ function computeNavigationHealth(
     .filter(file => !prefix || file.path.startsWith(prefix)).length;
 
   const reasons = [...new Set([
-    ...unresolved.map(item => item.reason),
+    ...incomplete.map(item => item.reason),
     ...(unsupported > 0 ? ["unsupported_files"] : []),
     ...(skipped > 0 ? ["skipped_files"] : []),
     ...(emptyDomainsCount > 0 ? ["empty_domains"] : []),
@@ -91,7 +95,7 @@ function computeNavigationHealth(
 
   const coverage = sync === "complete" &&
     !dirty &&
-    unresolved.length === 0 &&
+    incomplete.length === 0 &&
     unsupported === 0 &&
     skipped === 0 &&
     emptyDomainsCount === 0 &&
@@ -103,7 +107,16 @@ function computeNavigationHealth(
   return {
     sync,
     dirty,
-    health: { index: sync, sync_needed: dirty, coverage, unresolved_imports: unresolved.length, unsupported_files: unsupported, skipped_files: skipped, reasons },
+    health: {
+      index: sync,
+      sync_needed: dirty,
+      coverage,
+      unresolved_imports: unresolvedCount,
+      incomplete_imports: incomplete.length,
+      unsupported_files: unsupported,
+      skipped_files: skipped,
+      reasons,
+    },
   };
 }
 
@@ -135,7 +148,7 @@ export function buildNavigation(repo: SeptumRepository, args: NavigationQuery, r
   const paths = new Set(matching.map(file => file.path));
   const workspace = !domain && !filter && !archetype;
 
-  const { byPath, degree, edges, unresolved } = aggregateImportEdges(repo, root, files, paths, workspace);
+  const { byPath, degree, edges, incomplete, unresolvedCount } = aggregateImportEdges(repo, root, files, paths, workspace);
   const entries = repo.getNavigationEntrypoints().filter(entry => entry.file && paths.has(entry.file));
   const entryFiles = new Set(entries.map(entry => entry.file));
   matching.sort((a, b) =>
@@ -222,7 +235,7 @@ export function buildNavigation(repo: SeptumRepository, args: NavigationQuery, r
   const scopedDomains = workspace ? domains : domain ? [domain] : [];
   const emptyDomainsCount = scopedDomains.filter(d => (domainCounts.get(d.name) ?? 0) === 0).length;
   const uncoveredCount = (JSON.parse(repo.getMeta("uncovered_files") || "[]") as string[]).length;
-  const { sync, dirty, health } = computeNavigationHealth(repo, domain?.root_path, unresolved, emptyDomainsCount, files.length, uncoveredCount);
+  const { sync, dirty, health } = computeNavigationHealth(repo, domain?.root_path, incomplete, unresolvedCount, emptyDomainsCount, files.length, uncoveredCount);
   const end = offset + selected.length;
 
   return {
@@ -253,7 +266,7 @@ export function buildNavigation(repo: SeptumRepository, args: NavigationQuery, r
       omitted_entrypoints: entries.length - entrypoints.length,
     },
     ...(!workspace && end < matching.length ? { pagination: { next_file_offset: end, file_offset: offset } } : {}),
-    ...(args.include_evidence ? { diagnostics: unresolved.slice(0, 5), diagnostics_omitted: Math.max(0, unresolved.length - 5) } : {}),
+    ...(args.include_evidence ? { diagnostics: incomplete.slice(0, 5), diagnostics_omitted: Math.max(0, incomplete.length - 5) } : {}),
     next: submodules && submodules.length > 1 && domain
       ? [
           { tool: "septum_map", args: { action: "catalog", domain: domain.name, file_filter: submodules[0]!.path } },

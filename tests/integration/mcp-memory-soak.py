@@ -50,7 +50,6 @@ with tempfile.TemporaryDirectory(prefix='septum-soak-fixture-') as temp:
  parent=pathlib.Path(temp);roots=[];exts=['ts','php','py','go','vue']
  for i in range(21):
   root=parent/str(i);(root/'src').mkdir(parents=True);(root/'package.json').write_text('{"name":"soak-fixture"}')
-  (root/'septum.config.json').write_text(json.dumps({'domains':{'core':{'root':'src'}}}))
   for j in range(500 if i==0 else 5):(root/'src'/f'f{j}.{exts[j%5]}').write_text(source(exts[j%5]))
   roots.append(root)
  ignored=roots[0]/'node_modules';ignored.mkdir()

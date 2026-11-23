@@ -93,6 +93,19 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
             'septum://domains', 'septum://health', 'septum://boundaries',
             'septum://apps', 'ui://septum/app.html',
         }, resources
+        tools = {entry['name']: entry for entry in request('tools/list', {})['tools']}
+        assert tools['septum_app']['_meta']['ui'] == {
+            'resourceUri': 'ui://septum/app.html', 'visibility': ['app'],
+        }, tools['septum_app']
+        for name in ('septum_map', 'septum_slice', 'septum_boundary'):
+            assert 'ui' not in tools[name].get('_meta', {}), tools[name]
+        app_guide = request('resources/read', {'uri': 'septum://apps'})
+        assert json.loads(app_guide['contents'][0]['text'])['open_via_tools'] == ['septum_app']
+        open_apps = request('prompts/get', {'name': 'open-apps', 'arguments': {'workspace_path': str(a)}})
+        instruction = open_apps['messages'][0]['content']['text']
+        assert "host's app controls" in instruction and 'app-only `septum_app`' in instruction, instruction
+        assert '`septum_map`' in instruction and json.dumps(str(a)) in instruction, instruction
+        assert tool('septum_app', {'workspace_path': str(a)})['status'] == 'success'
         assert [entry['uriTemplate'] for entry in request('resources/templates/list', {})['resourceTemplates']] == ['septum://domain/{name}']
         domain_resource = request('resources/read', {'uri': 'septum://domain/orders'})
         assert json.loads(domain_resource['contents'][0]['text'])['status'] == 'success'
@@ -222,8 +235,13 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         (discovered / 'pkg/service.go').write_text(
             'package pkg\nimport "example.com/fixture/internal/auth"\nfunc Service() string { return auth.Value() }\n')
         (discovered / 'internal/auth/auth.go').write_text('package auth\nfunc Value() string { return "ok" }\n')
-        policy = discovered / 'septum.config.json'
-        policy.write_text('{}')
+        # A leftover file alone must not initialize the workspace or supply policy.
+        (discovered / 'septum.config.json').write_text('{')
+        for name in ('septum_map', 'septum_app'):
+            diagnostic = tool(name, {'workspace_path': str(discovered)})
+            assert diagnostic['schema'] == 'navigation/v1' and diagnostic['status'] == 'NOT_INDEXED', diagnostic
+        assert not (discovered / '.septum/septum.db').exists()
+        subprocess.run(['bun', 'run', str(CLI), 'sync', '--quiet'], cwd=discovered, env=env, check=True)
 
         prompt_name = 'audit-coupling'
         listed = request('prompts/list', {})['prompts']
@@ -260,39 +278,30 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         assert {domain['name'] for domain in catalog['domains']} == {'orders', 'billing'}, catalog
         (a / 'src/orders/Order.ts').write_text(
             "import {invoice} from '../billing/Invoice';\nexport const order=invoice;\n")
-        primary_policy = {
-            'settings': {'enforcement': 'strict'},
-            'domains': {
-                'orders': {'root': 'src/orders', 'allowed_dependencies': ['billing']},
-                'billing': {'root': 'src/billing'},
-            },
-        }
-        primary_config = a / 'septum.config.json'
-        primary_config.write_text(json.dumps(primary_policy))
+        tool('septum_map', {'action': 'register', 'name': 'orders', 'root': 'src/orders', 'allowed_dependencies': ['billing'], 'forbidden_dependencies': [], 'workspace_path': str(a)})
         audit = read_resource('boundaries')
         assert audit['status'] == 'approved', audit
 
-        primary_policy['domains']['orders'] = {'root': 'src/orders', 'forbidden_dependencies': ['billing']}
-        primary_config.write_text(json.dumps(primary_policy))
+        tool('septum_map', {'action': 'register', 'name': 'orders', 'root': 'src/orders', 'allowed_dependencies': [], 'forbidden_dependencies': ['billing'], 'workspace_path': str(a)})
         audit = read_resource('boundaries')
         assert audit['status'] == 'rejected', audit
         assert any(item['rule'] == 'forbidden_dependency' and item['file'] == 'src/orders/Order.ts'
                    for item in audit['violations']), audit
         assert audit == tool('septum_boundary', {'scope': 'all', 'workspace_path': str(a)})
-
-        primary_config.write_text('{')
-        request('resources/read', {'uri': f'septum://boundaries?{workspace_query}'}, expected_error=-32603)
-        primary_config.write_text(json.dumps(primary_policy))
         assert read_resource('boundaries')['status'] == 'rejected'
 
-        policy.write_text(json.dumps({'settings': {'enforcement': 'strict'}}))
+        bun_eval(f'''import {{SeptumDatabase}} from {json.dumps(str(PROJECT / 'src/core/database/client.ts'))};
+          import {{SeptumRepository}} from {json.dumps(str(PROJECT / 'src/core/database/repository.ts'))};
+          const db = new SeptumDatabase('.septum/septum.db');
+          try {{
+            new SeptumRepository(db.raw).setMeta('settings_json', JSON.stringify({{ enforcement: 'strict' }}));
+          }} finally {{ db.close(); }}''', discovered)
         verdict = tool('septum_boundary', {'scope': 'all', 'workspace_path': str(discovered)})
         assert verdict['status'] == 'rejected' and verdict['enforcement_mode'] == 'strict', verdict
 
-        policy.write_text(json.dumps({'settings': {'enforcement': 'strict'}, 'domains': {
-            'pkg': {'root': 'pkg', 'allowed_dependencies': ['auth']},
-            'auth': {'root': 'internal/auth'},
-        }}))
+        tool('septum_map', {'action': 'register', 'name': 'pkg', 'root': 'pkg',
+                            'allowed_dependencies': ['auth'], 'forbidden_dependencies': [],
+                            'workspace_path': str(discovered)})
         verdict = tool('septum_boundary', {'scope': 'all', 'workspace_path': str(discovered)})
         assert verdict['status'] == 'approved' and verdict['enforcement_mode'] == 'strict', verdict
         print('PASS: audit prompt arguments, discovered domains, explicit policy precedence, resource workspace identity, policy refresh and recovery')

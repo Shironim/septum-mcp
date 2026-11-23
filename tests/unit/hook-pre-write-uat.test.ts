@@ -3,6 +3,8 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { SeptumDatabase } from "../../src/core/database/client.ts";
+import { SeptumRepository } from "../../src/core/database/repository.ts";
 
 const BIN_PATH = path.resolve(import.meta.dir, "../../bin/septum.ts");
 
@@ -13,34 +15,16 @@ function createHookWorkspace() {
   fs.mkdirSync(path.join(root, "src/shared"), { recursive: true });
   fs.writeFileSync(path.join(root, "src/orders/order.ts"), "export const order = 1;\n");
   fs.writeFileSync(path.join(root, "src/shared/money.ts"), "export const money = 1;\n");
-  fs.writeFileSync(
-    path.join(root, "septum.config.json"),
-    JSON.stringify(
-      {
-        version: "1.0",
-        settings: { enforcement: "strict", db_path: ".septum/septum.db", ignore_patterns: [] },
-        domains: {
-          billing: {
-            root: "src/billing",
-            allowed_dependencies: ["shared"],
-            forbidden_dependencies: ["orders"],
-          },
-          orders: {
-            root: "src/orders",
-            allowed_dependencies: ["shared"],
-            forbidden_dependencies: [],
-          },
-          shared: {
-            root: "src/shared",
-            allowed_dependencies: [],
-            forbidden_dependencies: ["billing", "orders"],
-          },
-        },
-      },
-      null,
-      2
-    )
-  );
+  const db = new SeptumDatabase(path.join(root, ".septum/septum.db"));
+  try {
+    const repo = new SeptumRepository(db.raw);
+    repo.setMeta("settings_json", JSON.stringify({ enforcement: "strict", db_path: ".septum/septum.db", ignore_patterns: [] }));
+    repo.upsertDomain("billing", { root: "src/billing", allowed_dependencies: ["shared"], forbidden_dependencies: ["orders"] }, root);
+    repo.upsertDomain("orders", { root: "src/orders", allowed_dependencies: ["shared"], forbidden_dependencies: [] }, root);
+    repo.upsertDomain("shared", { root: "src/shared", allowed_dependencies: [], forbidden_dependencies: ["billing", "orders"] }, root);
+  } finally {
+    db.close();
+  }
   return root;
 }
 
@@ -53,8 +37,8 @@ function runPreWriteCli(cwd: string, payload: string, extraArgs: string[] = []) 
   });
 }
 
-describe("UAT: septum hook pre-write (Real CLI Seam & Zero-SQLite Fast Path)", () => {
-  it("allows valid import using septum.config.json without creating or opening SQLite", () => {
+describe("UAT: septum hook pre-write (Real CLI Seam & SQLite SSOT)", () => {
+  it("allows valid import using SQLite SSOT", () => {
     const root = createHookWorkspace();
     try {
       const res = runPreWriteCli(
@@ -72,8 +56,6 @@ describe("UAT: septum hook pre-write (Real CLI Seam & Zero-SQLite Fast Path)", (
       expect(decision.decision).toBe("allow");
       expect(decision.coverage).toBe("complete_candidate");
       expect(decision.evaluated).toBe("proposed_imports");
-      // Dual-boundary check: SQLite DB must not be created on Zero-SQLite fast path
-      expect(fs.existsSync(path.join(root, ".septum/septum.db"))).toBe(false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -93,7 +75,6 @@ describe("UAT: septum hook pre-write (Real CLI Seam & Zero-SQLite Fast Path)", (
       expect(defaultRes.status).toBe(1);
       expect(JSON.parse(defaultRes.stdout.trim()).decision).toBe("deny");
       expect(defaultRes.stderr).toContain("OFFENDING IMPORT");
-      expect(fs.existsSync(path.join(root, ".septum/septum.db"))).toBe(false);
 
       const claudeRes = runPreWriteCli(root, payload, ["--claude"]);
       expect(claudeRes.status).toBe(2);

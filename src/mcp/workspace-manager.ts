@@ -52,9 +52,8 @@ export function resolveServerWorkspace(options: {workspacePath?: string; filePat
 
 export function isWorkspaceInitialized(root: string): boolean {
   try {
-    // SV-03: Pure .septum directory without config or db is uninitialized
-    return existsSync(join(root, "septum.config.json")) ||
-           existsSync(join(root, ".septum", "septum.db"));
+    // SV-03: Pure .septum directory without db is uninitialized
+    return existsSync(join(root, ".septum", "septum.db"));
   } catch {
     return false;
   }
@@ -105,7 +104,13 @@ export class WorkspaceManager {
   get pendingPaths(): number { return [...this.contexts.values()].reduce((n, entry) => n + entry.context.watcher.pendingCount, 0); }
 
   /** Inspect an active context synchronously without renewing or creating it. */
-  peek(root: string): WorkspaceContext | undefined {
+  peek(rawRoot: string): WorkspaceContext | undefined {
+    let root = rawRoot;
+    try {
+      root = realpathSync(rawRoot);
+    } catch {
+      // Keep rawRoot if path does not exist on disk yet.
+    }
     return this.contexts.get(root)?.context;
   }
 

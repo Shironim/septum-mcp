@@ -30,13 +30,12 @@ with tempfile.TemporaryDirectory(prefix='septum-capabilities-') as temporary:
     root = Path(temporary)
     (root / 'src').mkdir()
     (root / 'package.json').write_text('{"name":"septum-capability-fixture","private":true}')
-    (root / 'septum.config.json').write_text(json.dumps({'domains': {'src': {'root': 'src'}}}))
     for file, source in FIXTURES.items():
         (root / 'src' / file).write_text(source)
     with McpSession(COMMAND, root) as session:
         request, tool = session.request, session.tool
         listed = request('tools/list', {})['tools']
-        assert {tool['name'] for tool in listed} == {'septum_map', 'septum_symbol', 'septum_slice', 'septum_boundary'}
+        assert {tool['name'] for tool in listed} == {'septum_map', 'septum_symbol', 'septum_slice', 'septum_boundary', 'septum_app'}
         assert 'symbol_ref' in next(t for t in listed if t['name'] == 'septum_symbol')['inputSchema']['properties']
         tool('septum_map', {'action': 'register', 'domain': 'src', 'root': 'src', 'ingest_now': True})
         catalog = tool('septum_map', {'action': 'catalog', 'domain': 'src', 'detail_level': 'full', 'include_capabilities': True})

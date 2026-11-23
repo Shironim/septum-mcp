@@ -93,13 +93,9 @@ function blockHook(db: SeptumDatabase | null, reason: string): never {
 async function runPreWriteHook(): Promise<void> {
   const callerRoot = process.cwd();
   const workspaceRoot = path.resolve(process.env.SEPTUM_HOOK_ROOT || callerRoot);
-  const configFilePath = path.join(workspaceRoot, "septum.config.json");
-  const hasDiskConfig = fs.existsSync(configFilePath);
-  const config = hasDiskConfig
-    ? ConfigLoader.loadFromDisk(configFilePath)
-    : ConfigLoader.load(undefined, workspaceRoot);
+  const config = ConfigLoader.load(undefined, workspaceRoot);
   const dbPath = resolveDatabasePath(workspaceRoot, config.settings.db_path);
-  if (!hasDiskConfig && !fs.existsSync(dbPath)) {
+  if (!fs.existsSync(dbPath)) {
     process.exit(0);
   }
 
@@ -133,10 +129,8 @@ async function runPreWriteHook(): Promise<void> {
   const targetFile = path.relative(workspaceRoot, path.resolve(callerRoot, edit.target)).replace(/\\/g, "/");
   const content = edit.content;
 
-  // Zero-SQLite fast path: when septum.config.json owns policy, evaluate proposed imports
-  // in-memory without opening SQLite on every edit.
-  const db = hasDiskConfig ? null : new SeptumDatabase(dbPath);
-  const repo = db ? new SeptumRepository(db.raw) : undefined;
+  const db = new SeptumDatabase(dbPath);
+  const repo = new SeptumRepository(db.raw);
   const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(workspaceRoot, repo));
 
   try {
@@ -170,7 +164,7 @@ async function runPreWriteHook(): Promise<void> {
             rule: v.rule,
             source_domain: v.source_domain,
             target_domain: v.target_domain,
-            zero_sqlite: hasDiskConfig,
+            zero_sqlite: false,
           },
           workspaceRoot,
           emitStderr: false,
@@ -197,7 +191,7 @@ async function runPreWriteHook(): Promise<void> {
         decision: "allow",
         coverage: edit.coverage,
         evaluated: sourceDomain ? "proposed_imports" : "unmapped_domain",
-        zero_sqlite: hasDiskConfig,
+        zero_sqlite: false,
       },
       workspaceRoot,
       emitStderr: false,

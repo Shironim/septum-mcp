@@ -100,9 +100,7 @@ export async function handleRegisterDomain(
           {
             status: "success",
             policy_owner: result.policyOwner,
-            message: `Domain '${result.domain}' successfully registered in ${
-              result.policyOwner === "database" ? "SQLite" : "septum.config.json"
-            }.${args.ingest_now ? " Initial ingestion completed." : ""}`,
+            message: `Domain '${result.domain}' successfully registered in SQLite.${args.ingest_now ? " Initial ingestion completed." : ""}`,
             domain_id: result.domainId,
             domain: result.domain,
             name: result.domain,

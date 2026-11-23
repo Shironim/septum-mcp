@@ -19,9 +19,12 @@ export function formatMapAsText(payload: Record<string, any>): string {
     : scope.domain ?? "workspace";
   const health = payload.health ?? {};
   const acc = payload.accounting ?? {};
+  const incompleteSuffix = (health.incomplete_imports ?? 0) > (health.unresolved_imports ?? 0)
+    ? ` incomplete=${health.incomplete_imports}`
+    : "";
   const lines: string[] = [
     `# Septum Map: ${headerScope} [${payload.status}]`,
-    `Health: index=${health.index ?? "unknown"} coverage=${health.coverage ?? "unknown"} sync_needed=${Boolean(health.sync_needed)} unresolved=${health.unresolved_imports ?? 0}`,
+    `Health: index=${health.index ?? "unknown"} coverage=${health.coverage ?? "unknown"} sync_needed=${Boolean(health.sync_needed)} unresolved=${health.unresolved_imports ?? 0}${incompleteSuffix}`,
   ];
 
   if (Array.isArray(payload.domains) && payload.domains.length) {

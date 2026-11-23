@@ -24,34 +24,25 @@ with tempfile.TemporaryDirectory(prefix='septum-first-registration-') as tempora
 
 with tempfile.TemporaryDirectory(prefix='septum-consistency-') as temporary:
     root = Path(temporary)
-    for directory in ['src/orders', 'src/orders/ignored', 'src/billing', '.septum']:
+    for directory in ['src/orders', 'src/billing', '.septum']:
         (root / directory).mkdir(parents=True, exist_ok=True)
-    policy = {
-        'settings': {'db_path': 'state/index.db', 'enforcement': 'warn', 'ignore_patterns': ['src/orders/ignored/**']},
-        'domains': {'orders': {'root': 'src/orders', 'forbidden_dependencies': ['billing']},
-                    'billing': {'root': 'src/billing'}}}
-    policy_file = root / 'septum.config.json'
-    policy_file.write_text(json.dumps(policy))
     (root / 'package.json').write_text('{"dependencies":{"express":"4"}}')
     (root / 'src/orders/submit.ts').write_text('export function submit() { return "PRIVATE_SOURCE_MARKER"; }\n')
     (root / 'src/orders/server.ts').write_text("import express from 'express'; const app=express(); app.get('/live', (req,res)=>res.send('ok'));\n")
-    (root / 'src/orders/ignored/old.ts').write_text("import express from 'express'; const app=express(); app.get('/ghost', (req,res)=>res.send('old'));\n")
     (root / 'src/billing/invoice.ts').write_text('export const invoice = 1;\n')
     proposal = {'scope': 'file', 'file_path': 'src/orders/submit.ts', 'proposed_imports': ['../billing/invoice']}
     with McpSession(command, root) as client:
+        client.tool('septum_map', {'action': 'register', 'name': 'orders', 'root': 'src/orders', 'forbidden_dependencies': ['billing'], 'ingest_now': False})
+        client.tool('septum_map', {'action': 'register', 'name': 'billing', 'root': 'src/billing', 'ingest_now': True})
         assert client.tool('septum_boundary', proposal)['status'] == 'rejected'
         registered = client.tool('septum_map', {'action': 'register', 'name': 'orders', 'root': 'src/orders', 'forbidden_dependencies': []})
-        assert registered['policy_owner'] == 'file', registered
-        assert json.loads(policy_file.read_text())['domains']['orders']['forbidden_dependencies'] == []
+        assert registered['policy_owner'] == 'database', registered
         assert client.tool('septum_boundary', proposal)['status'] == 'approved'
         assert client.tool('septum_slice', {'query': 'GET /live'})['found'] is True
-        assert client.tool('septum_slice', {'query': 'GET /ghost'})['found'] is False
-        catalog = client.tool('septum_map', {'action': 'catalog', 'domain': 'orders', 'detail_level': 'full'})
-        assert all('ignored' not in file['path'] for file in catalog['files']), catalog
         for mode in ['deep', 'source']:
             selected = client.tool('septum_symbol', {'action': 'context', 'query': 'submit', 'context_mode': mode})
             assert selected['context_mode'] == mode, selected
-        assert not (root / '.septum/septum.db').exists()
+        assert (root / '.septum/septum.db').exists()
     with McpSession(command, root) as reconnected:
         assert reconnected.tool('septum_boundary', proposal)['status'] == 'approved'
     telemetry = (root / '.septum/septum.log').read_text()
@@ -59,4 +50,4 @@ with tempfile.TemporaryDirectory(prefix='septum-consistency-') as temporary:
     assert 'src/orders/submit.ts' not in telemetry
     assert 'proposed_imports' not in telemetry
 
-print('PASS: first registration, custom database, file policy reload/reconnect, shared ignores, explicit context modes and telemetry redaction')
+print('PASS: first SQLite registration, live policy update and reconnect, route slicing, explicit context modes and telemetry redaction')

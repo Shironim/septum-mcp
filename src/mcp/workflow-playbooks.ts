@@ -40,8 +40,8 @@ const PLAYBOOKS = [
       });
       return userTextMessage("Open Septum Architecture UI and inspect workspace coverage.", [
         "Open the Septum Architecture UI and inspect workspace coverage:",
-        `1. Call \`septum_map\` with \`${mapArgs}\` to open the Septum Architecture UI and load domain topology and index health.`,
-        "2. Check `status` and `health` (`index`, `coverage`, `sync_needed`, `unsupported_files`, `skipped_files`, `unresolved_imports`, `reasons`). Read `septum://apps` if the client supports MCP resources for partial-file samples.",
+        "1. Open Septum Architecture from the host's app controls when available. The host uses the app-only `septum_app` entrypoint.",
+        `2. Call \`septum_map\` with \`${mapArgs}\` to inspect topology and index health. Check \`status\` and \`health\`, including \`coverage\`, \`unresolved_imports\` and \`incomplete_imports\`. Read \`septum://apps\` for partial-file samples when supported.`,
         "3. If `status` is `NOT_INDEXED` or `coverage` is `partial`, list the uncovered files or conditions and give concrete next steps (`septum init`, `septum sync`, `septum_map(action='register')`, or `ignore_patterns` / alias fixes).",
       ]);
     },

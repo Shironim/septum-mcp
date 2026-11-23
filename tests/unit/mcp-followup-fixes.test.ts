@@ -92,11 +92,12 @@ describe("MCP follow-up fixes", () => {
     expect(repo.getSymbolDetails("A", { includeDependencies: false })?.connected_files).toEqual({ imports_from: [], imported_by_count: 0 });
   });
 
-  it("emits exactly four public MCP ingress entries with the dispatched boundary wrapper", () => {
+  it("emits the five public MCP ingress entries (4 analysis tools + septum_app) with the dispatched boundary wrapper", () => {
     const entries = new McpCliSemanticExtractor().extractSlices(resolve(import.meta.dir, "../..")).filter(s => s.http_method === "MCP");
-    expect(entries).toHaveLength(4);
-    expect(new Set(entries.map(s => s.route_name)).size).toBe(4);
+    expect(entries).toHaveLength(5);
+    expect(new Set(entries.map(s => s.route_name)).size).toBe(5);
     expect(entries.find(s => s.route_name === "septum_boundary")?.controller_file).toBe("src/mcp/tools/boundary.ts");
+    expect(entries.some(s => s.route_name === "septum_app")).toBe(true);
   });
 
   it("reads nested public tool schemas and ignores nested names, strings and comments", () => {
