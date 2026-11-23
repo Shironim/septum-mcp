@@ -12,7 +12,7 @@ The stdio server advertises `resources` and `prompts` during `initialize`, along
 | `septum://health` | `application/json` | Recorded sync status, last sync, indexed counts and watcher state for an active context | Reads the existing context without opening or refreshing the index or extending the context's lifetime |
 | `septum://boundaries` | `application/json` | Static audit from the same handler as `septum_boundary` with `scope: "all"` | Acquires a workspace context, checks it and runs the audit |
 | `septum://apps` | `application/json` | MCP App entrypoint (`septum_app`), active coverage/partial-index diagnostics and next actions | Peeks active context and health without triggering ingestion |
-| `ui://septum/app.html` | `text/html;profile=mcp-app` | Bundled interactive MCP App UI for architecture navigation, slices and boundary audits | Serves the built HTML bundle (`dist/mcp-app.html`) or a fallback status page if unbuilt |
+| `ui://septum/app.html` | `text/html;profile=mcp-app` | Bundled interactive MCP App UI for architecture navigation, slices and boundary audits | Serves the built HTML bundle (`src/mcp/ui/app.html` or `SEPTUM_APP_HTML`), or throws an error if the UI bundle is missing |
 
 Data resources default to the most recently acquired workspace and fall back to the server's initial workspace. Append `?workspace=` followed by a URL-encoded workspace path to select a specific workspace. See [workspace lifecycle](workspace-lifecycle.md) for synchronization and workspace selection.
 

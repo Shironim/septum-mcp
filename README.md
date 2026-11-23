@@ -18,6 +18,7 @@ Septum is a local static-analysis MCP server and CLI that keeps AI coding agents
 - **Bounded Symbol Context & Impact (`septum_symbol`):** Locates declarations across the codebase, retrieves bounded implementation context (deep TypeScript reference context within `budget_bytes`, or bounded polyglot source inspection), and reports static dependents and caller hints.
 - **Static Flow Tracing (`septum_slice`):** Traces static relationship chains from supported application entrypoints (`query`, `controller_file`, `max_depth`) across layers, showing relationship evidence or `unknown` for each node.
 - **Architecture Boundary Guard (`septum_boundary`):** Validates proposed file imports against domain rules before writing (`scope: "file"`), checks staged Git changes before commit (`scope: "staged"`), and audits circular or cross-domain violations (`scope: "domain"`, `scope: "all"`).
+- **MCP App UI, Resources & Prompts (`septum_app`, `ui://septum/app.html`):** Ships an interactive MCP App panel (Architecture, Slice, and Boundary views) for compatible hosts, read-only `septum://` workspace resources (`domains`, `health`, `boundaries`, `apps`, `domain/{name}`), and five workflow prompts (`open-apps`, `audit-coupling`, `check-staged`, `plan-refactor`, `trace-feature`).
 
 ### Language Support & Analysis Scope
 
@@ -116,6 +117,7 @@ If your MCP client is not configured via `septum init`, add Septum to `.mcp.json
 ## Documentation
 
 - [Implemented Features & Limits](docs/feature/README.md) — Tool behaviors, language coverage, and verification scope
+- [MCP Resources, Prompts & Apps](docs/feature/mcp-resources-and-prompts.md) — Workspace resources, workflow playbooks, and the Septum Architecture UI
 - [Symbol Context Contract](docs/feature/symbol-context-contract.md) — Deep context selection, byte budgets, and pagination
 - [Import Resolution](docs/feature/import-resolution.md) — Supported static targets and unresolved boundaries
 
