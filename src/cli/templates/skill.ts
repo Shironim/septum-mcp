@@ -53,8 +53,8 @@ Set \`workspace_path\` when selecting among repositories. If the MCP tools are u
 
 ## Resources & Prompts
 
-- **MCP Resources (initial workspace):** \`septum://domains\`, \`septum://health\`, \`septum://boundaries\`, and \`septum://domain/{name}\` provide read-only JSON snapshots for the server's initial workspace; use the 4 MCP tools with \`workspace_path\` for multi-root queries.
-- **MCP Prompts:** \`septum-pre-edit-check\` and \`septum-architecture-audit\` provide step-by-step verification playbooks.
+- **MCP Resources:** \`septum://domains\`, \`septum://health\`, \`septum://boundaries\`, \`septum://apps\`, \`ui://septum/app.html\`, and \`septum://domain/{name}\` provide workspace snapshots and the MCP App UI (append \`?workspace=\` to select a workspace; use the 4 MCP tools with \`workspace_path\` for multi-root queries).
+- **MCP Prompts:** \`open-apps\`, \`audit-coupling\`, \`check-staged\`, \`plan-refactor\`, and \`trace-feature\` provide step-by-step workflow playbooks.
 
 Describe the operation and observed result. Do not promise token savings, response speed, memory savings, complete caller discovery or universal language/framework coverage.
 `;
