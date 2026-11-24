@@ -1,7 +1,8 @@
-import { normalizeHookEdit } from "../hook-payload.ts";
+import { normalizeApplyPatchEdits, normalizeHookEdit, type HookEdit } from "../hook-payload.ts";
 import { assertPathContained } from "../../core/resolver/path-resolver.ts";
 import { readSourceFile } from "../../core/resources/source-files.ts";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { BoundaryEvaluator } from "../../core/boundary/evaluator.ts";
 import { ConfigLoader, resolveDatabasePath } from "../../core/config/loader.ts";
@@ -17,6 +18,7 @@ interface ToolCallInfo {
 }
 
 export interface ToolPayload {
+  cwd?: string;
   tool_name?: string;
   toolCall?: ToolCallInfo;
   tool_input?: {
@@ -48,10 +50,18 @@ export interface ToolPayload {
 }
 
 let configuredExitCode = 1;
+// Codex/OpenCode/Claude/Cursor contract: stdout must be empty on allow/skip; deny = exit 2 + stderr reason + empty stdout.
+let quietStdout = false;
 
 export async function handleHookCommand(args: string[]): Promise<void> {
+  configuredExitCode = 1;
+  quietStdout = false;
   const subHook = args[1] || "pre-write";
-  if (args.includes("--exit-code-2") || args.includes("--claude") || args.includes("--cursor")) {
+  if (args.includes("--codex") || args.includes("--opencode") || args.includes("--claude") || args.includes("--cursor")) {
+    quietStdout = true;
+    configuredExitCode = 2;
+  }
+  if (args.includes("--exit-code-2")) {
     configuredExitCode = 2;
   }
 
@@ -71,11 +81,11 @@ function blockHook(db: SeptumDatabase | null, reason: string): never {
     }
   }
 
-  // Print readable error to stderr for humans and Claude/Cursor/Codex
+  // Print readable error to stderr for humans and Claude/Cursor/Codex/OpenCode
   console.error(reason);
 
-  // Print JSON contract to stdout for Antigravity hook engine
-  try {
+  // Print JSON contract to stdout for Antigravity hook engine (quiet harnesses require empty stdout)
+  if (!quietStdout) try {
     process.stdout.write(
       JSON.stringify({
         decision: "deny",
@@ -86,8 +96,58 @@ function blockHook(db: SeptumDatabase | null, reason: string): never {
     // ignore
   }
 
-  // Exit code: 1 by default (Unix standard), or 2 if specified for Claude Code / Cursor hooks
+  // Exit code: 1 by default (Unix standard), or 2 for Claude Code / Cursor / Codex / OpenCode
   process.exit(configuredExitCode);
+}
+
+function isAntigravityArtifactPath(resolvedTarget: string): boolean {
+  const homeDir = os.homedir();
+  const allowedPrefixes = [
+    path.resolve(homeDir, ".gemini", "antigravity", "brain") + path.sep,
+    path.resolve(homeDir, ".gemini", "antigravity-cli", "brain") + path.sep,
+  ];
+  return allowedPrefixes.some((prefix) => resolvedTarget.startsWith(prefix));
+}
+
+function emitPassOrDefer(workspaceRoot: string, fields: Record<string, unknown>): never {
+  SeptumTelemetry.recordSystemEvent({
+    level: "INFO",
+    component: "hook",
+    event: "hook_decision",
+    fields: {
+      ...fields,
+      response_decision: quietStdout ? "empty" : "ask",
+      zero_sqlite: false,
+    },
+    workspaceRoot,
+    emitStderr: false,
+  });
+  if (!quietStdout) {
+    try {
+      // Antigravity CLI unmarshals hook stdout via protojson; emit only schema-valid fields.
+      process.stdout.write(JSON.stringify({ decision: "ask" }) + "\n");
+    } catch {
+      // ignore
+    }
+  }
+  process.exit(0);
+}
+
+function resolveTargetBaseDir(callerRoot: string, workspaceRoot: string, payloadCwd?: string): string {
+  if (typeof payloadCwd === "string" && payloadCwd.trim()) {
+    const candidate = path.resolve(workspaceRoot, payloadCwd);
+    try {
+      assertPathContained(candidate, workspaceRoot, "Hook cwd");
+      return candidate;
+    } catch {
+      // Fall through to workspaceRoot
+    }
+  }
+  const callerBase = path.basename(callerRoot);
+  if (callerBase === ".agents" || callerBase === ".claude" || callerBase === ".codex" || callerBase === "opencode") {
+    return workspaceRoot;
+  }
+  return callerRoot;
 }
 
 async function runPreWriteHook(): Promise<void> {
@@ -113,33 +173,52 @@ async function runPreWriteHook(): Promise<void> {
     process.exit(0);
   }
 
-  let edit;
+  const targetBaseDir = resolveTargetBaseDir(callerRoot, workspaceRoot, payload.cwd);
+  let edits: HookEdit[] = [];
   try {
-    edit = normalizeHookEdit(payload, target => {
-      const file = path.resolve(callerRoot, target);
+    const patchEdits = normalizeApplyPatchEdits(payload);
+    const single = patchEdits.length ? undefined : normalizeHookEdit(payload, target => {
+      const file = path.resolve(targetBaseDir, target);
+      if (isAntigravityArtifactPath(file)) return "";
       assertPathContained(file, workspaceRoot, "Hook source");
       return readSourceFile(file);
     });
-    if (edit) assertPathContained(path.resolve(callerRoot, edit.target), workspaceRoot, "Hook target");
+    edits = patchEdits.length ? patchEdits : single ? [single] : [];
+    for (const e of edits) {
+      const resolvedTarget = path.resolve(targetBaseDir, e.target);
+      if (isAntigravityArtifactPath(resolvedTarget)) {
+        emitPassOrDefer(workspaceRoot, {
+          decision: "allow",
+          coverage: "unknown",
+          evaluated: "skipped_harness_artifact",
+        });
+      }
+      assertPathContained(resolvedTarget, workspaceRoot, "Hook target");
+    }
   } catch (error) { blockHook(null, error instanceof Error ? error.message : String(error)); }
-  if (!edit) {
-    process.stdout.write(JSON.stringify({ decision: "allow", coverage: "unknown", reason: "Unsupported hook payload; no source candidate was evaluated." }) + "\n");
-    process.exit(0);
+  if (edits.length === 0) {
+    emitPassOrDefer(workspaceRoot, {
+      decision: "allow",
+      coverage: "unknown",
+      evaluated: "skipped_unsupported_payload",
+    });
   }
-  const targetFile = path.relative(workspaceRoot, path.resolve(callerRoot, edit.target)).replace(/\\/g, "/");
-  const content = edit.content;
-
   const db = new SeptumDatabase(dbPath);
   const repo = new SeptumRepository(db.raw);
   const evaluator = new BoundaryEvaluator(repo, new ModuleResolver(workspaceRoot, repo));
 
   try {
+   const astEngine = new ASTParserEngine();
+   let lastEvaluated = "unmapped_domain";
+   let lastCoverage = edits[0].coverage;
+   for (const edit of edits) {
+    const targetFile = path.relative(workspaceRoot, path.resolve(targetBaseDir, edit.target)).replace(/\\/g, "/");
+    const content = edit.content;
     const sourceDomain = evaluator.resolveSourceDomain(targetFile, config);
 
     // Real-time AST Import Interception:
     // Extract imports from proposed content and check for boundary leaks
     if (content && sourceDomain) {
-      const astEngine = new ASTParserEngine();
       const parsed = await astEngine.parseFile(targetFile, content);
       if (ASTParserEngine.isSourceFile(targetFile) && (parsed.status === "unsupported" || parsed.status === "degraded")) {
         throw new Error(`Cannot reliably check imports in '${targetFile}': parser status is ${parsed.status}.`);
@@ -181,34 +260,21 @@ async function runPreWriteHook(): Promise<void> {
       }
     }
 
+    lastEvaluated = sourceDomain ? "proposed_imports" : "unmapped_domain";
+    lastCoverage = edit.coverage;
+   }
     db?.close();
 
-    SeptumTelemetry.recordSystemEvent({
-      level: "INFO",
-      component: "hook",
-      event: "hook_decision",
-      fields: {
-        decision: "allow",
-        coverage: edit.coverage,
-        evaluated: sourceDomain ? "proposed_imports" : "unmapped_domain",
-        zero_sqlite: false,
-      },
-      workspaceRoot,
-      emitStderr: false,
+    // Antigravity JSON mode: "allow" would auto-approve the tool and skip the user's permission prompt.
+    // Septum only vetoes boundary violations, so defer to the normal flow with "ask".
+    emitPassOrDefer(workspaceRoot, {
+      decision: "allow",
+      coverage: lastCoverage,
+      evaluated: lastEvaluated,
     });
-
-    // If running in Antigravity or standard JSON IPC mode, emit allow decision
-    try {
-      process.stdout.write(JSON.stringify({ decision: "allow", coverage: edit.coverage, evaluated: sourceDomain ? "proposed_imports" : "unmapped_domain" }) + "\n");
-    } catch {
-      // ignore
-    }
-    process.exit(0);
   } catch (err) {
-    db?.close();
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`\x1b[31m[Septum Hook Error]\x1b[0m ${message}`);
-    process.exit(configuredExitCode);
+    blockHook(db, `[Septum Hook Error] ${message}`);
   }
 }
 

@@ -1,3 +1,4 @@
+// Antigravity runs hook commands with cwd = directory containing hooks.json (.agents/), hence the relative path.
 export const SEPTUM_HOOKS_CONFIG = {
   "septum-boundary-guard": {
     "PreToolUse": [
@@ -6,7 +7,7 @@ export const SEPTUM_HOOKS_CONFIG = {
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'ROOT=\"$(pwd -P)\"; for d in .gemini .claude .codex opencode .agents; do if [ -f \"$ROOT/$d/hooks/septum-pre-write.sh\" ]; then exec \"$ROOT/$d/hooks/septum-pre-write.sh\" \"$@\"; fi; done; exit 0'",
+            "command": "./hooks/septum-pre-write.sh",
             "timeout": 10,
           },
         ],

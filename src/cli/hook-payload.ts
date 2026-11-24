@@ -19,7 +19,7 @@ function replace(source: string, old: string, replacement: string, all = false):
 export function normalizeHookEdit(payload: unknown, readCurrent: (target: string) => string): HookEdit | undefined {
   const outer = record(payload);
   const input = record(outer.tool_input ?? outer.arguments ?? record(outer.toolCall).args ?? outer);
-  const target = firstString(input, ["TargetFile", "file_path", "filePath", "path", "Path"]) ?? firstString(outer, ["TargetFile", "file_path", "filePath", "path", "Path"]);
+  const target = firstString(input, ["TargetFile", "targetFile", "file_path", "filePath", "file", "path", "Path"]) ?? firstString(outer, ["TargetFile", "targetFile", "file_path", "filePath", "file", "path", "Path"]);
   if (!target) return;
   const full = firstString(input, ["CodeContent", "content", "Content"]) ?? firstString(outer, ["CodeContent", "content", "Content"]);
   if (full !== undefined) return { target, content: full, coverage: "complete_candidate" };
@@ -28,16 +28,41 @@ export function normalizeHookEdit(payload: unknown, readCurrent: (target: string
     let content = readCurrent(target);
     for (const value of edits) {
       const edit = record(value);
-      const old = firstString(edit, ["old_string", "TargetContent"]);
-      const next = firstString(edit, ["new_string", "ReplacementContent"]);
-      if (old === undefined || next === undefined) return { target, content: edits.map(value => firstString(record(value), ["new_string", "ReplacementContent"]) ?? "").join("\n"), coverage: "replacement_fragment" };
-      content = replace(content, old, next, edit.replace_all === true);
+      const old = firstString(edit, ["old_string", "oldString", "TargetContent"]);
+      const next = firstString(edit, ["new_string", "newString", "ReplacementContent"]);
+      if (old === undefined || next === undefined) return { target, content: edits.map(value => firstString(record(value), ["new_string", "newString", "ReplacementContent"]) ?? "").join("\n"), coverage: "replacement_fragment" };
+      content = replace(content, old, next, edit.replace_all === true || edit.replaceAll === true);
     }
     return { target, content, coverage: "complete_candidate" };
   }
-  const replacement = firstString(input, ["ReplacementContent", "new_string", "Replacement"]) ?? firstString(outer, ["ReplacementContent", "new_string", "Replacement"]);
+  const replacement = firstString(input, ["ReplacementContent", "new_string", "newString", "Replacement"]) ?? firstString(outer, ["ReplacementContent", "new_string", "newString", "Replacement"]);
   if (replacement === undefined) return;
-  const old = firstString(input, ["old_string", "TargetContent"]) ?? firstString(outer, ["old_string", "TargetContent"]);
-  return { target, content: old === undefined ? replacement : replace(readCurrent(target), old, replacement, input.replace_all === true),
+  const old = firstString(input, ["old_string", "oldString", "TargetContent"]) ?? firstString(outer, ["old_string", "oldString", "TargetContent"]);
+  const replaceAll = input.replace_all === true || input.replaceAll === true || outer.replace_all === true || outer.replaceAll === true;
+  return { target, content: old === undefined ? replacement : replace(readCurrent(target), old, replacement, replaceAll),
     coverage: old === undefined ? "replacement_fragment" : "complete_candidate" };
+}
+
+/** Codex `apply_patch` sends the patch text as `command`; return one candidate per touched file. */
+export function normalizeApplyPatchEdits(payload: unknown): HookEdit[] {
+  const outer = record(payload);
+  const input = record(outer.tool_input ?? outer.arguments ?? record(outer.toolCall).args ?? outer);
+  const command = firstString(input, ["command"]) ?? firstString(outer, ["command"]);
+  if (typeof command !== "string" || !command.includes("*** Begin Patch")) return [];
+  const edits: HookEdit[] = [];
+  let current: { target: string; lines: string[]; add: boolean } | undefined;
+  const flush = () => {
+    if (current) edits.push({ target: current.target, content: current.lines.join("\n"), coverage: current.add ? "complete_candidate" : "replacement_fragment" });
+    current = undefined;
+  };
+  for (const line of command.split(/\r?\n/)) {
+    const header = /^\*\*\* (Add|Update) File: (.+)$/.exec(line);
+    if (header) { flush(); current = { target: header[2].trim(), lines: [], add: header[1] === "Add" }; continue; }
+    if (line.startsWith("*** Delete File:") || line.startsWith("*** End Patch")) { flush(); continue; }
+    const move = /^\*\*\* Move to: (.+)$/.exec(line);
+    if (move && current) { current.target = move[1].trim(); continue; }
+    if (current && line.startsWith("+") && !line.startsWith("+++")) current.lines.push(line.slice(1));
+  }
+  flush();
+  return edits;
 }
