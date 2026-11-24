@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { SEPTUM_OPENCODE_PLUGIN, SEPTUM_OPENCODE_PLUGIN_MARKER } from "../templates/opencode-plugin.ts";
 import {
   SEPTUM_HOOKS_CONFIG,
   SEPTUM_POST_WRITE_SCRIPT,
@@ -20,8 +21,8 @@ export const SUPPORTED_HARNESSES: HarnessOption[] = [
   {
     id: "antigravity",
     name: "Antigravity",
-    targetFile: ".gemini/ (skills, rules, hooks, mcp_config.json)",
-    description: "Skills, rules, hooks, and MCP config for Antigravity AI agents",
+    targetFile: ".agents/ (skills, rules, hooks)",
+    description: "Skills, rules, and hooks for Antigravity AI agents (workspace root: .agents/)",
     selectedByDefault: true,
   },
   {
@@ -90,6 +91,26 @@ function writeJsonFile(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
 }
 
+function migrateLegacyClaudeHooksJson(cwd: string, outErrors?: string[]): void {
+  const legacyHooksPath = path.join(cwd, ".claude", "hooks.json");
+  const result = readJsonConfigFile(legacyHooksPath);
+  if (result.status === "missing") return;
+  if (result.status === "malformed") {
+    if (outErrors) outErrors.push(`Malformed JSON in '.claude/hooks.json': ${result.error}`);
+    return;
+  }
+  const data = { ...result.data };
+  if (!Object.prototype.hasOwnProperty.call(data, "septum-boundary-guard")) return;
+  delete data["septum-boundary-guard"];
+  if (Object.keys(data).length === 0) {
+    fs.unlinkSync(legacyHooksPath);
+    console.log("  ✓ Removed legacy '.claude/hooks.json' (Claude Code uses '.claude/settings.json').");
+  } else {
+    writeJsonFile(legacyHooksPath, data);
+    console.log("  ✓ Migrated legacy Septum entry out of '.claude/hooks.json' while preserving user hooks.");
+  }
+}
+
 export function configureHarness(
   harnessId: string,
   cwd: string = process.cwd(),
@@ -98,38 +119,19 @@ export function configureHarness(
 ): string | null {
   switch (harnessId) {
     case "antigravity": {
-      // 1. Skill, Rules, and Hook scripts in .gemini/
-      scaffoldHarnessCustomizations(".gemini", cwd, force, outErrors, { includeRules: true });
-
-      // 2. MCP config in .gemini/mcp_config.json
-      const geminiDir = path.join(cwd, ".gemini");
-      const mcpConfigPath = path.join(geminiDir, "mcp_config.json");
-      const result = readJsonConfigFile(mcpConfigPath);
-      if (result.status === "malformed") {
-        console.error(`  ✕ Error: Malformed JSON in '.gemini/mcp_config.json': ${result.error}. Preserving existing file without modification.`);
-        if (outErrors) outErrors.push(`Malformed JSON in '.gemini/mcp_config.json': ${result.error}`);
-      } else {
-        const existing = result.status === "valid" ? result.data : {};
-        const servers = (typeof existing.mcpServers === "object" && existing.mcpServers !== null && !Array.isArray(existing.mcpServers))
-          ? existing.mcpServers
-          : {};
-        if (!servers.septum || force) {
-          servers.septum = {
-            command: "septum",
-            args: ["serve"],
-          };
-          existing.mcpServers = servers;
-          writeJsonFile(mcpConfigPath, existing);
-        }
-      }
-      return ".gemini/ (skills, rules, hooks, mcp_config.json)";
+      // Antigravity discovers workspace customizations from .agents/ (skills, rules, hooks.json), not .gemini/.
+      scaffoldHarnessCustomizations(".agents", cwd, force, outErrors, { includeRules: true });
+      console.log("  ℹ Antigravity has no workspace MCP config: register 'septum serve' in ~/.gemini/antigravity/mcp_config.json (IDE) or ~/.gemini/antigravity-cli/mcp_config.json (CLI).");
+      return ".agents/ (skills, rules, hooks)";
     }
 
     case "claude": {
       const configured: string[] = [];
 
-      // 1. Skills and Hook scripts in .claude/ + CLAUDE.md root guidance (rules omitted as Claude Code does not support rules/)
-      scaffoldHarnessCustomizations(".claude", cwd, force, outErrors, { rootDoc: "CLAUDE.md", includeRules: false });
+      // 1. Skills in .claude/ + CLAUDE.md root guidance (skip .claude/hooks.json; Claude uses .claude/settings.json)
+      scaffoldHarnessCustomizations(".claude", cwd, force, outErrors, { rootDoc: "CLAUDE.md", includeRules: false, includeHooks: false });
+      ensureHarnessHookScripts(".claude", cwd, force);
+      migrateLegacyClaudeHooksJson(cwd, outErrors);
 
       // 2. MCP config in .claude/mcp.json and .mcp.json (project root)
       const claudeDir = path.join(cwd, ".claude");
@@ -184,22 +186,26 @@ export function configureHarness(
           return typeof h?.command === "string" && h.command.includes("septum-pre-write");
         });
         const canonicalHook = {
-          matcher: "Write|Edit|NotebookEdit",
+          matcher: "Write|Edit|MultiEdit|NotebookEdit",
           hooks: [
             {
               type: "command",
               command:
-                "sh -c 'ROOT=\"$(pwd -P)\"; for d in .claude .gemini .codex opencode .agents; do if [ -f \"$ROOT/$d/hooks/septum-pre-write.sh\" ]; then exec \"$ROOT/$d/hooks/septum-pre-write.sh\" --exit-code-2 \"$@\"; fi; done; exit 0'",
+                "sh -c 'ROOT=\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)}\"; case \"$ROOT\" in */.claude|*/.codex|*/.agents|*/.gemini|*/opencode) ROOT=\"$(dirname \"$ROOT\")\" ;; esac; for d in .claude .gemini .codex opencode .agents; do if [ -f \"$ROOT/$d/hooks/septum-pre-write.sh\" ]; then exec \"$ROOT/$d/hooks/septum-pre-write.sh\" --claude \"$@\"; fi; done; echo \"[septum] Warning: septum-pre-write.sh not found under $ROOT\" >&2; exit 0'",
             },
           ],
         };
+        const hasStaleClaudeHook = preToolHooks.some((h: any) => {
+          const s = JSON.stringify(h);
+          return s.includes("septum-pre-write") && (s.includes("--exit-code-2") || s.includes('ROOT=\\"$(pwd -P)\\"'));
+        });
         if (!hasSeptumHook) {
           preToolHooks.push(canonicalHook);
           claudeHooks.PreToolUse = preToolHooks;
           claudeSettings.hooks = claudeHooks;
           writeJsonFile(claudeSettingsPath, claudeSettings);
           console.log("  ✓ Configured Claude Code lifecycle boundary guard: '.claude/settings.json'.");
-        } else if (force) {
+        } else if (force || hasStaleClaudeHook) {
           const cleanedHooks: any[] = [];
           for (const h of preToolHooks) {
             if (Array.isArray(h?.hooks)) {
@@ -219,7 +225,11 @@ export function configureHarness(
           claudeHooks.PreToolUse = cleanedHooks;
           claudeSettings.hooks = claudeHooks;
           writeJsonFile(claudeSettingsPath, claudeSettings);
-          console.log("  ✓ Force-regenerated Claude Code lifecycle boundary guard: '.claude/settings.json' (--force).");
+          console.log(
+            force
+              ? "  ✓ Force-regenerated Claude Code lifecycle boundary guard: '.claude/settings.json' (--force)."
+              : "  ✓ Migrated Claude Code lifecycle boundary guard: '.claude/settings.json'."
+          );
         }
         configured.push(".claude/settings.json");
       }
@@ -289,21 +299,25 @@ export function configureHarness(
           return typeof h?.command === "string" && h.command.includes("septum-pre-write");
         });
         const canonicalHook = {
-          matcher: "Write|Edit|Bash",
+          matcher: "Write|Edit|apply_patch",
           hooks: [
             {
               type: "command",
               command:
-                "sh -c 'ROOT=\"$(pwd -P)\"; for d in .codex .gemini .claude opencode .agents; do if [ -f \"$ROOT/$d/hooks/septum-pre-write.sh\" ]; then exec \"$ROOT/$d/hooks/septum-pre-write.sh\" --exit-code-2 \"$@\"; fi; done; exit 0'",
+                "sh -c 'ROOT=\"${CODEX_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)}\"; case \"$ROOT\" in */.claude|*/.codex|*/.agents|*/.gemini|*/opencode) ROOT=\"$(dirname \"$ROOT\")\" ;; esac; for d in .codex .gemini .claude opencode .agents; do if [ -f \"$ROOT/$d/hooks/septum-pre-write.sh\" ]; then exec \"$ROOT/$d/hooks/septum-pre-write.sh\" --codex \"$@\"; fi; done; echo \"[septum] Warning: septum-pre-write.sh not found under $ROOT\" >&2; exit 0'",
             },
           ],
         };
+        const hasStaleCodexHook = preToolUse.some((h: any) => {
+          const s = JSON.stringify(h);
+          return s.includes("septum-pre-write") && (!s.includes("--codex") || !s.includes("CODEX_PROJECT_DIR") || h?.matcher === "Write|Edit|Bash|apply_patch");
+        });
         if (!hasSeptumHook) {
           preToolUse.push(canonicalHook);
           codexHooksConfig.hooks.PreToolUse = preToolUse;
           writeJsonFile(codexHooksPath, codexHooksConfig);
           console.log("  ✓ Configured Codex CLI lifecycle boundary guard: '.codex/hooks.json'.");
-        } else if (force || legacy) {
+        } else if (force || legacy || hasStaleCodexHook) {
           const cleanedHooks: any[] = [];
           for (const h of preToolUse) {
             if (Array.isArray(h?.hooks)) {
@@ -333,8 +347,26 @@ export function configureHarness(
       const configured: string[] = [];
 
       // 1. Skills and Hook scripts in opencode/ (rules omitted as Opencode does not support rules/)
-      scaffoldHarnessCustomizations("opencode", cwd, force, outErrors, { includeRules: false });
-      configured.push("opencode/ (skills, hooks)");
+      scaffoldHarnessCustomizations("opencode", cwd, force, outErrors, { includeRules: false, includeHooks: false });
+      configured.push("opencode/ (skills)");
+
+      // Boundary guard via OpenCode v2 plugin (ctx.tool.hook("execute.before")), not hooks
+      const pluginPath = path.join(cwd, ".opencode", "plugins", "septum.ts");
+      const pluginExisting = fs.existsSync(pluginPath) ? fs.readFileSync(pluginPath, "utf-8") : null;
+      if (pluginExisting === null || (pluginExisting !== SEPTUM_OPENCODE_PLUGIN && (force || pluginExisting.startsWith(SEPTUM_OPENCODE_PLUGIN_MARKER)))) {
+        fs.mkdirSync(path.dirname(pluginPath), { recursive: true });
+        fs.writeFileSync(pluginPath, SEPTUM_OPENCODE_PLUGIN, "utf-8");
+        console.log("  ✓ Deployed OpenCode boundary guard plugin: '.opencode/plugins/septum.ts'.");
+      }
+      const singularPluginPath = path.join(cwd, ".opencode", "plugin", "septum.ts");
+      if (fs.existsSync(singularPluginPath)) {
+        const singularExisting = fs.readFileSync(singularPluginPath, "utf-8");
+        if (singularExisting !== SEPTUM_OPENCODE_PLUGIN && (force || singularExisting.startsWith(SEPTUM_OPENCODE_PLUGIN_MARKER))) {
+          fs.writeFileSync(singularPluginPath, SEPTUM_OPENCODE_PLUGIN, "utf-8");
+          console.log("  ✓ Migrated OpenCode boundary guard plugin: '.opencode/plugin/septum.ts'.");
+        }
+      }
+      configured.push(".opencode/plugins/septum.ts");
 
       // 2. MCP config in opencode.json (project root)
       const configPath = path.join(cwd, "opencode.json");
@@ -366,8 +398,8 @@ export function configureHarness(
       const configured: string[] = [];
 
       // 1. Skills and Hook scripts in .agents/ + AGENTS.md root guidance (rules omitted as standard uses AGENTS.md)
-      scaffoldHarnessCustomizations(".agents", cwd, force, outErrors, { rootDoc: "AGENTS.md", includeRules: false });
-      configured.push(".agents/ (skills, hooks)");
+      scaffoldHarnessCustomizations(".agents", cwd, force, outErrors, { rootDoc: "AGENTS.md", includeRules: false, includeHooks: false });
+      configured.push(".agents/ (skills)");
 
       // 2. MCP config in .agents/mcp.json
       const agentsDir = path.join(cwd, ".agents");
@@ -406,7 +438,7 @@ export function scaffoldHarnessCustomizations(
   cwd: string = process.cwd(),
   force: boolean = false,
   outErrors?: string[],
-  options?: { rootDoc?: string; includeRules?: boolean }
+  options?: { rootDoc?: string; includeRules?: boolean; includeHooks?: boolean }
 ): void {
   const targetDir = path.join(cwd, harnessDirName);
   if (!fs.existsSync(targetDir)) {
@@ -482,6 +514,9 @@ export function scaffoldHarnessCustomizations(
     }
   }
 
+  // Harnesses without a hook system (OpenCode: plugins; .agents: none) skip hook scaffolding.
+  if (options?.includeHooks === false) return;
+
   // 3. Shared Hook Scripts: <harnessDir>/hooks/septum-pre-write.sh & septum-post-write.sh
   ensureHarnessHookScripts(harnessDirName, cwd, force);
   console.log(`  ✓ Deployed lifecycle hook scripts in '${harnessDirName}/hooks/'.`);
@@ -527,8 +562,12 @@ export function deployHarnessHooksJson(
       const existingEntries = Array.isArray(targetNs[eventName]) ? [...targetNs[eventName]] : [];
       const isSeptumCommand = (cmd: unknown) =>
         typeof cmd === "string" && (cmd.includes("septum-pre-write") || cmd.includes("septum-post-write"));
+      // Legacy wrappers resolved the root via `pwd -P`, which is the .agents/ dir for Antigravity and never matched.
+      const isStale = (cmd: unknown) => typeof cmd === "string" && isSeptumCommand(cmd) && cmd.includes("pwd -P");
+      const hasStale = existingEntries.some((entry: any) =>
+        Array.isArray(entry?.hooks) ? entry.hooks.some((h: any) => isStale(h?.command)) : isStale(entry?.command));
 
-      if (!force) {
+      if (!force && !hasStale) {
         const hasManagedHook = existingEntries.some((entry: any) => {
           if (Array.isArray(entry?.hooks)) {
             return entry.hooks.some((h: any) => isSeptumCommand(h?.command));
@@ -606,14 +645,14 @@ export function ensureHarnessHookScripts(
   return { preWrite: preWriteHook, postWrite: postWriteHook };
 }
 
-// Backward-compatibility wrapper for Antigravity (.gemini)
+// Backward-compatibility wrapper for Antigravity (.agents)
 export function ensureSharedHookScripts(cwd: string, force: boolean = false): { preWrite: string; postWrite: string } {
-  return ensureHarnessHookScripts(".gemini", cwd, force);
+  return ensureHarnessHookScripts(".agents", cwd, force);
 }
 
-// Backward-compatibility wrapper for Antigravity (.gemini)
+// Backward-compatibility wrapper for Antigravity (.agents)
 export function scaffoldAgentCustomizations(cwd: string, force: boolean = false, outErrors?: string[]): void {
-  scaffoldHarnessCustomizations(".gemini", cwd, force, outErrors, { includeRules: true });
+  scaffoldHarnessCustomizations(".agents", cwd, force, outErrors, { includeRules: true });
 }
 
 export function appendTomlMcpServer(

@@ -10,6 +10,8 @@ export async function runCLI(argv: string[]): Promise<void> {
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
         force: { type: "boolean", short: "f" },
+        yes: { type: "boolean", short: "y" },
+        harness: { type: "string" },
         json: { type: "boolean" },
         strict: { type: "boolean" },
         staged: { type: "boolean" },
@@ -47,7 +49,12 @@ export async function runCLI(argv: string[]): Promise<void> {
       case "init": {
         const { handleInitCommand } = await import("./commands/init.ts");
         const force = Boolean(flags.force);
-        await handleInitCommand(force);
+        const yes = Boolean(flags.yes);
+        const rawHarness = typeof flags.harness === "string" ? flags.harness : undefined;
+        const harnesses = rawHarness
+          ? rawHarness.split(",").map((h) => h.trim()).filter(Boolean)
+          : undefined;
+        await handleInitCommand({ force, yes, harnesses });
         break;
       }
 

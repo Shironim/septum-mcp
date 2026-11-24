@@ -12,7 +12,26 @@ import { resolveWorkspaceRoot } from "../../core/resolver/path-resolver.ts";
 import { promptSelectHarnesses } from "../ui/prompts.ts";
 import { configureHarness, SUPPORTED_HARNESSES } from "../scaffold/harness-config.ts";
 
-export async function handleInitCommand(force: boolean = false): Promise<void> {
+export interface InitCommandOptions {
+  force?: boolean;
+  yes?: boolean;
+  harnesses?: string[];
+}
+
+export async function handleInitCommand(forceOrOptions: boolean | InitCommandOptions = false): Promise<void> {
+  const opts: InitCommandOptions = typeof forceOrOptions === "boolean" ? { force: forceOrOptions } : forceOrOptions;
+  const force = Boolean(opts.force);
+  const yes = Boolean(opts.yes);
+  const requestedHarnesses = opts.harnesses;
+  if (requestedHarnesses && requestedHarnesses.length > 0) {
+    const validIds = new Set(SUPPORTED_HARNESSES.map((h) => h.id));
+    const invalid = requestedHarnesses.filter((id) => !validIds.has(id));
+    if (invalid.length > 0) {
+      throw new Error(
+        `Unknown harness ID(s): ${invalid.join(", ")}. Supported harnesses: ${SUPPORTED_HARNESSES.map((h) => h.id).join(", ")}.`
+      );
+    }
+  }
   const workspaceRoot = resolveWorkspaceRoot(process.cwd());
   const septumDir = path.join(workspaceRoot, ".septum");
   if (!fs.existsSync(septumDir)) {
@@ -47,8 +66,12 @@ export async function handleInitCommand(force: boolean = false): Promise<void> {
   }
   console.log("\x1b[36m│\x1b[0m");
 
-  // 2. Interactive AI Agent Harness Selection
-  const selectedHarnesses = await promptSelectHarnesses(SUPPORTED_HARNESSES);
+  // 2. AI Agent Harness Selection (explicit --harness, --yes defaults, or interactive prompt)
+  const selectedHarnesses = requestedHarnesses && requestedHarnesses.length > 0
+    ? Array.from(new Set(requestedHarnesses))
+    : yes
+    ? SUPPORTED_HARNESSES.filter((h) => h.selectedByDefault).map((h) => h.id)
+    : await promptSelectHarnesses(SUPPORTED_HARNESSES);
 
   // 3. Configure local project artifacts
   const forceNotice = force ? " (force regeneration of Septum-owned artifacts)" : "";
@@ -154,7 +177,7 @@ export async function handleInitCommand(force: boolean = false): Promise<void> {
     }
 
     const harnessSummaryMap: Record<string, string> = {
-      antigravity: "Antigravity skills, rules, and boundary hooks active in '.gemini/'",
+      antigravity: "Antigravity skills, rules, and boundary hooks active in '.agents/'",
       claude: "Claude Code skills, boundary hooks, and MCP server active in '.claude/', '.mcp.json', and 'CLAUDE.md'",
       codex: "Codex CLI skills, boundary hooks, and MCP server active in '.codex/'",
       opencode: "Opencode skills, boundary hooks, and MCP server active in 'opencode/' and 'opencode.json'",

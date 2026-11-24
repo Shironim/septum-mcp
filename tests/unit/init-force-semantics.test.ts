@@ -100,7 +100,7 @@ describe("F2-07: Narrow --force Semantics on Init", () => {
   it("should force-regenerate shared hook scripts and agent templates", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "septum-force-agent-"));
     try {
-      const geminiDir = path.join(tmpDir, ".gemini");
+      const geminiDir = path.join(tmpDir, ".agents");
       const skillDir = path.join(geminiDir, "skills", "use-septum");
       const rulesDir = path.join(geminiDir, "rules");
       const hooksDir = path.join(geminiDir, "hooks");
@@ -179,8 +179,8 @@ describe("F2-07: Narrow --force Semantics on Init", () => {
       expect(afterWithForce.user_preference).toBe("dark_mode");
       expect(afterWithForce.hooks.PreToolUse).toHaveLength(2);
       expect(afterWithForce.hooks.PreToolUse[0]).toEqual(userHook);
-      expect(afterWithForce.hooks.PreToolUse[1].matcher).toBe("Write|Edit|NotebookEdit");
-      expect(afterWithForce.hooks.PreToolUse[1].hooks[0].command).toContain("--exit-code-2");
+      expect(afterWithForce.hooks.PreToolUse[1].matcher).toBe("Write|Edit|MultiEdit|NotebookEdit");
+      expect(afterWithForce.hooks.PreToolUse[1].hooks[0].command).toContain("--claude");
       expect(afterWithForce.hooks.PreToolUse[1].hooks[0].command).not.toContain("OLD_SEPTUM_COMMAND");
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -209,7 +209,7 @@ describe("F2-07: Narrow --force Semantics on Init", () => {
       const codexAfter = JSON.parse(fs.readFileSync(codexHooksPath, "utf-8"));
       expect(codexAfter.hooks.PreToolUse).toHaveLength(2);
       expect(codexAfter.hooks.PreToolUse[0]).toEqual(codexUserHook);
-      expect(codexAfter.hooks.PreToolUse[1].hooks[0].command).toContain("--exit-code-2");
+      expect(codexAfter.hooks.PreToolUse[1].hooks[0].command).toContain("--codex");
       expect(codexAfter.hooks.PreToolUse[1].hooks[0].command).not.toContain("OLD_CODEX_SEPTUM");
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -65,7 +65,7 @@ describe("F2-06: Config & Template Preservation on Init", () => {
   it("should preserve user customizations in skill, rule, and guard on init without force", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "septum-cfg-custom-agent-"));
     try {
-      const geminiDir = path.join(tmpDir, ".gemini");
+      const geminiDir = path.join(tmpDir, ".agents");
       const skillDir = path.join(geminiDir, "skills", "use-septum");
       const rulesDir = path.join(geminiDir, "rules");
       fs.mkdirSync(skillDir, { recursive: true });
@@ -101,7 +101,7 @@ describe("F2-06: Config & Template Preservation on Init", () => {
   it("should update/regenerate skill and rule on force", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "septum-cfg-force-agent-"));
     try {
-      const geminiDir = path.join(tmpDir, ".gemini");
+      const geminiDir = path.join(tmpDir, ".agents");
       const skillDir = path.join(geminiDir, "skills", "use-septum");
       const rulesDir = path.join(geminiDir, "rules");
       fs.mkdirSync(skillDir, { recursive: true });
@@ -193,20 +193,21 @@ describe("F2-06: Config & Template Preservation on Init", () => {
       expect(ids).not.toContain("pi");
     });
 
-    it("should scaffold skills, rules, hooks, and mcp for Antigravity (.gemini)", () => {
+    it("should scaffold skills, rules, hooks, and mcp for Antigravity (.agents)", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "septum-test-antigravity-"));
       try {
         const res = configureHarness("antigravity", tmpDir, false);
-        expect(res).toContain(".gemini/");
+        expect(res).toContain(".agents/");
 
-        expect(fs.existsSync(path.join(tmpDir, ".gemini", "skills", "use-septum", "SKILL.md"))).toBe(true);
-        expect(fs.existsSync(path.join(tmpDir, ".gemini", "rules", "septum-boundary.md"))).toBe(true);
-        expect(fs.existsSync(path.join(tmpDir, ".gemini", "hooks", "septum-pre-write.sh"))).toBe(true);
-        expect(fs.existsSync(path.join(tmpDir, ".gemini", "hooks", "septum-post-write.sh"))).toBe(true);
-        expect(fs.existsSync(path.join(tmpDir, ".gemini", "hooks.json"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, ".agents", "skills", "use-septum", "SKILL.md"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, ".agents", "rules", "septum-boundary.md"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, ".agents", "hooks", "septum-pre-write.sh"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, ".agents", "hooks", "septum-post-write.sh"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, ".agents", "hooks.json"))).toBe(true);
 
-        const mcp = JSON.parse(fs.readFileSync(path.join(tmpDir, ".gemini", "mcp_config.json"), "utf-8"));
-        expect(mcp.mcpServers.septum).toBeDefined();
+        expect(fs.existsSync(path.join(tmpDir, ".gemini"))).toBe(false);
+        const hooks = JSON.parse(fs.readFileSync(path.join(tmpDir, ".agents", "hooks.json"), "utf-8"));
+        expect(hooks["septum-boundary-guard"].PreToolUse[0].hooks[0].command).toBe("./hooks/septum-pre-write.sh");
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -266,8 +267,8 @@ describe("F2-06: Config & Template Preservation on Init", () => {
         expect(fs.existsSync(path.join(tmpDir, "opencode", "skills", "use-septum", "SKILL.md"))).toBe(true);
         // Rules must NOT be generated for Opencode
         expect(fs.existsSync(path.join(tmpDir, "opencode", "rules", "septum-boundary.md"))).toBe(false);
-        expect(fs.existsSync(path.join(tmpDir, "opencode", "hooks", "septum-pre-write.sh"))).toBe(true);
-        expect(fs.existsSync(path.join(tmpDir, "opencode", "hooks.json"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, "opencode", "hooks", "septum-pre-write.sh"))).toBe(false);
+        expect(fs.existsSync(path.join(tmpDir, ".opencode", "plugins", "septum.ts"))).toBe(true);
 
         const mcp = JSON.parse(fs.readFileSync(path.join(tmpDir, "opencode.json"), "utf-8"));
         expect(mcp.mcp.septum).toBeDefined();
@@ -287,8 +288,8 @@ describe("F2-06: Config & Template Preservation on Init", () => {
         // Rules must NOT be generated for .agents standard
         expect(fs.existsSync(path.join(tmpDir, ".agents", "rules", "septum-boundary.md"))).toBe(false);
         expect(fs.existsSync(path.join(tmpDir, "AGENTS.md"))).toBe(true);
-        expect(fs.existsSync(path.join(tmpDir, ".agents", "hooks", "septum-pre-write.sh"))).toBe(true);
-        expect(fs.existsSync(path.join(tmpDir, ".agents", "hooks.json"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, ".agents", "hooks", "septum-pre-write.sh"))).toBe(false);
+        expect(fs.existsSync(path.join(tmpDir, ".agents", "hooks.json"))).toBe(false);
 
         const mcp = JSON.parse(fs.readFileSync(path.join(tmpDir, ".agents", "mcp.json"), "utf-8"));
         expect(mcp.mcpServers.septum).toBeDefined();
