@@ -293,7 +293,7 @@ export function createMcpServer(manager: WorkspaceManager): Server {
             content: [
               {
                 type: "text",
-                text: `[Septum MCP Error] Workspace '${root}' belum diinisialisasi. Jalankan 'septum init' di terminal workspace atau gunakan tool 'septum_map' dengan action='register' untuk mendaftarkan domain.`,
+                text: `[Septum MCP Error] Workspace '${root}' belum diinisialisasi. Jalankan 'septum init' di terminal workspace atau gunakan tool septum_map({action:'register', domain:'<name>', root:'<path>'}) untuk mendaftarkan domain.`,
               },
             ],
           });

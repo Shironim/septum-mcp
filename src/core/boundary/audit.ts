@@ -328,7 +328,7 @@ export async function evaluateBoundary(
       message: hasViolations
         ? `${totalViolations} boundary violation(s) detected across ${filesToCheck.length} file(s).`
         : Object.keys(config?.domains || {}).length === 0
-        ? `All ${filesToCheck.length} file(s) approved. [Septum Notice: Domain catalog is currently unindexed. Run 'septum_map' with action='register' to initialize bounded contexts.]`
+        ? `All ${filesToCheck.length} file(s) approved. [Septum Notice: Domain catalog is currently unindexed. Run septum_map({action:'register', domain:'<name>', root:'<path>'}) to initialize bounded contexts.]`
         : `All ${filesToCheck.length} file(s) approved. No boundary violations detected.`,
     });
   }
@@ -363,7 +363,7 @@ export async function evaluateBoundary(
       impact_summary: impactSummary,
       message:
         Object.keys(config?.domains || {}).length === 0
-          ? "Boundary integrity check failed: Domain catalog is currently unindexed. Run 'septum_map' with action='register' to initialize bounded contexts."
+          ? "Boundary integrity check failed: Domain catalog is currently unindexed. Run septum_map({action:'register', domain:'<name>', root:'<path>'}) to initialize bounded contexts."
           : newViolations.some((v) => v.rule === "unmapped_domain")
           ? "Boundary integrity check failed: File does not belong to any declared bounded context."
           : "Boundary violation detected. Proposed imports violate bounded context architecture.",
@@ -387,7 +387,7 @@ export async function evaluateBoundary(
       preExistingViolations.length > 0
         ? `Approved. Proposed imports do not introduce new boundary violations (${preExistingViolations.length} pre-existing circular dependencies noted in codebase).`
         : Object.keys(config?.domains || {}).length === 0
-        ? "No boundary violations detected. [Septum Notice: Domain catalog is currently unindexed. Run 'septum_map' with action='register' to initialize bounded contexts.]"
+        ? "No boundary violations detected. [Septum Notice: Domain catalog is currently unindexed. Run septum_map({action:'register', domain:'<name>', root:'<path>'}) to initialize bounded contexts.]"
         : enforcementMode === "warn"
         ? "Approved under 'warn' enforcement (unlisted allowed_dependencies are not blocked; only explicit forbidden_dependencies are rejected)."
         : impact && impact.direct_dependents_count > 0
