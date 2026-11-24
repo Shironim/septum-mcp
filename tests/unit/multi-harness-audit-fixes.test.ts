@@ -116,7 +116,12 @@ describe("Multi-harness audit fixes", () => {
 
   it("executes Claude and Codex wrappers safely even when cwd is a harness subdirectory", () => {
     const root = createHookWorkspace();
+    const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "septum-bin-shim-"));
     try {
+      const septumShim = path.join(shimDir, "septum");
+      fs.writeFileSync(septumShim, `#!/usr/bin/env sh\nexec bun run "${BIN_PATH}" "$@"\n`, { mode: 0o755 });
+      const envWithShim = { ...process.env, PATH: `${shimDir}:${process.env.PATH ?? ""}` };
+
       configureHarness("claude", root, false);
       configureHarness("codex", root, false);
 
@@ -129,6 +134,7 @@ describe("Multi-harness audit fixes", () => {
         cwd: path.join(root, ".claude"),
         input: escapePayload,
         encoding: "utf-8",
+        env: envWithShim,
       });
       expect(claudeSubRes.status).toBe(2);
       expect(claudeSubRes.stderr).toContain("escapes workspace boundary");
@@ -137,11 +143,13 @@ describe("Multi-harness audit fixes", () => {
         cwd: path.join(root, ".codex"),
         input: escapePayload,
         encoding: "utf-8",
+        env: envWithShim,
       });
       expect(codexSubRes.status).toBe(2);
       expect(codexSubRes.stderr).toContain("escapes workspace boundary");
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(shimDir, { recursive: true, force: true });
     }
   });
 
