@@ -16,7 +16,7 @@ The stdio server advertises `resources` and `prompts` during `initialize`, along
 
 Data resources default to the most recently acquired workspace and fall back to the server's initial workspace. Append `?workspace=` followed by a URL-encoded workspace path to select a specific workspace. See [workspace lifecycle](workspace-lifecycle.md) for synchronization and workspace selection.
 
-For `septum://health`, a workspace with an initialization marker and no active context returns `inactive`. An uninitialized workspace returns `not_indexed`. Domain and boundary resources return a `not_indexed` JSON body when the workspace is uninitialized. Otherwise they wait for readiness, flush pending watcher work, reload policy and run through the workspace queue. An unknown URI returns JSON-RPC error `-32002` with `data.uri`. A failure during preparation, such as malformed policy JSON, returns an internal error.
+For `septum://health`, when no active context is loaded, the server first reads `.septum/septum.db` read-only if present and returns the persisted `sync_state` (with `context_active: false`), falling back to `inactive` only if the database is missing or unreadable despite an initialization marker. An uninitialized workspace returns `not_indexed`. Domain and boundary resources return a `not_indexed` JSON body when the workspace is uninitialized. Otherwise they wait for readiness, flush pending watcher work, reload policy and run through the workspace queue. An unknown URI returns JSON-RPC error `-32002` with `data.uri`. A failure during preparation, such as malformed policy JSON, returns an internal error.
 
 ## Opening the panel
 

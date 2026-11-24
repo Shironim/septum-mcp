@@ -15,7 +15,7 @@ Deep context is the TypeScript-specific engine selected by `septum_symbol` with 
 
 ## Selection and supported input
 
-Targets must be indexed `.ts`, `.tsx`, `.mts` or `.cts` declarations. This path does not accept JavaScript or other languages. Use [source context](septum-symbol.md) for those formats.
+Targets for the TypeScript deep engine must be indexed `.ts`, `.tsx`, `.mts` or `.cts` declarations. When `context_mode: "deep"` is requested on another indexed extension, `retrieveContext` delegates to the universal fallback ([universal-context.ts](../../src/core/retrieval/universal-context.ts), policy `referenced-universal-declarations/v1`) instead of returning `unsupported`. That fallback returns the target declaration, target-file import relationships and 1-hop `outbound_calls` (capped at 32 items, default `budget_bytes` `65,536`, no `continuation` paging, and omits `v4` fields such as `task_sufficiency`, `freshness`, `context_mode`, `completeness_scope` and `capability_limits`). Use [source context](septum-symbol.md) when bounded line-level inspection is desired.
 
 The engine requires one declaration. Ambiguous results include up to five candidate references and omission accounting. `symbol_ref`, `file_path` and `domain` narrow selection. Deep context rejects `include_source`, `source_start_line` and `source_line_limit`.
 
@@ -64,7 +64,7 @@ Pagination does not recover declarations omitted by selection-capacity limits. I
 
 Each selected source read is compared against its indexed hash. A mismatch produces `source_differs_from_index` and omits that source's indexed slice. Unavailable or escaping source produces diagnostics. An index identity change during retrieval returns `index_changed`.
 
-Other outcomes include `invalid_query`, `not_found`, `ambiguous`, `stale_reference`, `unsupported` and `invalid_budget`; public schema validation can reject bad inputs before these handler paths run. Incomplete indexes and source/resource omissions make the result partial. Side-effect imports, module execution, reexports and unsupported bindings can remain unexpanded with diagnostics.
+Other outcomes include `invalid_query`, `not_found`, `ambiguous`, `stale_reference` and `invalid_budget` (plus `file_not_indexed` or `source_unavailable` from the universal fallback); public schema validation can reject bad inputs before these handler paths run. Incomplete indexes and source/resource omissions make the result partial. Side-effect imports, module execution, reexports and unsupported bindings can remain unexpanded with diagnostics.
 
 ## Implementation and regression evidence
 

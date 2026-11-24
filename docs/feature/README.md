@@ -2,7 +2,7 @@
 
 This directory documents implemented behavior, tool contracts, and known limitations for version `0.5.2` ([package.json](../../package.json)). Installed binaries or running MCP processes may differ if built from another revision.
 
-Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. The stdio server exposes four MCP tools, five resources (plus one domain resource template) and five workflow prompts. CLI commands initialize and synchronize the index, summarize telemetry, audit boundaries and run hooks. The index describes static source evidence.
+Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. The stdio server exposes five MCP tools (four analysis tools plus the app-only `septum_app` entrypoint), five resources (plus one domain resource template) and five workflow prompts. CLI commands initialize and synchronize the index, summarize telemetry, audit boundaries and run hooks. The index describes static source evidence.
 
 ## Feature documents
 
@@ -32,7 +32,7 @@ Septum indexes selected source declarations, imports, domain ownership and stati
 | `hook pre-write` | Read a supported JSON edit payload from stdin and evaluate candidate imports |
 | `help`, `version` | Show CLI information; no command also shows help |
 
-The package script named `ingest` invokes `sync`; `ingest` is not a CLI subcommand. Canonical MCP names are `septum_map`, `septum_symbol`, `septum_slice` and `septum_boundary`. Argument normalizers accept aliases, but examples here use canonical inputs.
+The package script named `ingest` invokes `sync`; `ingest` is not a CLI subcommand. Canonical MCP names are `septum_map`, `septum_symbol`, `septum_slice`, `septum_boundary` and the app-only `septum_app`. Argument normalizers accept aliases, but examples here use canonical inputs.
 
 ## Reading results
 
@@ -42,7 +42,7 @@ The package script named `ingest` invokes `sync`; `ingest` is not a CLI subcomma
 - `unknown`, `partial`, stale-source diagnostics and omitted counts are material parts of a result.
 - A successful MCP transport response can contain an analysis rejection or incomplete result.
 - Map uses item limits. Source context uses line limits and can apply a byte budget to source text in automatic mode. Deep context measures the serialized tool response.
-- All four MCP tools default to `format: "text"` (compact markdown summary) and accept `format: "json"` for structured JSON payloads. MCP resources always return `application/json`.
+- The four analysis MCP tools (`septum_map`, `septum_symbol`, `septum_slice`, `septum_boundary`) default to `format: "text"` (compact markdown summary) and accept `format: "json"` for structured JSON payloads; `septum_app` only accepts `workspace_path` and returns the map catalog payload. MCP resources always return `application/json`, except `ui://septum/app.html` (`text/html;profile=mcp-app`).
 
 Pass `workspace_path` when calling tools across repositories. The server resolves workspace roots, awaits readiness and flushes pending watcher work before indexed queries. An uninitialized workspace can return a map diagnostic or accept domain registration. Resources use the initial workspace and have their own initialization responses.
 
@@ -50,7 +50,7 @@ Pass `workspace_path` when calling tools across repositories. The server resolve
 
 [language-capabilities.ts](../../src/core/parser/language-capabilities.ts) registers partial declaration extraction for TypeScript, JavaScript, PHP, Python, Go, Rust, Java, C#, Ruby, Blade and embedded scripts in Vue/Astro/Svelte. For TypeScript and JavaScript files, [typescript.ts](../../src/core/parser/extractors/typescript.ts) falls back to the official TypeScript compiler AST ([typescript-compiler-fallback.ts](../../src/core/parser/extractors/typescript-compiler-fallback.ts)) when `tree-sitter-wasms` reports `syntax_recovery` on valid modern syntax. Declaration support, import resolution, deep context and caller analysis have different coverage.
 
-Kotlin, Scala and Zig are recognized for unsupported-file diagnostics, with no registered extractor. Rust, Ruby, Java and C# have bounded import resolvers with language-specific limitations; see [import resolution](import-resolution.md). Extractor `is_external` flags do not override the resolver's final relationship evidence. Deep context accepts `.ts`, `.tsx`, `.mts` and `.cts` targets.
+Kotlin, Scala and Zig are recognized for unsupported-file diagnostics, with no registered extractor. Rust, Ruby, Java and C# have bounded import resolvers with language-specific limitations; see [import resolution](import-resolution.md). Extractor `is_external` flags do not override the resolver's final relationship evidence. Deep context uses `referenced-typescript-declarations/v4` for `.ts`, `.tsx`, `.mts` and `.cts` targets and delegates other indexed extensions to the `referenced-universal-declarations/v1` fallback.
 
 ## Source and verification owners
 

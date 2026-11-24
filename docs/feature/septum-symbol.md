@@ -38,7 +38,7 @@ When the handler receives an ingestion pipeline, it can initialize an empty cata
 | No source options and target is `.ts`, `.tsx`, `.mts` or `.cts` | Deep context |
 | Other known target extension | Bounded source inspection |
 
-Without a resolved target path, automatic selection initially attempts deep context. Setting `context_mode: "source"` or passing a source option selects source inspection and rejects `budget_bytes` and `continuation`. When automatic selection chooses source inspection for a non-TypeScript target, it accepts `budget_bytes` and rejects `continuation`. See [deep context](symbol-context-contract.md) for its response format.
+Without a resolved target path, automatic selection initially attempts deep context; for non-TypeScript indexed targets, explicit `context_mode: "deep"` delegates to the universal context fallback (`referenced-universal-declarations/v1`). Setting `context_mode: "source"` or passing a source option selects bounded source inspection and rejects `budget_bytes`, `max_depth` and `continuation`. When automatic selection chooses source inspection for a non-TypeScript target, it accepts `budget_bytes` and `max_depth` and rejects `continuation`. See [deep context](symbol-context-contract.md) for its response format.
 
 ## Bounded source behavior
 
@@ -69,7 +69,7 @@ The response separates `call_sites`, `runtime_imports`, `type_only_imports`, `im
 | Low | Remaining indexed cases |
 | Unknown | No symbol/dependency index evidence |
 
-`total_dependents` counts returned legacy inbound entries; it is not a complete count of runtime consumers.
+`total_dependents` counts distinct affected files in `inbound_callers` (matching `affected_files_count`); it is not a complete count of runtime consumers.
 
 ## Evidence metadata
 

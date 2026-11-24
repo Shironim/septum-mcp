@@ -6,18 +6,19 @@ Septum can scaffold harness hooks and Git pre-commit checks through `init`. Gene
 
 `septum hook pre-write` reads JSON from stdin and loads policy from `.septum/septum.db` in the workspace selected by `SEPTUM_HOOK_ROOT` or the caller’s current directory.
 
-An absent database, empty input or invalid JSON passes through with exit code 0. A supported payload is reconstructed before import extraction. Unsupported payloads emit an allow decision with `coverage: "unknown"`.
+An absent database, empty input or invalid JSON passes through with exit code 0. A supported payload is reconstructed before import extraction. Unsupported payloads record `decision: "allow"` with `coverage: "unknown"` in telemetry and emit `{"decision": "ask"}` on stdout in non-quiet mode (or empty stdout in quiet harness modes).
 
 | Payload content | Candidate interpretation |
 | --- | --- |
 | `CodeContent`, `content`, `Content` | Full proposed file, including an empty string |
 | `old_string`/`TargetContent` plus replacement | Current source with replacement applied |
 | `edits` or `ReplacementChunks` | Sequential replacements when old/new values are available |
+| `command` containing `*** Begin Patch` (Codex `apply_patch`) | Per-file `Add` (`complete_candidate`) or `Update` (`replacement_fragment`) candidates |
 | Replacement without old content | Replacement fragment |
 
 - **Envelopes & paths:** Payload envelopes include `tool_input`, `arguments`, `toolCall.args`, and direct fields, with supported target path aliases. Containment checks run before existing-source reads.
 - **Replacement matching:** `old_string` / `TargetContent` must be nonempty and match current source; multiple matches require `replace_all`. Missing or ambiguous matches fail.
-- **Evaluation & exit codes:** For a nonempty candidate in a mapped source domain, the CLI parses candidate imports and runs `checkProposedChanges` (unsupported/degraded parsing of recognized source fails the check). Policy violations emit `decision: "deny"` and exit `1` (or `2` with `--exit-code-2`, `--claude`, or `--cursor`). Other processing errors exit nonzero without guaranteeing the same deny JSON.
+- **Evaluation & exit codes:** For a nonempty candidate in a mapped source domain, the CLI parses candidate imports and runs `checkProposedChanges` (unsupported/degraded parsing of recognized source fails the check). Policy violations exit `1` (or `2` with `--exit-code-2`, `--claude`, `--cursor`, `--codex`, or `--opencode`). Default and `--exit-code-2` modes emit `{"decision": "deny", "reason": ...}` on stdout, while `--claude`, `--cursor`, `--codex`, and `--opencode` enable quiet stdout mode (suppressing stdout JSON and writing the reason to stderr only). Normalization/containment and AST/boundary evaluation errors use the same `blockHook` exit and output path.
 - **Coverage & bypasses:** Successful candidates emit `coverage: "complete_candidate"` or `"replacement_fragment"` with an `evaluated` field. Empty candidates skip parsing, and unmapped source domains pass with `evaluated: "unmapped_domain"`.
 - **Scope limits:** The hook checks candidate import policy only—not complete cycles, runtime effects, or the MCP boundary handler's full sync/freshness guards. Fragment coverage does not certify the reconstructed whole file, and arbitrary shell commands or free-form patches are outside this contract.
 
