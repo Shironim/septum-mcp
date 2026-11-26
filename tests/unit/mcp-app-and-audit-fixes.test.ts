@@ -60,7 +60,7 @@ describe("MCP Server Audit Fixes & MCP App UI (SEP-1865)", () => {
     expect((symbolTool?._meta as any)?.ui).toBeUndefined();
 
     expect((appTool?._meta as any)?.ui?.resourceUri).toBe("ui://septum/app.html");
-    expect((appTool?._meta as any)?.ui?.visibility).toEqual(["app"]);
+    expect((appTool?._meta as any)?.ui?.visibility).toEqual(["model", "app"]);
     expect((appTool?._meta as any)?.["com.google.antigravity/ui"]?.entrypoints).toEqual([
       { type: "aux_pane", title: "Septum Architecture" },
       { type: "global", title: "Septum" },

@@ -33,6 +33,7 @@ const PLAYBOOKS = [
     ],
     render(args: Record<string, string | undefined>) {
       const workspacePath = normalizeTrimmedArg(args.workspace_path);
+      const appArgs = JSON.stringify(workspacePath ? { workspace_path: workspacePath } : {});
       const mapArgs = JSON.stringify({
         action: "catalog",
         detail_level: "compact",
@@ -44,8 +45,8 @@ const PLAYBOOKS = [
         : " If the server runs globally without client roots, include `workspace_path` with the active workspace root (and `?workspace=<path>` when reading `septum://apps`).";
       return userTextMessage("Open Septum Architecture UI and inspect workspace coverage.", [
         "Open the Septum Architecture UI and inspect workspace coverage:",
-        "1. Open Septum Architecture from the host's app controls when available. The host uses the app-only `septum_app` entrypoint.",
-        `2. Call \`septum_map\` with \`${mapArgs}\` to inspect topology and index health. Check \`status\` and \`health\`, including \`coverage\`, \`unresolved_imports\` and \`incomplete_imports\`. Read \`${appsUri}\` for partial-file samples when supported.${workspaceHint}`,
+        `1. Call \`septum_app\` with \`${appArgs}\` to open the Septum Architecture UI panel in the side pane.${workspaceHint}`,
+        `2. Inspect the returned topology and index health (or call \`septum_map\` with \`${mapArgs}\`). Check \`status\` and \`health\`, including \`coverage\`, \`unresolved_imports\` and \`incomplete_imports\`. Read \`${appsUri}\` for partial-file samples when supported.`,
         "3. If `status` is `NOT_INDEXED` or `coverage` is `partial`, list the uncovered files or conditions and give concrete next steps (`septum init`, `septum sync`, `septum_map(action='register')`, or `ignore_patterns` / alias fixes).",
       ]);
     },

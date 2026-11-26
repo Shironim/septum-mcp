@@ -316,7 +316,7 @@ export const TOOL_CATALOG = [
     _meta: {
       ui: {
         resourceUri: SEPTUM_APP_URI,
-        visibility: ["app"],
+        visibility: ["model", "app"],
       },
       "com.google.antigravity/ui": {
         entrypoints: [

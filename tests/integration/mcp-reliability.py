@@ -95,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         }, resources
         tools = {entry['name']: entry for entry in request('tools/list', {})['tools']}
         assert tools['septum_app']['_meta']['ui'] == {
-            'resourceUri': 'ui://septum/app.html', 'visibility': ['app'],
+            'resourceUri': 'ui://septum/app.html', 'visibility': ['model', 'app'],
         }, tools['septum_app']
         for name in ('septum_map', 'septum_slice', 'septum_boundary'):
             assert 'ui' not in tools[name].get('_meta', {}), tools[name]
@@ -103,7 +103,7 @@ with tempfile.TemporaryDirectory(prefix='septum-mcp-regression-') as temporary:
         assert json.loads(app_guide['contents'][0]['text'])['open_via_tools'] == ['septum_app']
         open_apps = request('prompts/get', {'name': 'open-apps', 'arguments': {'workspace_path': str(a)}})
         instruction = open_apps['messages'][0]['content']['text']
-        assert "host's app controls" in instruction and 'app-only `septum_app`' in instruction, instruction
+        assert 'Call `septum_app`' in instruction and 'side pane' in instruction, instruction
         assert '`septum_map`' in instruction and json.dumps(str(a)) in instruction, instruction
         assert tool('septum_app', {'workspace_path': str(a)})['status'] == 'success'
         assert [entry['uriTemplate'] for entry in request('resources/templates/list', {})['resourceTemplates']] == ['septum://domain/{name}']
