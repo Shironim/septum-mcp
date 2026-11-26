@@ -11,12 +11,61 @@ INITIALIZE = json.dumps(dict(
 )) + '\n'
 
 with tempfile.TemporaryDirectory(prefix='septum-invalid-root-') as root:
-    rejected = subprocess.run(CLI, cwd=root, env=ENV, input=INITIALIZE,
-                              capture_output=True, text=True, timeout=8)
-    assert rejected.returncode != 0, rejected
-    assert not rejected.stdout, rejected.stdout
-    assert 'No project marker in CWD' in rejected.stderr, rejected.stderr
-    print('PASS: invalid initial root exits before serving requests')
+    with tempfile.TemporaryFile(mode='w+') as log:
+        p = subprocess.Popen(CLI, cwd=root, env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
+        try:
+            p.stdin.write(INITIALIZE)
+            p.stdin.flush()
+            sel = selectors.DefaultSelector()
+            sel.register(p.stdout, selectors.EVENT_READ)
+            assert sel.select(10), 'initialize timeout in unmarked cwd'
+            init_resp = json.loads(p.stdout.readline())
+            assert 'result' in init_resp, init_resp
+
+            # Calling a tool without workspace_path must return an MCP tool error, not crash the server.
+            call_without_ws = json.dumps(dict(
+                jsonrpc='2.0', id=2, method='tools/call',
+                params=dict(name='septum_map', arguments=dict(action='catalog')),
+            )) + '\n'
+            p.stdin.write(call_without_ws)
+            p.stdin.flush()
+            assert sel.select(10), 'tools/call timeout in unmarked cwd'
+            tool_resp = json.loads(p.stdout.readline())
+            assert tool_resp.get('result', {}).get('isError') is True, tool_resp
+            assert 'No project marker in CWD' in tool_resp['result']['content'][0]['text'], tool_resp
+            sel.close()
+
+            p.stdin.close()
+            p.stdin = None
+            p.wait(timeout=5)
+            assert p.returncode == 0, f'EOF exit code {p.returncode}'
+            print('PASS: unmarked initial root starts lazily, rejects unscoped tool calls cleanly, and exits on EOF')
+        finally:
+            if p.poll() is None:
+                p.terminate()
+            p.wait(timeout=6)
+
+# Global/home directory startup must also succeed initialize without crashing.
+with tempfile.TemporaryFile(mode='w+') as log:
+    p = subprocess.Popen(CLI, cwd=str(pathlib.Path.home()), env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
+    try:
+        p.stdin.write(INITIALIZE)
+        p.stdin.flush()
+        sel = selectors.DefaultSelector()
+        sel.register(p.stdout, selectors.EVENT_READ)
+        assert sel.select(10), 'initialize timeout in home dir'
+        init_resp = json.loads(p.stdout.readline())
+        assert 'result' in init_resp, init_resp
+        sel.close()
+        p.stdin.close()
+        p.stdin = None
+        p.wait(timeout=5)
+        assert p.returncode == 0, f'EOF exit code in home dir: {p.returncode}'
+        print('PASS: home directory startup succeeds initialize and exits cleanly on EOF')
+    finally:
+        if p.poll() is None:
+            p.terminate()
+        p.wait(timeout=6)
 
 with tempfile.TemporaryDirectory(prefix='septum-lifecycle-') as temp:
     root = pathlib.Path(temp)

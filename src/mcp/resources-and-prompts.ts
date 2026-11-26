@@ -254,7 +254,7 @@ export async function readSeptumResource(manager: WorkspaceManager, uri: string,
   }
   const root = workspaceParam
     ? resolveServerWorkspace({ workspacePath: workspaceParam, knownRoots: manager.activeRoots })
-    : (manager.lastRoot ?? manager.initialRoot ?? resolveServerWorkspace());
+    : (manager.primaryClientRoot ?? manager.lastRoot ?? manager.initialRoot ?? resolveServerWorkspace({ clientRoots: manager.clientRoots }));
   if (baseUri === "septum://apps") {
     return jsonResource(uri, JSON.stringify(buildAppsGuide(manager, root), null, 2));
   }

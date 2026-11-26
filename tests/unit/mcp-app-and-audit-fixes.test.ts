@@ -293,4 +293,83 @@ describe("MCP Server Audit Fixes & MCP App UI (SEP-1865)", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("uses MCP client roots/list (filtering unsafe $HOME) and updates on notifications/roots/list_changed", async () => {
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const { ListRootsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+    const { homedir } = await import("node:os");
+    const { pathToFileURL } = await import("node:url");
+    const { createMcpServer } = await import("../../src/mcp/server.ts");
+
+    const rootA = mkdtempSync(join(tmpdir(), "septum-roots-a-"));
+    const rootB = mkdtempSync(join(tmpdir(), "septum-roots-b-"));
+    const manager = new WorkspaceManager();
+    const server = createMcpServer(manager);
+    const client = new Client(
+      { name: "roots-client", version: "1.0.0" },
+      { capabilities: { roots: { listChanged: true } } }
+    );
+    let advertisedRoots = [
+      { uri: pathToFileURL(homedir()).href, name: "home" },
+      { uri: pathToFileURL(rootA).href, name: "repoA" },
+    ];
+    client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: advertisedRoots }));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    try {
+      for (const root of [rootA, rootB]) {
+        mkdirSync(join(root, "src"), { recursive: true });
+        const config = ConfigLoader.getDefaultConfig();
+        config.domains = {
+          app: { root: "src", allowed_dependencies: ["app"], forbidden_dependencies: [], archetypes: {} },
+        };
+        writeFileSync(join(root, "septum.config.json"), JSON.stringify(config));
+        writeFileSync(join(root, "src/index.ts"), "export const ok = true;\n");
+        const db = new SeptumDatabase(join(root, ".septum/septum.db"));
+        const repo = new SeptumRepository(db.raw);
+        await new IngestionPipeline(repo, root).run(config);
+        db.close();
+      }
+
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+      const mapA = await client.callTool({
+        name: "septum_map",
+        arguments: { action: "catalog", format: "json" },
+      });
+      expect(manager.clientRoots).toEqual([rootA]);
+      expect((mapA.structuredContent as any)?.workspace_root).toBe(rootA);
+
+      const healthA = await client.readResource({ uri: "septum://health" });
+      expect(JSON.parse((healthA.contents[0] as { text: string }).text).workspace_root).toBe(rootA);
+
+      advertisedRoots = [{ uri: pathToFileURL(rootB).href, name: "repoB" }];
+      await client.sendRootsListChanged();
+
+      const mapB = await client.callTool({
+        name: "septum_map",
+        arguments: { action: "catalog", format: "json" },
+      });
+      expect(manager.clientRoots).toEqual([rootB]);
+      expect((mapB.structuredContent as any)?.workspace_root).toBe(rootB);
+
+      const explicitA = await client.callTool({
+        name: "septum_map",
+        arguments: { action: "catalog", format: "json", workspace_path: rootA },
+      });
+      expect((explicitA.structuredContent as any)?.workspace_root).toBe(rootA);
+
+      const prompt = await client.getPrompt({ name: "open-apps" });
+      const promptText = (prompt.messages[0]?.content as { text: string }).text;
+      expect(promptText).toContain("workspace_path");
+      expect(promptText).toContain("?workspace=<path>");
+    } finally {
+      await client.close();
+      await server.close();
+      await manager.close();
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
+    }
+  });
 });

@@ -13,6 +13,7 @@ import {
   ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
+  RootsListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   getSeptumPrompt,
@@ -120,12 +121,40 @@ export function createMcpServer(manager: WorkspaceManager): Server {
     }
   );
 
+  let pendingRootsSync: Promise<void> | null = null;
+  const refreshClientRoots = (): Promise<void> => {
+    if (!server.getClientCapabilities()?.roots) {
+      return Promise.resolve();
+    }
+    const sync = (async () => {
+      try {
+        const result = await server.listRoots(undefined, { timeout: 2000 });
+        manager.setClientRoots(result.roots ?? []);
+      } catch {
+        // Ignore transient or unsupported roots/list errors; fall back to explicit/initial workspace resolution.
+      }
+    })();
+    pendingRootsSync = sync;
+    void sync.finally(() => {
+      if (pendingRootsSync === sync) pendingRootsSync = null;
+    });
+    return sync;
+  };
+
+  server.oninitialized = () => {
+    void refreshClientRoots();
+  };
+  server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
+    await refreshClientRoots();
+  });
+
   server.setRequestHandler(ListResourcesRequestSchema, async () => listSeptumResources());
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => listSeptumResourceTemplates());
   server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => {
     const traceId = randomBytes(16).toString("hex");
     const startTime = performance.now();
     const uri = request.params.uri;
+    if (pendingRootsSync) await pendingRootsSync;
     return SeptumTelemetry.withTrace(traceId, async () => {
       try {
         const result = await readSeptumResource(manager, uri, extra.signal);
@@ -134,7 +163,7 @@ export function createMcpServer(manager: WorkspaceManager): Server {
           component: "resource",
           event: "resource_read_completed",
           fields: { uri: uri.slice(0, 128), duration_ms: Math.round(performance.now() - startTime) },
-          workspaceRoot: manager.initialRoot ?? null,
+          workspaceRoot: manager.primaryClientRoot ?? manager.initialRoot ?? null,
           emitStderr: false,
         });
         return result;
@@ -148,12 +177,12 @@ export function createMcpServer(manager: WorkspaceManager): Server {
             duration_ms: Math.round(performance.now() - startTime),
             message: (error instanceof Error ? error.message : String(error)).slice(0, 256),
           },
-          workspaceRoot: manager.initialRoot ?? null,
+          workspaceRoot: manager.primaryClientRoot ?? manager.initialRoot ?? null,
           emitStderr: false,
         });
         throw error;
       }
-    }, manager.initialRoot);
+    }, manager.primaryClientRoot ?? manager.initialRoot);
   });
   server.setRequestHandler(ListPromptsRequestSchema, async () => listSeptumPrompts());
   server.setRequestHandler(GetPromptRequestSchema, async (request) =>
@@ -170,6 +199,7 @@ export function createMcpServer(manager: WorkspaceManager): Server {
     const deadline = AbortSignal.timeout(RESOURCE_LIMITS.requestTimeoutMs);
     const signal = AbortSignal.any([extra.signal, deadline]);
     const traceId = randomBytes(16).toString("hex");
+    if (pendingRootsSync) await pendingRootsSync;
     let stage: ToolCallStage = "validation";
     let root: string | undefined;
     let action: string | undefined;
@@ -231,7 +261,7 @@ export function createMcpServer(manager: WorkspaceManager): Server {
         duration_ms: Math.round(performance.now() - startTime),
         input: root ? args ?? {} : {},
         error: error ? { code, message: root ? error.message : "Tool execution failed.", stack: root ? error.stack : undefined } : undefined,
-      }, shapedResponse, root ?? manager.initialRoot ?? null, root !== undefined);
+      }, shapedResponse, root ?? manager.primaryClientRoot ?? manager.initialRoot ?? null, root !== undefined);
       return shapedResponse;
     };
 
@@ -259,6 +289,9 @@ export function createMcpServer(manager: WorkspaceManager): Server {
       const rawWorkspace = args && typeof args === "object" ? explicitWorkspaceAlias(args as Record<string, unknown>) : undefined;
       const workspacePath = record.workspace_path ?? (typeof rawWorkspace === "string" ? rawWorkspace : undefined);
       const knownRoots = manager.activeRoots;
+      for (const clientRoot of manager.clientRoots) {
+        if (!knownRoots.includes(clientRoot)) knownRoots.push(clientRoot);
+      }
       if (manager.initialRoot && !knownRoots.includes(manager.initialRoot)) {
         knownRoots.unshift(manager.initialRoot);
       }
@@ -268,6 +301,7 @@ export function createMcpServer(manager: WorkspaceManager): Server {
         filePath: workspacePath ? undefined : extractPathHint(args),
         fallbackRoot,
         knownRoots,
+        clientRoots: manager.clientRoots,
       });
 
       if (!isWorkspaceInitialized(root)) {
@@ -335,14 +369,27 @@ export function createMcpServer(manager: WorkspaceManager): Server {
     } finally {
       lease?.release();
     }
-    }, manager.initialRoot);
+    }, manager.primaryClientRoot ?? manager.initialRoot);
   });
 
   return server;
 }
 
+export function resolveOptionalInitialWorkspace(options: { cwd?: string } = {}): string | undefined {
+  try {
+    return resolveServerWorkspace({ initial: true, cwd: options.cwd });
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runMCPServer(): Promise<void> {
-  const initialRoot = resolveServerWorkspace({ initial: true });
+  const initialRoot = resolveOptionalInitialWorkspace();
+  if (!initialRoot) {
+    console.error(
+      `[Septum MCP] Started without an initial workspace. Pass workspace_path or file_path on tool calls.`
+    );
+  }
   const manager = new WorkspaceManager();
   manager.initialRoot = initialRoot;
   manager.lastRoot = initialRoot;
@@ -391,23 +438,6 @@ export async function runMCPServer(): Promise<void> {
   server.onclose = cleanup;
   try {
     await server.connect(transport);
-    if (isWorkspaceInitialized(initialRoot)) {
-      const initial = manager.acquire(initialRoot);
-      try {
-        await initial.context.ready;
-      } catch (err) {
-        SeptumTelemetry.recordSystemEvent({
-          level: "WARN",
-          component: "mcp_server",
-          event: "initial_workspace_sync_failed",
-          fields: { message: (err instanceof Error ? err.message : String(err)).slice(0, 256) },
-          workspaceRoot: initialRoot,
-          emitStderr: false,
-        });
-      } finally {
-        initial.release();
-      }
-    }
     if (stopping) return;
     if (process.env.SEPTUM_MEMORY_DIAGNOSTICS === "1") {
       memoryTimer = setInterval(() => {

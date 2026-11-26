@@ -1,6 +1,7 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ConfigLoader, resolveDatabasePath } from '../core/config/loader.ts';
 import type { ValidatedSeptumConfig } from '../core/config/schema.ts';
 import { SeptumDatabase } from '../core/database/client.ts';
@@ -16,7 +17,40 @@ import { DomainRootConflictError } from '../core/config/domain-ownership.ts';
 import { WorkspaceBusyError } from '../core/errors.ts';
 import { SeptumTelemetry } from '../core/telemetry/telemetry.ts';
 
-export function resolveServerWorkspace(options: {workspacePath?: string; filePath?: string; fallbackRoot?: string; knownRoots?: string[]; initial?: boolean; cwd?: string} = {}): string {
+function isSafeWorkspaceRoot(root: string): boolean {
+  try {
+    return statSync(root).isDirectory() && root !== dirname(root) && root !== realpathSync(homedir()) && !isAppHostDirectory(root);
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeClientRoots(roots: ReadonlyArray<{ uri?: string }>): string[] {
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of roots) {
+    if (!entry?.uri || typeof entry.uri !== 'string') continue;
+    let rawPath: string;
+    try {
+      if (entry.uri.startsWith('file://')) {
+        rawPath = fileURLToPath(entry.uri);
+      } else if (isAbsolute(entry.uri)) {
+        rawPath = entry.uri;
+      } else {
+        continue;
+      }
+      const canonical = realpathSync(rawPath);
+      if (!isSafeWorkspaceRoot(canonical) || seen.has(canonical)) continue;
+      seen.add(canonical);
+      normalized.push(canonical);
+    } catch {
+      // Ignore invalid or inaccessible client root URIs.
+    }
+  }
+  return normalized;
+}
+
+export function resolveServerWorkspace(options: {workspacePath?: string; filePath?: string; fallbackRoot?: string; knownRoots?: string[]; clientRoots?: string[]; initial?: boolean; cwd?: string} = {}): string {
   const cwd = options.cwd || process.cwd();
   const explicit = options.workspacePath || (!options.filePath ? process.env.SEPTUM_WORKSPACE_ROOT || process.env.WORKSPACE_ROOT : undefined);
   let root: string;
@@ -31,6 +65,8 @@ export function resolveServerWorkspace(options: {workspacePath?: string; filePat
     } else {
       root = findProjectRoot(absTarget);
     }
+  } else if (options.clientRoots && options.clientRoots.length > 0) {
+    root = options.clientRoots.find(isWorkspaceInitialized) ?? options.clientRoots[0]!;
   } else if (options.fallbackRoot) {
     root = options.fallbackRoot;
   } else {
@@ -38,7 +74,7 @@ export function resolveServerWorkspace(options: {workspacePath?: string; filePat
     root = cwd;
   }
   root = realpathSync(root);
-  if (!statSync(root).isDirectory() || root === dirname(root) || root === realpathSync(homedir()) || isAppHostDirectory(root)) throw new Error(`Unsafe Septum serve workspace: ${root}`);
+  if (!isSafeWorkspaceRoot(root)) throw new Error(`Unsafe Septum serve workspace: ${root}`);
 
   // SV-04: Validate file-workspace consistency when both are present
   if (options.workspacePath && options.filePath && isAbsolute(options.filePath)) {
@@ -83,7 +119,17 @@ export class WorkspaceManager {
   private idleTimer: ReturnType<typeof setInterval>;
   initialRoot?: string;
   lastRoot?: string;
+  private _clientRoots: string[] = [];
   get activeRoots(): string[] { return [...this.contexts.keys()]; }
+  get clientRoots(): string[] { return [...this._clientRoots]; }
+  get primaryClientRoot(): string | undefined {
+    if (this._clientRoots.length === 0) return undefined;
+    return this._clientRoots.find(isWorkspaceInitialized) ?? this._clientRoots[0];
+  }
+  setClientRoots(roots: ReadonlyArray<{ uri?: string }>): string[] {
+    this._clientRoots = normalizeClientRoots(roots);
+    return [...this._clientRoots];
+  }
   constructor(private readonly now: () => number = Date.now) {
     this.idleTimer = setInterval(() => {
       void this.expireIdle().catch(error =>
@@ -92,7 +138,7 @@ export class WorkspaceManager {
           component: 'workspace_manager',
           event: 'idle_expiration_failed',
           fields: { message: String(error).slice(0, 256) },
-          workspaceRoot: this.lastRoot ?? this.initialRoot ?? null,
+          workspaceRoot: this.lastRoot ?? this.primaryClientRoot ?? this.initialRoot ?? null,
         })
       );
     }, 60_000);

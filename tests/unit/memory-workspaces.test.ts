@@ -5,6 +5,7 @@ import {mkdtempSync,mkdirSync,writeFileSync,rmSync,symlinkSync} from 'node:fs';
 import {tmpdir,homedir} from 'node:os';
 import {join} from 'node:path';
 import {WorkspaceManager,resolveServerWorkspace} from '../../src/mcp/workspace-manager.ts';
+import {resolveOptionalInitialWorkspace} from '../../src/mcp/server.ts';
 
 function fixture(){const parent=mkdtempSync(join(tmpdir(),'septum-context-'));const roots=Array.from({length:6},(_,i)=>{const root=join(parent,String(i));mkdirSync(join(root,'src'),{recursive:true});writeFileSync(join(root,'package.json'),'{"name":"fixture"}');writeFileSync(join(root,'src/a.ts'),'export function a() {}');return root;});return{parent,roots};}
 describe('workspace admission and leases',()=>{
@@ -15,7 +16,7 @@ describe('workspace admission and leases',()=>{
   const f=fixture();let now=0;const manager=new WorkspaceManager(()=>now);try{const lease=manager.acquire(f.roots[0]);await lease.context.ready;lease.release();now=600001;await manager.expireIdle();expect(manager.size).toBe(0);const again=manager.acquire(f.roots[0]);await again.context.ready;expect(again.context.repo.getFileByPath('src/a.ts')).not.toBeNull();again.release();}finally{await manager.close();rmSync(f.parent,{recursive:true,force:true});}
  });
  it('keeps explicit unmarked directories exact, canonicalizes aliases and rejects broad roots',()=>{
-  const f=fixture();try{const plain=join(f.parent,'plain');mkdirSync(plain);const alias=join(f.parent,'alias');symlinkSync(plain,alias);expect(resolveServerWorkspace({workspacePath:plain})).toBe(plain);expect(resolveServerWorkspace({workspacePath:alias})).toBe(plain);expect(()=>resolveServerWorkspace({workspacePath:homedir()})).toThrow();expect(()=>resolveServerWorkspace({workspacePath:'/'})).toThrow();expect(()=>resolveServerWorkspace({initial:true,cwd:plain})).toThrow('SEPTUM_WORKSPACE_ROOT');}finally{rmSync(f.parent,{recursive:true,force:true});}
+  const f=fixture();try{const plain=join(f.parent,'plain');mkdirSync(plain);const alias=join(f.parent,'alias');symlinkSync(plain,alias);expect(resolveServerWorkspace({workspacePath:plain})).toBe(plain);expect(resolveServerWorkspace({workspacePath:alias})).toBe(plain);expect(()=>resolveServerWorkspace({workspacePath:homedir()})).toThrow();expect(()=>resolveServerWorkspace({workspacePath:'/'})).toThrow();expect(()=>resolveServerWorkspace({initial:true,cwd:plain})).toThrow('SEPTUM_WORKSPACE_ROOT');expect(resolveOptionalInitialWorkspace({cwd:plain})).toBeUndefined();expect(resolveOptionalInitialWorkspace({cwd:homedir()})).toBeUndefined();expect(resolveOptionalInitialWorkspace({cwd:f.roots[0]})).toBe(f.roots[0]);}finally{rmSync(f.parent,{recursive:true,force:true});}
  });
 });
 
