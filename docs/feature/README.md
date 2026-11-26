@@ -2,7 +2,7 @@
 
 This directory documents implemented behavior, tool contracts, and known limitations for version `0.5.4` ([package.json](../../package.json)). Installed binaries or running MCP processes may differ if built from another revision.
 
-Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. The stdio server exposes five MCP tools (four analysis tools plus the app-only `septum_app` entrypoint), five resources (plus one domain resource template) and five workflow prompts. CLI commands initialize and synchronize the index, summarize telemetry, audit boundaries and run hooks. The index describes static source evidence.
+Septum indexes selected source declarations, imports, domain ownership and static entrypoints in SQLite. The stdio server exposes five MCP tools (four analysis tools plus the `septum_app` UI entrypoint), five resources (plus one domain resource template) and five workflow prompts. CLI commands initialize and synchronize the index, summarize telemetry, audit boundaries and run hooks. The index describes static source evidence.
 
 ## Feature documents
 
@@ -32,7 +32,7 @@ Septum indexes selected source declarations, imports, domain ownership and stati
 | `hook pre-write` | Read a supported JSON edit payload from stdin and evaluate candidate imports |
 | `help`, `version` | Show CLI information; no command also shows help |
 
-The package script named `ingest` invokes `sync`; `ingest` is not a CLI subcommand. Canonical MCP names are `septum_map`, `septum_symbol`, `septum_slice`, `septum_boundary` and the app-only `septum_app`. Argument normalizers accept aliases, but examples here use canonical inputs.
+The package script named `ingest` invokes `sync`; `ingest` is not a CLI subcommand. Canonical MCP names are `septum_map`, `septum_symbol`, `septum_slice`, `septum_boundary` and `septum_app`. Argument normalizers accept aliases, but examples here use canonical inputs.
 
 ## Reading results
 

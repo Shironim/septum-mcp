@@ -20,7 +20,7 @@ For `septum://health`, when no active context is loaded, the server first reads 
 
 ## Opening the panel
 
-Hosts that support Septum’s app entrypoint can open the panel through their app controls. The `septum_app` tool carries the UI resource metadata and has app-only visibility. `septum_map`, `septum_slice`, and `septum_boundary` provide analysis data. On an uninitialized workspace, the app entrypoint returns the same `NOT_INDEXED` catalog diagnostic as `septum_map`.
+Hosts that support Septum’s app entrypoint can open the panel through their app controls or when the model calls `septum_app`. The `septum_app` tool carries the UI resource metadata (`visibility: ["model", "app"]`) and Antigravity `aux_pane`/`global` entrypoints so calling it opens the side pane rather than rendering inline. `septum_map`, `septum_slice`, and `septum_boundary` provide analysis data. On an uninitialized workspace, the app entrypoint returns the same `NOT_INDEXED` catalog diagnostic as `septum_map`.
 
 ## Prompts
 
@@ -28,7 +28,7 @@ Hosts that support Septum’s app entrypoint can open the panel through their ap
 
 | Prompt | Arguments | Instructions returned |
 | --- | --- | --- |
-| `open-apps` | Optional `workspace_path` | Open Septum Architecture through the host’s app controls if available. Run `septum_map` to inspect coverage and report next steps. Read `septum://apps` for partial-file samples when supported. |
+| `open-apps` | Optional `workspace_path` | Call `septum_app` to open Septum Architecture in the side pane, inspect coverage via `septum_map` / `septum://apps`, and report next steps. |
 | `audit-coupling` | Optional `domain`, `workspace_path` | Run `septum_map` and `septum_boundary` (`scope: "domain"` or `"all"`), then rank circular dependencies, forbidden imports with `file:line`, and high fan-out domains |
 | `check-staged` | Optional `workspace_path` | Run `septum_boundary` with `scope: "staged"` before commit, list any violations with `file:line` and rule, and propose refactors |
 | `plan-refactor` | Optional `target`, `workspace_path` | Run `septum_symbol` (`action: "impact"`) on the target symbol or file, inspect domain dependency policies via `septum_map`, and outline a leaf-to-core migration order |
